@@ -1,0 +1,263 @@
+---
+title: 0.1 CPU vs GPU
+description: Why a CPU is built to finish one task quickly and a GPU to finish many tasks at once, and how Amdahl's law decides which one wins for a given program.
+sidebar:
+  order: 1
+banner:
+  content: Draft chapter. If something is wrong or unclear, use the edit link at the bottom of the page.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import CpuVsGpu from '@sims/cpu-vs-gpu/CpuVsGpu.astro';
+import CodeTabs from '@components/CodeTabs.astro';
+import { gpuById } from '@sim-core/gpu-specs';
+import { totals } from '@sims/gpu-architecture/model';
+import cuda from '@kernels/ch0-1-cpu-vs-gpu/cuda/saxpy.cu?raw';
+import numba from '@kernels/ch0-1-cpu-vs-gpu/numba/saxpy.py?raw';
+import triton from '@kernels/ch0-1-cpu-vs-gpu/triton/saxpy.py?raw';
+
+export const h100 = gpuById('h100');
+export const fmt = (n) => n.toLocaleString('en-US');
+
+The {h100.name} has {fmt(totals(h100).cudaCores)} FP32 arithmetic units. A
+desktop CPU has a small number of cores by comparison. If the GPU has so many
+more units, why does every program not run on it? And why does the CPU still
+run the start of every CUDA program?
+
+The answer is that the two chips are built to win different races. This
+chapter explains the two races, then gives you a formula that predicts which
+chip wins for a given program.
+
+## Latency and throughput
+
+Two numbers describe how fast a machine is, and they are not the same thing.
+
+- **Latency** is how long one task takes from start to finish.
+- **Throughput** is how many tasks finish per second.
+
+A single checkout lane with a very fast cashier has low latency: your groceries
+are scanned quickly. Twenty lanes with slower cashiers have high throughput:
+more customers leave the shop every minute, even though each one waits longer
+at the till. Which shop is better depends on how many customers there are.
+
+## Two designs
+
+A CPU is built for latency. Each core spends much of its silicon on making one
+thread fast: large caches keep data close, branch predictors guess which way
+the code will go, and out-of-order logic finds other instructions to run while
+one waits for memory. The CUDA Programming Guide puts it this way: a CPU runs
+a serial sequence of operations as fast as possible and can run "a few tens"
+of these threads in parallel.
+
+A GPU is built for throughput. It spends its silicon on many simple arithmetic
+lanes instead, and runs thousands of threads at once. Each thread is slower
+than a CPU thread, but the total work finished per second is far higher.
+Chapter 1 shows where those lanes sit inside the chip.
+
+Neither design is better in general. The GPU only wins when there is enough
+work that can be done at the same time to keep its lanes busy.
+
+## Amdahl's law
+
+Most programs have two kinds of work. Some steps can be split across many
+workers, such as adding two arrays element by element. Other steps must run in
+order, one after another, such as reading a file or making a decision that the
+next step depends on.
+
+Call the fraction of the run time that can be split up `p`, and the number of
+workers `N`. If the parallel part runs `N` times faster and the serial part
+does not speed up at all, the speedup over one worker is:
+
+```
+speedup = 1 / ((1 - p) + p / N)
+```
+
+This is **Amdahl's law**, after Gene Amdahl, who made the argument in 1967.
+Try it with `p = 0.9`:
+
+- With 8 workers: `1 / (0.1 + 0.9 / 8) = 1 / 0.2125`, about 4.71.
+- With 1000 workers: `1 / (0.1 + 0.9 / 1000) = 1 / 0.1009`, about 9.91.
+
+Going from 8 to 1000 workers only doubles the speedup. As `N` grows, `p / N`
+shrinks to nothing and the speedup approaches `1 / (1 - p)`, which is 10 for
+`p = 0.9`. The serial 10% sets a ceiling that no number of workers can break.
+
+There is a second catch for the GPU. Its serial part runs on one of its own
+threads, which is slow. So a GPU does not only fail to speed up the serial
+part: it runs it slower than a CPU would.
+
+## The race
+
+The simulation runs one job on three teams. The CPU team has a few fast
+workers. The GPU team has many slow ones. The serial part of the job can only
+use one worker on each team. The third team runs the serial part on one CPU
+worker and the parallel part on the GPU workers.
+
+Before you press Play, predict which of the first two teams finishes first at
+`p` = 90%. Then move `p` to 99% and run it again. Finally, find the value of
+`p` where the winner changes.
+
+<CpuVsGpu />
+
+The table shows Amdahl's law for each team, with `N` set to the team's number
+of workers. The speedup the race reaches can be a little lower than the
+formula, because the last round of parallel work takes a full round even when
+only some workers have a unit left.
+
+<Aside type="note">
+  The worker counts and speeds in the simulation are made up to show the idea.
+  A real CPU core is not exactly four times as fast as a GPU thread, and real
+  programs do not run all their serial work first. The shape of the result is
+  what carries over: a large serial fraction favors the CPU, a small one favors
+  the GPU.
+</Aside>
+
+## Why real programs use both
+
+The third team in the race is how CUDA programs are written. The CPU, called
+the **host**, runs the serial parts: it reads input, makes decisions, and
+launches work. The GPU, called the **device**, runs the parallel parts as
+**kernels**. Each chip does the kind of work it is built for.
+
+The simulation leaves out one cost that real programs pay: the data has to
+move between the CPU's memory and the GPU's memory, and that copy takes time.
+A job with little arithmetic per element can spend longer copying than
+computing. The code below measures both, so you can see this on your own
+machine.
+
+## The code
+
+SAXPY computes `y = a * x + y` for two arrays `x` and `y` and a number `a`.
+The name comes from the BLAS library: single precision, a times x plus y.
+Every element is independent of the others, so `p` is close to 1. It is the
+smallest kernel that is still useful, and later chapters build on it.
+
+Each file runs SAXPY once on the CPU and once on the GPU, checks that the two
+results match, and prints the time each one took. The tests in
+`kernels/ch0-1-cpu-vs-gpu/` check every version against NumPy.
+
+<CodeTabs
+	cuda={cuda}
+	numba={numba}
+	triton={triton}
+	titles={{ cuda: 'cuda/saxpy.cu', numba: 'numba/saxpy.py', triton: 'triton/saxpy.py' }}
+/>
+
+What to notice:
+
+- The CPU version is a loop over every element, run by one thread.
+- The GPU version has no loop. Each GPU thread handles one element, finds it
+  with `blockIdx.x * blockDim.x + threadIdx.x`, and skips the store if that
+  index is past the end. Chapter 2 explains both lines in detail.
+- The number of blocks is rounded up with `(n + threads - 1) / threads`, so a
+  size like 1000 that is not a multiple of 256 is still covered.
+- The first GPU launch is not timed. It includes one-time setup work, such as
+  loading the kernel onto the GPU or, in Numba and Triton, compiling it.
+
+## Measure it yourself
+
+This page gives no speedup figure, because the answer depends on your CPU,
+your GPU, and how the two are connected. Run the code and look at your own
+numbers:
+
+```sh
+cd kernels/ch0-1-cpu-vs-gpu
+make -C cuda run
+python numba/saxpy.py
+python triton/saxpy.py
+```
+
+Things to look for:
+
+- Compare the GPU kernel time alone with the CPU loop time. Then add the copy
+  time and compare again. Which one decides the winner?
+- Run with a small size, for example `./cuda/saxpy 1000`. Does the GPU still
+  win?
+- The Numba and Triton times include copying the data in and out. Run them
+  twice and check how much the numbers move between runs.
+
+On a machine without an NVIDIA GPU, the Python versions run on the CPU in a
+simulator, so their GPU times say nothing about real hardware.
+
+## Exercises
+
+**1. Apply the formula.** A program spends 95% of its time in work that can be
+split up. What speedup does Amdahl's law give with 8 workers, with 1000
+workers, and with an unlimited number?
+
+<details>
+<summary>Answer</summary>
+
+With 8 workers: `1 / (0.05 + 0.95 / 8) = 1 / 0.16875`, about 5.93.
+With 1000 workers: `1 / (0.05 + 0.95 / 1000) = 1 / 0.05095`, about 19.63.
+With unlimited workers, `p / N` goes to 0 and the speedup approaches
+`1 / 0.05 = 20`. The 1000 workers already get you almost all of it.
+
+</details>
+
+**2. Find the crossover.** In the simulation, keep the default job size and
+worker counts. What is the smallest whole-number `p` at which the GPU team
+finishes before the CPU team?
+
+<details>
+<summary>Answer</summary>
+
+97%. At 96% the serial part is 400 units and the parallel part 9,600. The CPU
+takes 400 + 9,600 / 8 = 1,600 ticks, and the GPU takes 4 * 400 + 4 * 10 rounds
+= 1,640 ticks, so the CPU still wins by 40. At 97% the CPU takes
+300 + 1,213 = 1,513 ticks (9,700 / 8 rounds up to 1,213 rounds) and the GPU
+takes 1,200 + 40 = 1,240.
+
+</details>
+
+**3. Pick the chip.** A program spends 30% of its time in a loop that splits
+perfectly across workers, and the rest in serial code. What is the best
+speedup any number of workers can give? Would you move it to a GPU?
+
+<details>
+<summary>Answer</summary>
+
+`1 / (1 - 0.3) = 1 / 0.7`, about 1.43, and that is with unlimited workers.
+On a GPU the serial 70% would also run on a slow thread, so the program would
+likely get slower. Keep it on the CPU, or find a way to make more of it
+parallel first.
+
+</details>
+
+**4. Too few units.** In the simulation, set `p` to 99% and the job size to
+1,000 units. How many GPU workers are idle during the parallel part? Now move
+the GPU workers up to 2,000. Does the GPU team finish sooner?
+
+<details>
+<summary>Answer</summary>
+
+The parallel part is 990 units, so 990 workers are busy and 10 of the 1,000
+are idle. The GPU team finishes at 4 * 10 + 4 * 1 = 44 ticks. With 2,000
+workers it still takes one round, so it still finishes at 44 ticks, and now
+1,010 workers are idle. More workers only help when there is work for them.
+
+</details>
+
+**5. Run it.** Run `pytest kernels/ch0-1-cpu-vs-gpu`, then run the CUDA
+version on a GPU with the default size and with `./cuda/saxpy 1000`. For each
+size, which is larger: the copy time or the kernel time?
+
+<details>
+<summary>Answer</summary>
+
+There is no single right number; it depends on your machine. What you should
+see is that SAXPY does one multiply and one add for every 12 bytes it reads
+and writes, so it is limited by how fast data moves. Copying the inputs over
+the link between the CPU and the GPU is usually slower than the GPU reading
+its own memory, so the copy often takes longer than the kernel. At 1000
+elements, the fixed cost of each call can be larger than the work itself.
+
+</details>
+
+## Further reading
+
+- [CUDA Programming Guide: the benefits of using GPUs](https://docs.nvidia.com/cuda/cuda-programming-guide/01-introduction/introduction.html#the-benefits-of-using-gpus), NVIDIA's own comparison of CPU and GPU design goals.
+- [CUDA C++ Best Practices Guide: strong scaling and Amdahl's law](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#strong-scaling-and-amdahl-s-law), with Gustafson's law for problems that grow with the machine.
+- [An easy introduction to CUDA C and C++](https://developer.nvidia.com/blog/easy-introduction-cuda-c-and-c/), which walks through a SAXPY program line by line, and [How to implement performance metrics in CUDA C/C++](https://developer.nvidia.com/blog/how-implement-performance-metrics-cuda-cc/), which times it with CUDA events.
+- [Six ways to SAXPY](https://developer.nvidia.com/blog/six-ways-saxpy/), the same kernel in six languages and libraries.
+- [Triton tutorial: vector addition](https://triton-lang.org/main/getting-started/tutorials/01-vector-add.html), the block-level version of a kernel like SAXPY.
