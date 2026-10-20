@@ -1,0 +1,7 @@
+# torch is installed from https://download.pytorch.org/whl/cu132 (see Dockerfile).
+torch==2.14.1
+triton==3.8.0
+numba-cuda==0.30.4
+numpy==2.5.4
+pytest==9.1.1
+jupyterlab==4.6.4

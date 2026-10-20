@@ -1,0 +1,24 @@
+Course content license
+
+Copyright (c) 2026 GPU Engineering contributors
+
+The course text, diagrams and simulation designs under site/src/content/ are
+licensed under the Creative Commons Attribution-ShareAlike 4.0 International
+License (CC BY-SA 4.0). The full legal text is at:
+
+    https://creativecommons.org/licenses/by-sa/4.0/legalcode
+
+Everything else in this repository, including the kernels, the simulation
+source code and the site code, is licensed under the MIT License in LICENSE.
+
+Attribution
+
+When you reuse or adapt this content, give credit in this form, or one that
+carries the same information:
+
+    "<Chapter title>" from GPU Engineering by the GPU Engineering
+    contributors, <link to the chapter or repository>, licensed under
+    CC BY-SA 4.0. <Say what you changed, if anything.>
+
+If you share an adapted version, it must be released under CC BY-SA 4.0 or a
+compatible license.
