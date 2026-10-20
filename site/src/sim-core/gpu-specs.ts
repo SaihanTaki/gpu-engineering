@@ -39,6 +39,7 @@ export const GPUS: GpuSpec[] = [
 		fp64PerSm: 2,
 		tensorPerSm: 8,
 		tensorGeneration: 'second',
+		// From the guide's throughput table: 16 results per clock per SM for SFU operations.
 		sfuPerSm: 16,
 		registerFileKbPerSm: 256,
 		l1SharedKbPerSm: 96,
@@ -69,6 +70,7 @@ export const GPUS: GpuSpec[] = [
 		fp64PerSm: 32,
 		tensorPerSm: 4,
 		tensorGeneration: 'third',
+		// From the guide's throughput table: 16 results per clock per SM for SFU operations.
 		sfuPerSm: 16,
 		registerFileKbPerSm: 256,
 		l1SharedKbPerSm: 192,
@@ -97,6 +99,7 @@ export const GPUS: GpuSpec[] = [
 		fp64PerSm: 64,
 		tensorPerSm: 4,
 		tensorGeneration: 'fourth',
+		// From the guide's throughput table: 16 results per clock per SM for SFU operations.
 		sfuPerSm: 16,
 		registerFileKbPerSm: 256,
 		l1SharedKbPerSm: 256,

@@ -360,3 +360,71 @@
 		transition: none;
 	}
 }
+
+/* GPU architecture sim */
+.sim-die {
+	fill: none;
+	stroke: var(--sim-muted);
+	stroke-width: 1.5;
+}
+.sim-box {
+	fill: var(--sim-block-b);
+	stroke: var(--sim-line);
+}
+.sim-box.is-cache {
+	fill: var(--sim-block-a);
+}
+.sim-box.is-dram {
+	fill: transparent;
+	stroke: var(--sim-muted);
+	stroke-dasharray: 5 3;
+}
+.sim-box.is-target,
+.sim-unit.is-target {
+	stroke: var(--sim-active);
+	stroke-width: 2;
+}
+.sim-unit {
+	fill: var(--sim-block-a);
+	stroke: var(--sim-line);
+}
+.sim-unit:is(.is-warp, .is-sfu, .is-int32) {
+	fill: var(--sim-block-b);
+}
+.sim-part {
+	cursor: pointer;
+}
+.sim-part.is-selected :is(.sim-box, .sim-unit) {
+	stroke: var(--sim-active);
+	stroke-width: 2;
+}
+.sim-parts {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.5rem;
+	margin-top: 0.75rem;
+}
+.sim-parts button {
+	font: inherit;
+	font-size: var(--sl-text-sm);
+	min-height: 44px;
+	padding: 0 0.8rem;
+	color: var(--sim-text);
+	background: transparent;
+	border: 1px solid var(--sim-muted);
+	border-radius: 4px;
+	cursor: pointer;
+}
+.sim-parts button[aria-pressed='true'] {
+	border-color: var(--sim-active);
+	box-shadow: inset 0 0 0 1px var(--sim-active);
+}
+.sim-parts button:focus-visible {
+	outline: 2px solid var(--sim-active);
+	outline-offset: 2px;
+}
+.sim-detail {
+	margin: 0.75rem 0 0;
+	min-height: 3em;
+	font-size: var(--sl-text-sm);
+}
