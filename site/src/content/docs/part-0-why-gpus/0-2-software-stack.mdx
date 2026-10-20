@@ -34,10 +34,10 @@ Four pieces of software sit between your code and the GPU:
 - **The CUDA Toolkit.** The compilers, libraries, headers and tools you build
   with, such as `nvcc`, `cuobjdump` and Nsight. It is a separate product from
   the driver.
-- **The CUDA runtime.** One library from the toolkit, with the API you used in
-  chapter 2: `cudaMalloc`, `cudaMemcpy` and the `<<<...>>>` launch. The runtime
-  API is built on top of the driver API. By default `nvcc` links it into your
-  program statically.
+- **The CUDA runtime.** One library from the toolkit, with the API chapter 2
+  uses: `cudaMalloc`, `cudaMemcpy` and the `<<<...>>>` launch. The runtime
+  API is built on top of the driver API. On Linux, `nvcc` links it into your
+  program statically by default.
 - **A compiler** that turns kernel source into code the GPU can run. For CUDA
   C++ that is `nvcc`. Numba and Triton bring their own.
 
@@ -132,8 +132,9 @@ everything is the same machinery.
 ## Follow one kernel
 
 The simulation follows SAXPY, `out[i] = a * x[i] + y[i]`, through each path.
-Pick a path, then step through the stages or click one. The code panel shows
-the real output of each stage for an A100 (`sm_80`), with the lines the
+Pick a path, then step through the stages or click one. For the Numba and Triton
+paths, the code panel shows the real output of each stage for an A100
+(`sm_80`); the CUDA C++ path shows the commands to run, with the lines the
 "Look for" note talks about highlighted.
 
 <CompilePipeline />
@@ -156,7 +157,7 @@ A few things the listings show:
   the address window of shared, local or constant memory. Triton's uses
   `ld.global.b32`, which names global memory directly. The SASS keeps the difference: `LD.E` against `LDG.E`.
 - **The PTX version depends on the tool.** Numba's PTX starts with
-  `.version 9.4`, written by NVVM from CUDA 13.4. Triton's starts with
+  `.version 9.4`, written by the NVVM in the `nvidia-nvvm` 13.4.92 package. Triton's starts with
   `.version 8.8`, because Triton derives the PTX version from the `ptxas` it
   bundles, which is from CUDA 12.9.
 
@@ -253,16 +254,17 @@ the global load.
 
 </details>
 
-**5. Run it.** Run `python kernels/ch0-2-software-stack/generate.py` with the
-versions pinned in `docker/requirements.txt`, then `git status`. Did any
+**5. Run it.** Run `python kernels/ch0-2-software-stack/generate.py`, then
+`git status`. Did any
 listing change? Then change `TRITON_BLOCK` in the script to 256, run it again,
 and look at `generated/triton.ttgir` and `triton.ptx`.
 
 <details>
 <summary>Answer</summary>
 
-With the same tool versions, nothing changes: for the same input and target
-the compilers write the same files. With `BLOCK` = 256 the TTIR tensors become
+With the tool versions in `generated/VERSIONS.txt`, nothing changes: for the
+same input and target the compilers write the same files. A different NVVM or
+`ptxas` can change the listings, which is why the versions are recorded. With `BLOCK` = 256 the TTIR tensors become
 `tensor<256x...>` and the TTGIR layout changes to `sizePerThread = [2]`. The
 128 threads now cover the block in one pass with 2 elements each, so the PTX
 has 4 `ld.global.b32` instead of 16. Restore the files with `git checkout`

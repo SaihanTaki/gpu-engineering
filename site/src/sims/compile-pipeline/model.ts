@@ -129,7 +129,7 @@ export const PATHS: Record<PathId, Path> = {
 				tool: 'ptxas',
 				file: 'generated/triton.sass',
 				lang: 'txt',
-				excerpt: { start: 'FFMA', end: 'EXIT ;' },
+				excerpt: { start: 'FFMA', end: 'STG.E [R4.64+0x80c]' },
 				look: ['FFMA', 'STG.E'],
 				made: 'A cubin for sm_80, shown as SASS by cuobjdump -sass.',
 				read: "Triton's launcher hands the cubin to the driver.",
