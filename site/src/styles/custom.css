@@ -911,3 +911,49 @@
 .occ-limits strong {
 	font-weight: 600;
 }
+
+/* Shared memory sim: tile loader */
+.tl-cell {
+	stroke: var(--sim-line);
+}
+.tl-cell.is-plain {
+	fill: transparent;
+}
+.tl-cell.is-strip {
+	fill: var(--sim-block-a);
+}
+.tl-cell.is-read {
+	fill: var(--sim-active);
+	stroke: var(--sim-active);
+}
+.tl-count.is-read {
+	fill: var(--sl-color-black);
+}
+.tl-outline {
+	fill: none;
+	stroke: var(--sim-text);
+	stroke-width: 2;
+}
+.ws-legend .tl-swatch.is-strip {
+	background: var(--sim-block-a);
+	border-color: var(--sim-line);
+}
+.ws-legend .tl-swatch.is-read {
+	background: var(--sim-active);
+	border-color: var(--sim-active);
+}
+.ws-legend .tl-swatch.is-outline {
+	background: transparent;
+	border: 2px solid var(--sim-text);
+}
+[data-sim='tile-loader'] select {
+	width: 100%;
+	max-width: 100%;
+}
+[data-sim='tile-loader'] input[type='range'] {
+	min-height: 44px;
+}
+[data-sim='tile-loader'] .expressive-code .copy button {
+	width: 44px;
+	height: 44px;
+}
