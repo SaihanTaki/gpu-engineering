@@ -1,0 +1,212 @@
+---
+title: 1. GPU architecture
+description: What is physically inside an NVIDIA GPU, from the whole chip down to one SM partition, and why it is built for many slow threads instead of a few fast ones.
+sidebar:
+  order: 1
+banner:
+  content: Draft chapter. If something is wrong or unclear, use the edit link at the bottom of the page.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import GpuArchitecture from '@sims/gpu-architecture/GpuArchitecture.astro';
+import { GPUS, gpuById } from '@sim-core/gpu-specs';
+import { totals, formatKb } from '@sims/gpu-architecture/model';
+
+export const a100 = gpuById('a100');
+export const t4 = gpuById('t4');
+export const fmt = (n) => n.toLocaleString('en-US');
+export const linkText = (url) => {
+	const { hostname, pathname } = new URL(url);
+	const last = pathname.split('/').filter(Boolean).at(-1);
+	return last ? `${hostname} (${last})` : hostname;
+};
+
+NVIDIA lists the {a100.name} with {fmt(totals(a100).cudaCores)} CUDA cores. The
+number is correct, but a CUDA core is not a core in the CPU sense. None of them
+can fetch an instruction or run a program by itself. This chapter shows what
+they are, how they are grouped, and what that grouping means for the code you
+write in the rest of the course.
+
+## From the chip to a core
+
+A GPU chip is built from four layers, from the outside in:
+
+1. **Memory.** Gigabytes of DRAM sit next to the GPU die, not on it. Everything
+   your kernel reads from a pointer starts here. CUDA calls it global memory.
+2. **The L2 cache.** One cache on the die, shared by everything else on it. All
+   traffic to and from DRAM goes through the L2.
+3. **Streaming multiprocessors (SMs).** The units that compute. The A100 and
+   H100 have over a hundred of them and the T4 has 40, all identical, all
+   working independently.
+4. **Partitions.** Each SM is split into four partitions. A partition has its
+   own warp scheduler, its own slice of the register file, and its own
+   execution units, including the FP32 units that NVIDIA counts as CUDA cores.
+
+So a CUDA core is one arithmetic lane inside a partition. The thing that
+actually runs instructions is the warp scheduler, which drives many lanes at
+once. That is the subject of chapter 4.
+
+Step through the zoom levels below. Pick a GPU, then select any part, by
+clicking it in the drawing or with the buttons under it, to read what it does.
+
+<GpuArchitecture />
+
+## Many threads, waiting cheaply
+
+A CPU core makes one thread fast. It has large caches to keep data close,
+branch predictors to guess what comes next, and out-of-order logic to find work
+while it waits. A GPU spends that silicon on more arithmetic units instead, and
+accepts that each thread is slow.
+
+The trick that makes this work is in the partition. A load from DRAM takes
+far longer to return than an arithmetic instruction takes to run. Rather than
+wait, the warp scheduler issues the next instruction of a different warp that
+is ready. Switching costs nothing, because every resident warp keeps its own
+registers in the register file the whole time. Nothing is saved or restored.
+
+This is why the register file is so large: {a100.registerFileKbPerSm} KB per SM
+on all three GPUs below, enough for 65,536 32-bit registers. It holds the state
+of every thread the SM is juggling at once. It is also why a GPU needs far more
+threads than it has cores. With only one warp per partition, little could hide
+the wait.
+
+<Aside type="note">
+  A thread on a GPU is not slower because its arithmetic is slow. It is slower
+  because it shares its partition with many other threads and only gets an
+  instruction issued when it is ready and picked. The total work done per
+  second is what is fast.
+</Aside>
+
+## The memory hierarchy
+
+The last zoom level in the simulation adds up each kind of storage across the
+whole chip. Small and fast storage is spread over the SMs; large and slow
+storage sits in one place.
+
+| Level | Where it is | Who can see it |
+|---|---|---|
+| Registers | In each partition | One thread |
+| L1 cache and shared memory | One block of memory per SM | The threads of one block share the shared memory part |
+| L2 cache | One per chip | Every SM |
+| DRAM (global memory) | Next to the die | Every SM, and the CPU through copies |
+
+One result surprises most people. Added over all SMs, the registers are not
+small. On the {t4.name} they hold {formatKb(totals(t4).registerFileKb)}, more
+than its {t4.l2Mb} MB L2 cache. Switch the simulation to the T4 and go to the
+last step to see it.
+
+## How this connects to your code
+
+Chapter 2 introduced blocks of threads. Here is where they go:
+
+- A block runs on one SM and does not move while it runs. Its threads can use
+  that SM's shared memory and wait for each other. By default, threads in
+  different blocks cannot, because their blocks may be on different SMs. The
+  H100 relaxes this with thread block clusters, which later chapters cover.
+- An SM can hold several blocks at once, as long as it has a free block slot
+  and enough registers, shared memory and warp slots for all of them.
+  Chapter 5 works out how many.
+- More SMs means more blocks running at the same time. A launch with fewer
+  blocks than the GPU has SMs leaves SMs idle.
+
+## The three GPUs in this course
+
+The simulations use these three products. Every figure is NVIDIA's.
+
+<table>
+	<thead>
+		<tr>
+			<th></th>
+			{GPUS.map((g) => <th scope="col">{g.name}</th>)}
+		</tr>
+	</thead>
+	<tbody>
+		<tr><th scope="row">Architecture</th>{GPUS.map((g) => <td>{g.architecture} (compute capability {g.computeCapability})</td>)}</tr>
+		<tr><th scope="row">SMs</th>{GPUS.map((g) => <td>{g.sms}</td>)}</tr>
+		<tr><th scope="row">FP32 cores per SM</th>{GPUS.map((g) => <td>{g.fp32PerSm}</td>)}</tr>
+		<tr><th scope="row">FP32 cores in total</th>{GPUS.map((g) => <td>{fmt(totals(g).cudaCores)}</td>)}</tr>
+		<tr><th scope="row">Tensor cores per SM</th>{GPUS.map((g) => <td>{g.tensorPerSm} ({g.tensorGeneration} generation)</td>)}</tr>
+		<tr><th scope="row">Register file per SM</th>{GPUS.map((g) => <td>{g.registerFileKbPerSm} KB</td>)}</tr>
+		<tr><th scope="row">L1 + shared memory per SM</th>{GPUS.map((g) => <td>{g.l1SharedKbPerSm} KB (up to {g.maxSharedKbPerSm} KB shared)</td>)}</tr>
+		<tr><th scope="row">Max resident warps per SM</th>{GPUS.map((g) => <td>{g.maxWarpsPerSm}</td>)}</tr>
+		<tr><th scope="row">L2 cache</th>{GPUS.map((g) => <td>{g.l2Mb} MB</td>)}</tr>
+		<tr><th scope="row">Memory</th>{GPUS.map((g) => <td>{g.memoryGb} GB {g.memory}, {fmt(g.memoryGbPerS)} GB/s</td>)}</tr>
+	</tbody>
+</table>
+
+NVIDIA publishes the T4's L2 size only for the TU104 chip it is built on. For
+the T4's bandwidth, the datasheet gives 300 GB/s and the Turing whitepaper
+320 GB/s; the table uses the datasheet. The H100 figure is from the shipping
+product page, not the 3,000 GB/s in the pre-launch whitepaper.
+
+## Look at your own GPU
+
+On a machine with an NVIDIA GPU, `nvidia-smi` prints the model, driver and
+memory. From Python, PyTorch reports the numbers this chapter uses:
+
+```python
+import torch
+
+p = torch.cuda.get_device_properties(0)
+print(p.name, f"compute capability {p.major}.{p.minor}")
+print("SMs:", p.multi_processor_count)
+print("L2 cache:", p.L2_cache_size // 2**20, "MB")
+print("Memory:", p.total_memory // 2**30, "GB")
+```
+
+Both work inside the course Docker image.
+
+## Exercises
+
+**1. Count the lanes.** An H100 SXM5 has 132 SMs with 128 FP32 cores each.
+How many FP32 cores does it have? Check your answer in the simulation.
+
+<details>
+<summary>Answer</summary>
+
+132 * 128 = 16,896.
+
+</details>
+
+**2. Registers per thread.** An A100 SM has 65,536 32-bit registers and can
+hold at most 2,048 threads (64 warps of 32). If every one of those threads is
+resident, how many registers can each thread use?
+
+<details>
+<summary>Answer</summary>
+
+65,536 / 2,048 = 32 registers per thread. A kernel that needs more registers
+per thread fits fewer threads on each SM. Chapter 5 turns this into the
+occupancy calculation.
+
+</details>
+
+**3. Fill the GPU.** You launch a kernel with 64 blocks on an A100. At most how
+many of its 108 SMs can be busy?
+
+<details>
+<summary>Answer</summary>
+
+64. A block never splits across SMs, so at least 44 SMs have nothing to do.
+This is one reason to launch many more blocks than there are SMs.
+
+</details>
+
+## Further reading
+
+- [CUDA Programming Guide: compute capabilities](https://docs.nvidia.com/cuda/cuda-programming-guide/05-appendices/compute-capabilities.html), the per-SM limits for every GPU generation.
+- [NVIDIA Ampere architecture in depth](https://developer.nvidia.com/blog/nvidia-ampere-architecture-in-depth/) and [NVIDIA Hopper architecture in depth](https://developer.nvidia.com/blog/nvidia-hopper-architecture-in-depth/), NVIDIA's own tour of the A100 and H100 SMs.
+
+Sources for each GPU in the table:
+
+{GPUS.map((g) => (
+	<p>
+		<strong>{g.name}:</strong>{' '}
+		{g.sources.map((url, i) => (
+			<>
+				{i > 0 && ', '}
+				<a href={url}>{linkText(url)}</a>
+			</>
+		))}
+	</p>
+))}

@@ -1,0 +1,90 @@
+---
+import SimFrame from '@components/SimFrame.astro';
+import { GPUS } from '@sim-core/gpu-specs';
+
+interface Props {
+	gpu?: (typeof GPUS)[number]['id'];
+}
+
+const { gpu = 'a100' } = Astro.props;
+---
+
+<SimFrame title="Zoom into a GPU" sim="gpu-architecture" config={{ gpu }}>
+	<Fragment slot="params">
+		<label class="sim-field">
+			<span>GPU</span>
+			<select name="gpu">
+				{GPUS.map((g) => <option value={g.id} selected={g.id === gpu}>{g.name} ({g.architecture})</option>)}
+			</select>
+		</label>
+	</Fragment>
+
+	<div class="sim-canvas" data-canvas><svg role="img" aria-label="Schematic of the selected GPU at the current zoom level"></svg></div>
+
+	<div class="sim-parts" role="group" aria-label="Parts at this zoom level" data-parts></div>
+	<p class="sim-detail" data-detail aria-live="polite"></p>
+
+	<Fragment slot="caption">
+		Unit counts and sizes are NVIDIA's figures for each product. The layout is a schematic: real dies place SMs, cache
+		and memory controllers differently, and some SMs on each die are disabled.
+	</Fragment>
+</SimFrame>
+
+<script>
+	import { Stepper } from '@sim-core/stepper';
+	import { bindControls } from '@sim-core/controls';
+	import { gpuById } from '@sim-core/gpu-specs';
+	import { components, describe, lastStep, levelAt } from './model';
+	import { render } from './view';
+
+	function mount(frame: HTMLElement) {
+		let gpu = gpuById(JSON.parse(frame.dataset.config!).gpu);
+		const stepper = new Stepper(lastStep, 1600);
+		const canvas = frame.querySelector<HTMLElement>('[data-canvas]')!;
+		const svgEl = canvas.querySelector('svg')!;
+		const partsEl = frame.querySelector<HTMLElement>('[data-parts]')!;
+		const detail = frame.querySelector<HTMLElement>('[data-detail]')!;
+		let selected = '';
+
+		const draw = () => {
+			const parts = components(gpu, levelAt(stepper.step));
+			if (!parts.some((p) => p.id === selected)) selected = parts[0].id;
+			render(svgEl, gpu, stepper.step, selected, Math.max(300, canvas.clientWidth), select);
+
+			partsEl.replaceChildren(
+				...parts.map((p) => {
+					const b = document.createElement('button');
+					b.type = 'button';
+					b.textContent = p.label;
+					b.setAttribute('aria-pressed', String(p.id === selected));
+					b.addEventListener('click', () => select(p.id, true));
+					return b;
+				}),
+			);
+			const current = parts.find((p) => p.id === selected)!;
+			detail.textContent = `${current.label}. ${current.detail}`;
+		};
+
+		function select(id: string, fromButton = false) {
+			// Redrawing replaces the hovered node, so skip no-op selections to avoid redraw loops.
+			if (id === selected) return;
+			selected = id;
+			draw();
+			// The buttons are rebuilt on draw; put keyboard focus back on the one just pressed.
+			if (fromButton) partsEl.querySelector<HTMLButtonElement>('[aria-pressed="true"]')?.focus({ preventScroll: true });
+		}
+
+		frame.querySelector<HTMLSelectElement>('select[name="gpu"]')!.addEventListener('change', (e) => {
+			gpu = gpuById((e.target as HTMLSelectElement).value);
+			draw();
+			syncControls(stepper.step);
+		});
+
+		const syncControls = bindControls(frame, stepper, (step) => describe(gpu, step));
+		stepper.onChange(draw);
+		new ResizeObserver(draw).observe(canvas);
+		draw();
+	}
+
+	document.querySelectorAll<HTMLElement>('[data-sim="gpu-architecture"]').forEach(mount);
+</script>
