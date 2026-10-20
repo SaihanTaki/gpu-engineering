@@ -1,0 +1,353 @@
+---
+title: 13. Reduction
+description: Summing an array on a GPU with a tree of adds, why sequential addressing keeps warps busy where interleaved addressing does not, how warp shuffles finish without barriers, and how blocks combine their partial sums.
+sidebar:
+  order: 13
+banner:
+  content: Draft chapter. If something is wrong or unclear, use the edit link at the bottom of the page.
+---
+
+import { Code } from '@astrojs/starlight/components';
+import ReductionTree from '@sims/reduction-tree/ReductionTree.astro';
+import CodeTabs from '@components/CodeTabs.astro';
+import { efficiency, lastStep, steps, totalsAt, warpLanes } from '@sims/reduction-tree/model';
+import cuda from '@kernels/ch13-reduction/cuda/reduce_kernels.cuh?raw';
+import numba from '@kernels/ch13-reduction/numba/reduce.py?raw';
+import triton from '@kernels/ch13-reduction/triton/reduce.py?raw';
+import summary from '@kernels/ch13-reduction/generated/summary.txt?raw';
+
+export const tot = (mode, block) => totalsAt({ mode, block }, lastStep({ mode, block }));
+export const pct = (t) => (100 * efficiency(t)).toFixed(1);
+export const i64 = tot('interleaved', 64);
+export const s64 = tot('sequential', 64);
+export const i256 = tot('interleaved', 256);
+export const s256 = tot('sequential', 256);
+export const w256 = tot('warp-final', 256);
+export const i128 = { mode: 'interleaved', block: 128 };
+export const busy = (c, k) => warpLanes(steps(c)[k]).filter((l) => l > 0).length;
+
+Adding up an array is the simplest computation that does not split into
+independent pieces. Every element of a vector add (chapter 3) has its own
+output; a sum has one output that depends on every input. A single thread
+does `n - 1` adds one after another. A million threads that each
+`atomicAdd` their element into one float all update the same address, and
+the memory system has to apply those updates one at a time (chapter 15).
+
+The way out is a tree. Add the elements in pairs, then the pairs in pairs,
+and after log<sub>2</sub> n levels one value is left. The work is still
+`n - 1` adds, but each level is one parallel step. How you map that tree onto
+threads and warps decides how much of the GPU does useful work, and this
+chapter walks through the classic sequence of fixes from Mark Harris's
+*Optimizing Parallel Reduction in CUDA*.
+
+## A tree inside one block
+
+Start with one block of `blockDim.x` threads, a power of two, and one element
+per thread. Each thread copies its element into a shared memory array
+`sdata[]` (chapter 7), and the block waits at `__syncthreads()`. Then the
+loop runs one tree level per iteration, with a barrier after each so no
+thread reads a slot before its owner has written it. At the end, thread 0
+holds the block's sum in `sdata[0]`.
+
+Which thread adds which pair is the whole question.
+
+### Interleaved addressing
+
+Harris's first kernel keeps every partial sum where its leftmost element
+started. At stride `s`, the threads whose index is a multiple of `2s` add the
+value `s` slots to their right:
+
+```cpp
+for (unsigned s = 1; s < blockDim.x; s *= 2) {
+    if (tid % (2 * s) == 0) {
+        sdata[tid] += sdata[tid + s];
+    }
+    __syncthreads();
+}
+```
+
+This is correct, and it wastes most of each warp. At stride 1, threads 0, 2,
+4 and so on work: half the lanes of every warp. At stride 2 it is a quarter,
+then an eighth. The working threads are spread across the whole block, so
+every warp still has to issue the add, and each issue does work for only a
+few of its 32 lanes. That is divergence from chapter 4, at every level.
+
+### Sequential addressing
+
+Harris's third kernel turns the tree around. At stride `s`, threads 0 to
+`s - 1` each add the value `s` slots away, and the stride starts at half the
+block and halves each level:
+
+```cpp
+for (unsigned s = blockDim.x / 2; s > 0; s /= 2) {
+    if (tid < s) {
+        sdata[tid] += sdata[tid + s];
+    }
+    __syncthreads();
+}
+```
+
+Now the working threads are packed at the start of the block. With 256
+threads, the first level uses warps 0 to 3 with all 32 lanes on and warps 4
+to 7 skip the add entirely. Only when `s` drops below 32 does a warp run with
+some lanes off, and by then only one warp has any work. Counting one warp
+instruction for every warp with at least one lane on, the add costs
+{i256.warpIssues} warp instructions with interleaved addressing and
+{s256.warpIssues} with sequential addressing, for the same {i256.adds} adds.
+
+Harris's second kernel, between these two, removes the divergence by
+computing `index = 2 * s * tid` instead. It packs the working threads too,
+but neighbouring lanes then touch shared memory words `2s` apart, which is a
+bank conflict (chapter 8). Sequential addressing has lanes read consecutive
+words, `sdata[tid + s]` for consecutive `tid`, so it is free of both problems.
+
+### The last warp, with shuffles
+
+The last six levels of sequential addressing run on fewer than 64 values,
+all inside warp 0. They still pay a `__syncthreads()` each, and two shared
+memory loads and a store per level. A warp can exchange registers
+directly instead:
+
+```cpp
+if (tid < 32) {
+    float v = sdata[tid] + sdata[tid + 32];
+    for (int offset = 16; offset > 0; offset /= 2) {
+        v += __shfl_down_sync(FULL_MASK, v, offset);
+    }
+    if (tid == 0) out[blockIdx.x] = v;
+}
+```
+
+`__shfl_down_sync(mask, v, offset)` returns the `v` of the lane `offset`
+places higher, for every lane named in `mask` at once. After offsets 16, 8,
+4, 2 and 1, lane 0 holds the sum of the warp's 32 values. Lanes near the top
+have no lane `offset` above them and get their own value back, so they
+compute numbers nobody reads; that costs nothing, because the warp issues one
+instruction either way. No barrier is needed: the `_sync` in the name means
+the hardware brings the lanes in `mask` together for the exchange.
+
+Harris's slides do the same unrolling through a `volatile` shared array,
+relying on the 32 lanes of a warp executing in lockstep. Since Volta, lanes
+of a warp can be scheduled independently (chapter 4), and NVIDIA's guidance
+is that this kind of implicit warp-synchronous code is unsafe. The shuffle
+version says what it needs explicitly.
+
+## One block, level by level
+
+The simulation runs one block through the three kernels. Each cell is one
+thread's slot in `sdata[]`, grouped by warp, and the bar under it shows
+whether that thread works at this level. Arrows run from each value read to
+the slot it is added into. Pick a kernel and a block size, guess how many
+warps issue the first add, then step.
+
+<ReductionTree />
+
+Things to try:
+
+- **Interleaved, 64 threads.** At stride 1 both warps work with 16 lanes each.
+  At stride 32, thread 0 alone does the add. Over the whole run that is
+  {i64.warpIssues} warp instructions with {pct(i64)}% of their lane slots
+  used.
+- **Sequential, 64 threads.** The first level gives warp 0 all 32 lanes and
+  warp 1 nothing. The run needs {s64.warpIssues} warp instructions and uses
+  {pct(s64)}% of their lane slots.
+- **Shuffle final warp, 256 threads.** Watch the register row. The run has
+  {w256.divergentIssues} divergent warp instructions and {w256.barriers} loop
+  barriers, against {s256.divergentIssues} and {s256.barriers} for plain
+  sequential addressing, and {w256.sharedRequests} shared memory requests
+  instead of {s256.sharedRequests}.
+
+These are counts from a model, not times. The sim does not model what each
+instruction costs, latency or the global loads, which on a real GPU take most
+of the time. A reduction does one add per element loaded, so a good one is
+limited by memory bandwidth (chapter 19). The point of every fix in this
+chapter is to keep the add tree out of the way of the loads.
+
+## From blocks to the whole grid
+
+A block can wait for its own threads, but there is no barrier between blocks
+in an ordinary launch: a block cannot know when the others are done. So the
+block sums have to be combined some other way.
+
+- **Launch again.** Each block writes its sum to `out[blockIdx.x]`. A second
+  launch reduces those partial sums, and so on until one value is left. With
+  256 threads per block, 2<sup>22</sup> elements need three launches: 16,384
+  partial sums, then 64, then 1. `reduce.cu` does this for the first three
+  kernels.
+- **One atomic per block.** Each block adds its sum into one result with
+  `atomicAdd`. That is one atomic per block instead of one per element, so
+  contention on the result is small. `reduce_atomic` does this in one launch.
+- **More elements per thread.** One element per thread spends a whole tree
+  on every 256 elements. Harris's last kernel, and the Kepler-era rewrite by
+  Justin Luitjens, launch only a few blocks per SM and have each thread first
+  add many elements in a register with a grid-stride loop. The tree then
+  runs once per block over values that already summarize thousands of
+  elements. `reduce_atomic` combines all three ideas: grid-stride loop, a
+  shuffle reduction in every warp, the warp sums through shared memory, a
+  second shuffle reduction in warp 0, and one `atomicAdd`.
+
+Float addition is not associative, so the tree, NumPy and a CPU loop round
+differently and can disagree in the last bits. With atomics, the order in
+which blocks add their sums changes from run to run, so two runs on the same
+input can give different bits. The tests in `kernels/ch13-reduction` use
+whole numbers from -3 to 3: while every partial sum stays below 2<sup>24</sup>,
+float32 represents them exactly and every order gives the same answer.
+
+## The code
+
+All three languages have the multi-pass and the atomic versions.
+
+<CodeTabs
+	cuda={cuda}
+	numba={numba}
+	triton={triton}
+	titles={{ cuda: 'cuda/reduce_kernels.cuh', numba: 'numba/reduce.py', triton: 'triton/reduce.py' }}
+>
+	<div slot="triton-note">
+		Triton has no threads to arrange, so there is no interleaved or sequential choice to make. A program loads a block
+		of 1024 elements as one tensor and calls `tl.sum(x, axis=0)`; the compiler builds the tree. `partial_sums_kernel`
+		writes one sum per program and the host calls it again on the partial sums. `atomic_sum_kernel` loops over the
+		input with a stride of the whole grid and adds its total with `tl.atomic_add`. The summary under the tabs shows
+		what the compiler made of `tl.sum`.
+	</div>
+</CodeTabs>
+
+The CUDA kernels are in a header with no host code, so the tests can compile
+them with NVRTC on a machine without `nvcc`. `cuda/reduce.cu` runs each
+method, checks it against a CPU sum and times it. Numba's simulator has no
+`shfl_down_sync`, so without a GPU the two shuffle kernels in Numba are only
+compiled to PTX, not run.
+
+`generate.py` compiles the CUDA header and both Triton kernels for sm_80 and
+counts instructions in each kernel's PTX:
+
+<Code code={summary} lang="text" title="generated/summary.txt" />
+
+The counts are instructions in the code, not executions: the loop of
+`reduce_interleaved` has one `bar.sync` in its body that runs once per level.
+The two shuffle kernels show the five unrolled shuffles of one warp
+reduction, and `reduce_atomic` two of them. Triton's `tl.sum` compiled to the
+same plan as `reduce_atomic`, picked by the compiler: with 4 warps, each of
+the 128 threads first adds its 8 elements in registers, then each warp
+reduces with five `shfl.sync.bfly` (a butterfly, `__shfl_xor_sync` in CUDA
+terms), the four warp sums go through shared memory and one `bar.sync`, and
+two more shuffles finish them.
+
+## Measure it yourself
+
+On a GPU, from `kernels/ch13-reduction`:
+
+```sh
+make -C cuda run
+python numba/reduce.py
+python triton/reduce.py
+ncu --kernel-name regex:reduce_ ./cuda/reduce
+```
+
+Each program prints the mean time of a complete sum and its effective
+bandwidth, `4 * n` bytes over that time. Compare that bandwidth with your
+GPU's memory bandwidth: a reduction near it has nothing left to gain from the
+add tree. Things to look for:
+
+- The order of the four CUDA methods, and how much of the gap closes between
+  interleaved and sequential compared with sequential and warp-final.
+- In Nsight Compute, warp instructions executed against thread instructions
+  executed (`smsp__inst_executed.sum` and `smsp__thread_inst_executed.sum`;
+  `ncu --query-metrics` lists the variants). Their ratio is the average number
+  of lanes doing work per instruction, the measured version of the sim's lane
+  slot percentage.
+- The shared memory bank conflicts of `reduce_interleaved` and
+  `reduce_sequential`, metric `l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum`.
+  Both should be near zero; change the loop to Harris's `index = 2 * s * tid`
+  and watch them appear.
+- How `reduce_atomic`, one launch with a few blocks per SM, compares with the
+  multi-pass kernels, which need three launches at the default size.
+
+## Exercises
+
+**1. Count the busy warps.** A block of 128 threads runs interleaved
+addressing. How many warps issue the add at stride 16, and at stride 32?
+
+<details>
+<summary>Answer</summary>
+
+At stride 16 the working threads are the multiples of 32: threads 0, 32, 64
+and 96, one in each warp, so {busy(i128, 5)} warps issue the add with one
+lane on. At stride 32 they are the multiples of 64, threads 0 and 64:
+{busy(i128, 6)} warps. Check it in the simulation with 128 threads.
+
+</details>
+
+**2. Total the warp instructions.** For 256 threads, derive the
+{i256.warpIssues} and {s256.warpIssues} warp instructions of the two shared
+memory kernels by hand.
+
+<details>
+<summary>Answer</summary>
+
+Interleaved: at strides 1 to 16 some multiple of `2s` falls in every warp, so
+all 8 warps issue, 5 x 8 = 40. At stride 32 the working threads are multiples
+of 64, in warps 0, 2, 4 and 6: 4. At stride 64, warps 0 and 4: 2. At stride
+128, warp 0: 1. Total 47.
+
+Sequential: stride 128 uses threads 0 to 127, 4 full warps. Stride 64, 2
+warps. Stride 32, 1 warp. Strides 16 to 1 each use part of warp 0: 5. Total
+4 + 2 + 1 + 5 = 12.
+
+</details>
+
+**3. Predict the output.** Someone launches `reduce_sequential` with 384
+threads per block. Which values are left out of the block's sum?
+
+<details>
+<summary>Answer</summary>
+
+The strides are 192, 96, 48, 24, 12, 6, 3, then `3 / 2 = 1` in integer
+arithmetic. Down to stride 3 every value is folded in, leaving partial sums
+in `sdata[0]`, `sdata[1]` and `sdata[2]`. At stride 1, thread 0 adds
+`sdata[1]`, and nothing ever adds `sdata[2]`. That slot holds the sum of
+elements 2, 5, 8 and so on, every element whose index leaves 2 when divided
+by 3: a third of the block is missing. This is why the kernels require a
+power of two, or round the shared array up to one and pad with zeros.
+
+</details>
+
+**4. Not quite the same answer.** `reduce_atomic` on 10<sup>7</sup> random
+normal floats returns a slightly different sum on each run. Is that a bug?
+What would make it repeatable?
+
+<details>
+<summary>Answer</summary>
+
+Not a bug. Each block's sum is computed in a fixed order, but the blocks
+reach the `atomicAdd` in whatever order the scheduler runs them, and
+`(a + b) + c` and `(a + c) + b` round differently in float32. The multi-pass
+version has a fixed order, so it repeats run to run on the same GPU and launch
+configuration. Accumulating in double narrows the spread but does not remove
+it; integer inputs below 2<sup>24</sup> remove it, which is why the tests use
+them.
+
+</details>
+
+**5. Read the compiler's tree.** In the summary, Triton's `partial_sums_kernel`
+has 7 shuffles with `num_warps` 4. Where do 7 come from, and how many would
+you expect with 8 warps?
+
+<details>
+<summary>Answer</summary>
+
+Five shuffles reduce one warp, 32 to 1, as offsets 16, 8, 4, 2 and 1. That
+leaves 4 warp sums, which take log<sub>2</sub> 4 = 2 more. With 8 warps the
+second stage has 8 values and needs 3, so 5 + 3 = 8. You can check by
+passing `options={"num_warps": 8}` to `triton.compile` in `generate.py`.
+
+</details>
+
+## Further reading
+
+- [Mark Harris, Optimizing Parallel Reduction in CUDA](https://developer.download.nvidia.com/assets/cuda/files/reduction.pdf) (NVIDIA slides), the seven kernels this chapter follows through kernel 3 and the last-warp idea of kernel 5. Its timings are for a G80 GPU with 128-thread blocks.
+- [Justin Luitjens, Faster Parallel Reductions on Kepler](https://developer.nvidia.com/blog/faster-parallel-reductions-kepler/) (NVIDIA Technical Blog, 2014), the shuffle-based warp and block reductions, grid-stride loops and atomic variants.
+- [Yuan Lin and Vinod Grover, Using CUDA Warp-Level Primitives](https://developer.nvidia.com/blog/using-cuda-warp-level-primitives/) (NVIDIA Technical Blog, 2018), on `__shfl_down_sync`, masks, and why implicit warp-synchronous code is unsafe.
+- [CUDA C++ Programming Guide 12.4: warp shuffle functions](https://docs.nvidia.com/cuda/archive/12.4.0/cuda-c-programming-guide/index.html#warp-shuffle-functions), [atomicAdd](https://docs.nvidia.com/cuda/archive/12.4.0/cuda-c-programming-guide/index.html#atomicadd) and [the SIMT architecture](https://docs.nvidia.com/cuda/archive/12.4.0/cuda-c-programming-guide/index.html#simt-architecture).
+- [Mark Harris, CUDA Pro Tip: Write Flexible Kernels with Grid-Stride Loops](https://developer.nvidia.com/blog/cuda-pro-tip-write-flexible-kernels-grid-stride-loops/).
+- [Triton: tl.sum](https://triton-lang.org/main/python-api/generated/triton.language.sum.html) and [tl.atomic_add](https://triton-lang.org/main/python-api/generated/triton.language.atomic_add.html).
