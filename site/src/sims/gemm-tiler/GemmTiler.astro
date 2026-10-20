@@ -1,0 +1,196 @@
+---
+import SimFrame from '@components/SimFrame.astro';
+import { GPUS } from '@sim-core/gpu-specs';
+import { CODE, PARAMS, PRESETS, RANGE, SIZES, STEP_IDS, type Config } from './model';
+
+interface Props {
+	gpu?: Config['gpu'];
+	size?: (typeof SIZES)[number];
+}
+
+const { gpu = 'a100', size = 4096 } = Astro.props;
+const variants = STEP_IDS.map((id) => ({ name: id, code: CODE[id], lang: 'cpp' }));
+const LABELS = { bm: 'BM, block rows', bn: 'BN, block columns', bk: 'BK, k per tile', tm: 'TM, rows per thread', tn: 'TN, columns per thread' };
+const start = PRESETS.naive;
+---
+
+<SimFrame title="GEMM tiler: seven steps from naive to autotuned" sim="gemm-tiler" code={variants} config={{ gpu, size }}>
+	<Fragment slot="params">
+		<label class="sim-field">
+			<span>GPU</span>
+			<select name="gpu">
+				{GPUS.map((g) => <option value={g.id} selected={g.id === gpu}>{g.name}</option>)}
+			</select>
+		</label>
+		<label class="sim-field">
+			<span>M = N = K</span>
+			<select name="size">
+				{SIZES.map((s) => <option value={s} selected={s === size}>{s.toLocaleString('en-US')}</option>)}
+			</select>
+		</label>
+		{
+			PARAMS.map((p) => (
+				<label class="sim-field">
+					<span>
+						{LABELS[p]} <output data-out={p}>-</output>
+					</span>
+					<input type="range" name={p} min={RANGE[p][0]} max={RANGE[p][1]} value={Math.log2(start[p])} disabled />
+				</label>
+			))
+		}
+		<div class="sim-field gt-actions">
+			<span data-tile-note>Tile sizes are fixed for this step.</span>
+			<button type="button" data-preset>Worklog tile sizes</button>
+		</div>
+	</Fragment>
+
+	<div class="sim-canvas" data-canvas>
+		<svg role="img" aria-label="Matrices A, B and C with the part one block reads, a heat scale of global loads per element, the block's threads, the model ceilings and the estimate for each step"></svg>
+	</div>
+	<dl class="gt-stats" data-stats aria-label="Per output element"></dl>
+	<ul class="gt-res" data-res aria-label="Resources per block"></ul>
+
+	<Fragment slot="caption">
+		Model, not a measurement. Each step is one kernel of chapter 20 with square M = N = K float32 matrices. Every
+		requested 32-byte sector counts as DRAM traffic (no L1 or L2 reuse); shared memory serves one pass of up to 32
+		words in 32 banks per SM per clock, with conflicts counted from warp 0's addresses; compute is the preset's peak
+		FP32 rate. The estimate is the lowest of the three ceilings. It leaves out latency, instruction issue, occupancy,
+		wave quantization and the caches. The register count is a rough estimate (accumulators, register copies of A and B,
+		and 24 for indices and pointers), not compiler output.
+	</Fragment>
+</SimFrame>
+
+<script>
+	import { Stepper } from '@sim-core/stepper';
+	import { bindControls } from '@sim-core/controls';
+	import { highlightLines, showVariant } from '@sim-core/code-sync';
+	import { gpuById } from '@sim-core/gpu-specs';
+	import {
+		analyzeStep,
+		autotune,
+		describe,
+		EDITABLE,
+		effectiveTile,
+		fmt,
+		kb,
+		LAST_STEP,
+		LINES,
+		num,
+		PARAMS,
+		PRESETS,
+		presetTiles,
+		stepAt,
+		type Config,
+		type Param,
+	} from './model';
+	import { render } from './view';
+
+	function mount(frame: HTMLElement) {
+		const init: Pick<Config, 'gpu' | 'size'> = JSON.parse(frame.dataset.config!);
+		const config: Config = { ...init, tiles: presetTiles() };
+		const stepper = new Stepper(LAST_STEP, 1600);
+		const canvas = frame.querySelector<HTMLElement>('[data-canvas]')!;
+		const svgEl = canvas.querySelector('svg')!;
+		const statsEl = frame.querySelector<HTMLElement>('[data-stats]')!;
+		const resEl = frame.querySelector<HTMLElement>('[data-res]')!;
+		const note = frame.querySelector<HTMLElement>('[data-tile-note]')!;
+		const preset = frame.querySelector<HTMLButtonElement>('[data-preset]')!;
+		const field = <T extends HTMLElement>(name: string) => frame.querySelector<T>(`[name="${name}"]`)!;
+
+		const item = (tag: string, cls: string | null, ...parts: (string | Node)[]) => {
+			const el = document.createElement(tag);
+			if (cls) el.className = cls;
+			el.append(...parts);
+			return el;
+		};
+
+		/** Puts the current step's tile into the sliders and enables only the ones the step uses. */
+		const tiled = (s: string) => s !== 'naive' && s !== 'coalesced';
+		const syncSliders = () => {
+			const s = stepAt(stepper.step);
+			const t = effectiveTile(config, s);
+			for (const p of PARAMS) {
+				const input = field<HTMLInputElement>(p);
+				input.value = String(Math.log2(t[p]));
+				input.disabled = !EDITABLE[s].includes(p);
+				// The naive kernels have no tiles at all, so their sliders show no value.
+				const shown = tiled(s) ? String(t[p]) : '-';
+				input.setAttribute('aria-valuetext', tiled(s) ? shown : 'not used');
+				frame.querySelector<HTMLElement>(`[data-out="${p}"]`)!.textContent = shown;
+			}
+			const editable = EDITABLE[s].length > 0;
+			preset.disabled = !editable;
+			note.textContent =
+				s === 'autotune'
+					? 'Tile sizes come from the search.'
+					: editable
+						? `This step uses ${EDITABLE[s].map((p) => p.toUpperCase()).join(', ')}.`
+						: 'This kernel has no tiles: 32 x 32 threads.';
+		};
+
+		const draw = () => {
+			const step = stepper.step;
+			const s = stepAt(step);
+			render(svgEl, config, step, Math.max(260, canvas.clientWidth));
+			highlightLines(code, LINES[s]);
+			const a = analyzeStep(config, s);
+			const g = gpuById(config.gpu);
+			const stat = (k: string, v: string) => item('div', null, item('dt', null, k), item('dd', null, v));
+			statsEl.replaceChildren(
+				stat('FLOPs per output', fmt(a.flopsPerOutput)),
+				stat('Global loads per output', `${num(a.globalFloats)} floats`),
+				stat('DRAM sector bytes per output', num(a.dramBytes)),
+				stat('Shared loads per output', a.sharedFloats ? `${num(a.sharedFloats)} floats` : 'none'),
+				stat('Shared passes per output', a.sharedPasses ? num(a.sharedPasses) : 'none'),
+				stat('FLOPs per DRAM byte', num(a.intensity)),
+				stat('Model estimate', a.gflops === null ? 'cannot run' : `${fmt(a.gflops)} GFLOP/s`),
+			);
+			const r = a.res;
+			const rows: HTMLElement[] = [
+				item('li', null, item('strong', null, 'Per block: '), `${fmt(r.threads)} threads, ${r.sharedBytes ? kb(r.sharedBytes) : 'no'} shared memory, about ${r.regsPerThread} registers per thread.`),
+				item('li', null, item('strong', null, `On the ${g.name}: `), r.errors.length ? 'does not run.' : `${r.blocksPerSm} ${r.blocksPerSm === 1 ? 'block' : 'blocks'} per SM, limited by ${r.blockLimit}.`),
+				...r.errors.map((e) => item('li', 'is-error', item('strong', null, 'Exceeds: '), `${e}.`)),
+				...r.notes.map((n) => item('li', 'is-note', item('strong', null, 'Note: '), `${n}.`)),
+			];
+			if (s === 'autotune') {
+				const t = autotune(g, config.size);
+				rows.push(item('li', null, item('strong', null, 'Search: '), `${t.searched} configs of the vectorized kernel, ${t.valid} fit the limits, ${t.tied} within 1% of the best estimate. The model cannot rank those; a real autotuner times them.`));
+			}
+			resEl.replaceChildren(...rows);
+		};
+
+		let code = showVariant(frame, stepAt(0));
+		frame.querySelector('.sim-params')!.addEventListener('input', (event) => {
+			const target = event.target as HTMLInputElement;
+			const s = stepAt(stepper.step);
+			if (PARAMS.includes(target.name as Param)) {
+				const p = target.name as Param;
+				config.tiles[s][p] = 2 ** Number(target.value);
+			}
+			config.gpu = field<HTMLSelectElement>('gpu').value as Config['gpu'];
+			config.size = Number(field<HTMLSelectElement>('size').value);
+			syncSliders();
+			sync(stepper.step);
+			draw();
+		});
+		preset.addEventListener('click', () => {
+			const s = stepAt(stepper.step);
+			config.tiles[s] = { ...PRESETS[s] };
+			syncSliders();
+			sync(stepper.step);
+			draw();
+		});
+
+		const sync = bindControls(frame, stepper, (step) => describe(config, step));
+		stepper.onChange((step) => {
+			code = showVariant(frame, stepAt(step));
+			syncSliders();
+			draw();
+		});
+		new ResizeObserver(draw).observe(canvas);
+		syncSliders();
+		draw();
+	}
+
+	document.querySelectorAll<HTMLElement>('[data-sim="gemm-tiler"]').forEach(mount);
+</script>

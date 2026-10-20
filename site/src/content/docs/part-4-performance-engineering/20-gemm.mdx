@@ -1,0 +1,434 @@
+---
+title: 20. Matrix multiply, step by step
+description: Six CUDA kernels for C = A * B, from one thread per output to float4 loads and autotuned tiles, with the FLOPs per byte of each step, why it is faster, and what limits it next.
+sidebar:
+  order: 20
+banner:
+  content: Draft chapter. If something is wrong or unclear, use the edit link at the bottom of the page.
+---
+
+import { Code } from '@astrojs/starlight/components';
+import GemmTiler from '@sims/gemm-tiler/GemmTiler.astro';
+import CodeTabs from '@components/CodeTabs.astro';
+import { gpuById } from '@sim-core/gpu-specs';
+import { analyze, analyzeStep, autotune, fmt, num, passesOf, peakGflops, presetTiles, resources, warpSharedLoads } from '@sims/gemm-tiler/model';
+import cuda from '@kernels/ch20-gemm/cuda/gemm_kernels.cuh?raw';
+import numba from '@kernels/ch20-gemm/numba/gemm.py?raw';
+import triton from '@kernels/ch20-gemm/triton/gemm.py?raw';
+import summary from '@kernels/ch20-gemm/generated/summary.txt?raw';
+
+export const a100 = gpuById('a100');
+export const t4 = gpuById('t4');
+export const h100 = gpuById('h100');
+export const at = (s, gpu = 'a100') => analyzeStep({ gpu, size: 4096, tiles: presetTiles() }, s);
+export const est = (s, gpu = 'a100') => fmt(at(s, gpu).gflops);
+export const ridge = (g) => (peakGflops(g) / g.memoryGbPerS).toFixed(1);
+export const tile = (bm, bn, bk, tm, tn) => ({ bm, bn, bk, tm, tn });
+export const ex1 = analyze(a100, 4096, 'reg2d', tile(64, 128, 8, 4, 8));
+export const ex2 = warpSharedLoads('reg2d', tile(64, 64, 8, 4, 4)).filter((l) => l.what === 'B').map((l) => passesOf(l.words));
+export const ex3 = resources(a100, 'reg2d', tile(256, 256, 8, 16, 16));
+export const tuned = autotune(a100, 4096);
+export const b2d = warpSharedLoads('reg2d', tile(128, 128, 8, 8, 8));
+export const p2d = (w) => passesOf(b2d.find((l) => l.what === w).words);
+
+Multiplying two 4096 x 4096 float32 matrices is 2 x 4096<sup>3</sup>, about 137 billion,
+floating point operations, and every GPU in this course can do that in well under a
+tenth of a second. A first CUDA kernel for it, one thread per output, is easy to write and
+correct. It is also slow. In Simon Boehm's worklog of this exact exercise, his first
+kernel ran at 309 GFLOP/s and cuBLAS, NVIDIA's library, at 23,250 GFLOP/s on the same
+GPU, 75 times faster.
+
+The arithmetic is the same in both. What differs is how many bytes each kernel moves for
+every multiply-add, and from which memory. This chapter closes most of that gap in six
+steps, one idea per step, and for each one asks three questions: how many FLOPs does it
+do per byte, why is it faster than the last step, and what limits it next. It uses the
+roofline of chapter 19 to answer the first, and coalescing (chapter 6), shared memory
+(chapter 7) and bank conflicts (chapter 8) for the rest.
+
+## The problem and the best case
+
+`A` is `M x K`, `B` is `K x N`, both row-major float32, and `C = A * B`:
+
+```cpp
+C[m * N + n] = sum over k of A[m * K + k] * B[k * N + n]
+```
+
+Each of the `M x N` outputs takes `K` multiply-adds, 2K FLOPs. With M = N = K = 4096
+that is 8,192 FLOPs per output. If every element of A and B were read from DRAM once and
+C written once, the whole multiply would move 3 x 4096<sup>2</sup> x 4 bytes, about 201 MB,
+for 137 GFLOP: about 683 FLOPs per byte. The ridge point of the {a100.name}, where its
+roofline turns from memory bound to compute bound, is {fmt(peakGflops(a100))} GFLOP/s over
+{fmt(a100.memoryGbPerS)} GB/s, {ridge(a100)} FLOPs per byte. So a matrix multiply this size
+can be compute bound by a wide margin. Every step below is about getting the bytes a
+kernel actually moves closer to that best case.
+
+The numbers in this chapter come from the model in the simulation below, for 4096 x 4096
+matrices on the {a100.name}, and are labelled as model estimates. They count what each
+kernel requests from memory; they are not measurements. The section after the simulation
+explains the model, and the end of the chapter quotes Boehm's measured numbers.
+
+## Step 1: naive
+
+One thread per element of C, in blocks of 32 x 32 threads:
+
+```cpp
+int row = blockIdx.x * blockDim.x + threadIdx.x;
+int col = blockIdx.y * blockDim.y + threadIdx.y;
+for (int k = 0; k < K; ++k)
+    acc += A[row * K + k] * B[k * N + col];
+```
+
+A warp is 32 threads with consecutive `threadIdx.x`, which here means 32 consecutive
+**rows**. On each `k`, the 32 lanes read `A[row * K + k]` from 32 different rows, 16 KB
+apart: 32 sectors for 32 useful words, as in chapter 6. They all read the same
+`B[k * N + col]`, one sector. That is 33 sectors, 1,056 bytes, for 32 multiply-adds.
+
+- **FLOPs per byte:** 2 FLOPs per 33 bytes, {num(at('naive').intensity)}.
+- **Model estimate:** {est('naive')} GFLOP/s, limited by DRAM traffic.
+- **What limits it:** every load of A is uncoalesced.
+
+## Step 2: coalesced
+
+Swap which index `threadIdx.x` drives:
+
+```cpp
+int col = blockIdx.x * blockDim.x + threadIdx.x;
+int row = blockIdx.y * blockDim.y + threadIdx.y;
+```
+
+Now a warp is 32 consecutive **columns** of one row. `A[row * K + k]` is one word for all
+32 lanes, a broadcast in 1 sector, and `B[k * N + col]` is 32 neighbouring words in 4
+sectors. Five sectors per 32 multiply-adds, about 6.6 times fewer bytes than step 1.
+
+- **FLOPs per byte:** 2 per 5 bytes, {num(at('coalesced').intensity)}.
+- **Model estimate:** {est('coalesced')} GFLOP/s, still limited by DRAM traffic.
+- **What limits it:** reuse. Every thread loads its own copy of a full row of A and a full
+  column of B, so each element of A is loaded 4,096 times, once for every column of C. The
+  ridge point is {ridge(a100)} FLOPs per byte and this kernel does 0.4.
+
+## Step 3: shared memory tiling
+
+Chapter 7 did this for a small matrix multiply. A block computes a `BM x BN` tile of C.
+It walks along K in steps of `BK`: the block copies a `BM x BK` tile of A and a
+`BK x BN` tile of B into shared memory, waits at `__syncthreads()`, and every thread does
+`BK` multiply-adds from the shared copies.
+
+```cpp
+for (int k0 = 0; k0 < K; k0 += BK) {
+    load_tile<BM, BK>(As, A, row0, k0);   // coalesced: consecutive threads, consecutive columns
+    load_tile<BK, BN>(Bs, B, k0, col0);
+    __syncthreads();
+    for (int k = 0; k < BK; ++k)
+        acc += As[tr * BK + k] * Bs[k * BN + tc];
+    __syncthreads();
+}
+```
+
+Each element of A is now read from global memory once per block column, `N / BN` times,
+instead of `N` times. Per output that is `K / BN + K / BM` floats, and the FLOPs per byte
+become `BM x BN / (2 (BM + BN))`. With Boehm's 32 x 32 tiles and `BK = 32`:
+
+- **FLOPs per byte:** {num(at('smem').intensity)}, almost at the {a100.name}'s ridge point.
+- **Model estimate:** {est('smem')} GFLOP/s, limited by **shared memory**, not DRAM.
+- **What limits it:** every multiply-add still reads two floats, now from shared memory.
+  One SM's shared memory serves one warp request per clock (chapter 8), and the SM's 64
+  FP32 lanes finish a warp's 32 multiply-adds in half a clock. Two requests per half
+  clock of work keeps the FP32 units busy a quarter of the time.
+
+## Step 4: 1D register blocking
+
+Give each thread `TM` outputs in one column of the tile. A value of B is read from shared
+memory once into a register and used `TM` times:
+
+```cpp
+for (int k = 0; k < BK; ++k) {
+    float b = Bs[k * BN + tc];
+    for (int i = 0; i < TM; ++i)
+        acc[i] += As[(tr * TM + i) * BK + k] * b;
+}
+```
+
+Shared loads per output fall from 2 per `k` to `1 + 1 / TM`. With Boehm's
+`BM = BN = 64, BK = 8, TM = 8` the block has 512 threads, and the bigger tile also
+doubles the FLOPs per byte of DRAM traffic.
+
+- **FLOPs per byte:** {num(at('reg1d').intensity)}.
+- **Model estimate:** {est('reg1d')} GFLOP/s, limited by shared memory.
+- **What limits it:** the A side. Each output still needs its own read of A from shared
+  memory on every `k`.
+
+## Step 5: 2D register blocking
+
+Give each thread a `TM x TN` block of outputs. On each `k` it copies `TM` values of A and
+`TN` values of B into registers and does all `TM x TN` multiply-adds between them, an
+outer product:
+
+```cpp
+for (int k = 0; k < BK; ++k) {
+    for (int i = 0; i < TM; ++i) a[i] = As[(tr * TM + i) * BK + k];
+    for (int j = 0; j < TN; ++j) b[j] = Bs[k * BN + tc * TN + j];
+    for (int i = 0; i < TM; ++i)
+        for (int j = 0; j < TN; ++j)
+            acc[i][j] += a[i] * b[j];
+}
+```
+
+With 8 x 8 per thread, 16 shared loads feed 64 multiply-adds: a quarter of a load per
+output per `k`, against 2 in step 3. With `BM = BN = 128` the block is 256 threads and each
+holds 64 accumulators in registers.
+
+- **FLOPs per byte:** {num(at('reg2d').intensity)}.
+- **Model estimate:** {est('reg2d')} GFLOP/s, limited by shared memory.
+- **What limits it:** bank conflicts. A warp here covers 2 thread rows and 16 thread
+  columns. The two rows read A words 64 apart, the same bank: a {p2d('A')}-way conflict.
+  The 16 columns read B words 8 apart, so they share 4 banks: a {p2d('B')}-way conflict.
+  The 16 loads cost {fmt(8 * p2d('A') + 8 * p2d('B'))} passes, not 16.
+
+## Step 6: vectorized loads
+
+Two changes, both about load width. Global loads become `float4`, 16 bytes per
+instruction (DRAM bytes are the same, but there are 4 times fewer load instructions). And
+the tile of A is stored **transposed** in shared memory, `AsT[k * BM + m]`, so a thread's
+`TM` values of A are contiguous and can also be read 4 at a time:
+
+```cpp
+for (int i = 0; i < TM; i += 4)
+    load4(&a[i], &AsT[k * BM + tr * TM + i]);   // one 16-byte ld.shared.v4
+for (int j = 0; j < TN; j += 4)
+    load4(&b[j], &Bs[k * BN + tc * TN + j]);
+```
+
+Per warp and `k`, the A loads drop from {fmt(8 * p2d('A'))} passes to 2 and the B loads from
+{fmt(8 * p2d('B'))} to 8. The cost is a constraint: `K`, `N`, `TM`, `TN`, `BK` and `BN` must be
+multiples of 4, so a `float4` is never half inside the matrix.
+
+- **FLOPs per byte:** {num(at('vec').intensity)}, unchanged.
+- **Model estimate:** {est('vec')} GFLOP/s, the {a100.name}'s FP32 peak: the model now
+  says compute is the limit.
+- **What limits it:** things this model does not count. Real kernels at this point are
+  limited by instruction issue (address math and loop overhead between the FMAs), by
+  latency that 2 blocks per SM cannot fully hide, and by how blocks map onto the 108 SMs.
+  Boehm's next steps are autotuning and warp tiling, an extra level of tiling per warp.
+
+## Step 7: autotuning
+
+The best `BM, BN, BK, TM, TN` depend on the GPU, the matrix shape and the compiler. Rather
+than reason about them, an autotuner compiles several candidates and times each one.
+`cuda/gemm.cu` does this for six shapes of the vectorized kernel; Triton's
+`@triton.autotune` does it for you on the first call with each new `(M, N, K)`.
+
+The simulation's version searches {tuned.searched} tile shapes against the model.
+{tuned.valid} of them fit the {a100.name}'s limits, and {tuned.tied} reach within 1% of the
+best estimate, because the model puts all of them at the compute roof. That is the point of
+measuring: the model cannot tell those apart, and a real GPU can. Boehm reports that on an
+A100 his autotuner picked `BM = BN = 64, BK = 16, TM = TN = 4`, smaller than the tiles he
+had chosen for his A6000, and 6% faster on the A100 than his `BM = BN = 128, BK = 16,
+TM = TN = 8`.
+
+## Seven steps in one simulation
+
+Each step of the simulation is one kernel. The top drawing shows A, B and C, the part
+block 0 (or warp 0, for the first two kernels) reads and writes, and a heat color for how
+many times each element of A and B is loaded from global memory. Below it are the block's
+threads, the three model ceilings for this step on a log scale, and the estimate for every
+step so far. Before pressing Next, guess which ceiling sets the next step's estimate.
+
+<GemmTiler />
+
+Things to try:
+
+- **Step 3 with 64 x 64 tiles.** Move BM and BN to 64. The kernel wants 4,096 threads per
+  block, four times the limit, and the sim flags it. This is why step 4 gives each thread
+  more than one output: bigger tiles need fewer threads per output.
+- **Step 5, TN from 8 to 4.** A warp is now one thread row of 32 columns, so the A loads
+  become broadcasts with no conflict. But the B loads stay 4-way and each thread computes
+  half as many outputs, so the shared passes per output do not move. Then try BK = 64:
+  64 KB of shared memory, more than the 48 KB a static `__shared__` array may use.
+- **Step 4 on the {t4.name}.** Its DRAM ceiling, {fmt(at('reg1d', 't4').roofs.dram)} GFLOP/s,
+  is much closer to its shared ceiling than on the {a100.name}, because its memory is slow
+  relative to its SMs.
+- **Step 7 on each GPU.** The search keeps large tiles, because the model breaks ties by
+  fewer shared passes. A real autotuner often disagrees.
+
+## Where the estimate comes from
+
+The estimate is the lowest of three ceilings, each in GFLOP/s:
+
+- **Compute:** the preset's peak FP32 rate, {fmt(peakGflops(a100))} GFLOP/s for the
+  {a100.name}.
+- **DRAM:** FLOPs per byte times the memory bandwidth. Bytes are counted as the 32-byte
+  sectors each kernel requests, as in chapter 6, with **no caching**: a sector requested
+  twice counts twice. Real L1 and L2 caches would catch much of the naive kernels'
+  repeated traffic, so the model is pessimistic for steps 1 and 2, on purpose: it shows
+  what the code asks for.
+- **Shared memory:** FLOPs per output divided by the shared memory passes per output, times
+  one pass per clock on every SM. A pass serves up to 32 distinct 4-byte words in 32
+  different banks; a warp's load costs the most distinct words any bank must serve, and
+  at least distinct words / 32 (so a 16-byte load of 128 words is at least 4 passes). The
+  passes of warp 0 at `k = 0` stand for every warp. The SM clock is derived from the peak
+  FP32 rate, as in chapter 11.
+
+What it leaves out: latency and the warps available to hide it, instruction issue, the
+cost of the barriers, wave quantization (how many blocks are left for the last round of
+SMs), the caches, and DRAM page effects. The register count is a rough estimate, not
+compiler output; `--ptxas-options=-v` or Nsight Compute gives the real one.
+
+## The code
+
+CUDA has all six kernels. Numba has three: the coalesced naive kernel, shared memory
+tiling, and 2D register blocking. Triton has one, because a Triton program already works on
+a whole tile: it loads `BM x BK` and `BK x BN` blocks and calls `tl.dot`.
+
+<CodeTabs
+	cuda={cuda}
+	numba={numba}
+	triton={triton}
+	titles={{ cuda: 'cuda/gemm_kernels.cuh', numba: 'numba/gemm.py', triton: 'triton/gemm.py' }}
+>
+	<div slot="triton-note">
+		In Triton you choose the block tile, `BM x BN` with `BK` per step, and the compiler does the rest of this chapter:
+		it stages the tiles through shared memory, lays the threads out so that each one owns a block of outputs in
+		registers, and picks the load widths. `@triton.autotune` lists candidate tile sizes, warp counts and pipeline
+		stages; on the first call for each new `(M, N, K)` it times every candidate and keeps the fastest. Without a
+		GPU the interpreter cannot time anything, so there the file gives it a single config. `input_precision="ieee"`
+		keeps the multiply in full float32 on the FP32 units; the default on recent GPUs is TF32 on tensor cores,
+		which is chapter 23.
+	</div>
+</CodeTabs>
+
+The CUDA header has no host code, so the tests compile it with NVRTC on a machine without
+`nvcc`. `cuda/gemm.cu` times every kernel, runs the autotuning loop over six tile shapes,
+times `cublasSgemm` as the reference, and checks each result exactly against a CPU loop:
+the inputs are whole numbers from -4 to 4, so every float32 sum is exact in any order.
+cuBLAS works in column-major order. Row-major `C = A * B` is the same memory as
+column-major `C^T = B^T * A^T`, so the call passes B first.
+
+What the compilers produced, counted in the PTX for sm_80. Note the `ld.shared` per
+`fma` in each CUDA kernel, and that the Triton kernel ends up with the same plan as step 6:
+`cp.async` copies into shared memory, 16-byte shared loads, and thousands of FMAs per
+thread per tile.
+
+<Code code={summary} lang="text" title="generated/summary.txt" />
+
+## Measure it yourself
+
+On a GPU, from `kernels/ch20-gemm`:
+
+```sh
+make -C cuda run
+python numba/gemm.py
+python triton/gemm.py
+ncu --set full -k regex:gemm_ ./cuda/gemm 4096 4096 4096
+```
+
+Each program prints GFLOP/s for every kernel, `2 x M x N x K` over the mean time. The CUDA
+one ends with cuBLAS, the reference; the Triton one compares with `torch.matmul` with TF32
+turned off. Things to look for:
+
+- The order of the steps, and where your GPU's numbers stop following the model.
+- In Nsight Compute, the memory throughput of `gemm_naive` against `gemm_coalesced`, and
+  the shared memory bank conflicts of `gemm_2d` against `gemm_vec`.
+- Which tile shape the autotuning loop picks on your GPU, and whether Triton's autotuner
+  agrees.
+
+For comparison, the summary table of Boehm's worklog (December 2022, measured on the
+NVIDIA RTX A6000 he uses throughout the article), in GFLOP/s and as a share of cuBLAS on
+the same GPU:
+
+| Kernel | GFLOP/s | of cuBLAS |
+|---|---:|---:|
+| 1. Naive | 309.0 | 1.3% |
+| 2. Global memory coalescing | 1,986.5 | 8.5% |
+| 3. Shared memory caching | 2,980.3 | 12.8% |
+| 4. 1D blocktiling | 8,474.7 | 36.5% |
+| 5. 2D blocktiling | 15,971.7 | 68.7% |
+| 6. Vectorized memory access | 18,237.3 | 78.4% |
+| 9. Autotuning | 19,721.0 | 84.8% |
+| 10. Warptiling | 21,779.3 | 93.7% |
+| cuBLAS | 23,249.6 | 100% |
+
+His kernels differ from these in small ways (no bounds checks, fixed sizes), and his steps
+7 and 8 are left out here. The shape matches the model's: big gains from coalescing, from
+the first tile, and from register blocking, then smaller ones.
+
+## Exercises
+
+**1. FLOPs per byte of a tile.** A 2D-blocked kernel uses `BM = 64, BN = 128`. What is its
+FLOPs per byte of DRAM traffic for 4096 x 4096 matrices, and is it above the
+{a100.name}'s ridge point?
+
+<details>
+<summary>Answer</summary>
+
+Each output loads `K / BN + K / BM = 4096 / 128 + 4096 / 64 = 96` floats, 384 bytes, plus
+its 4-byte store: 388 bytes for 8,192 FLOPs, {num(ex1.intensity)} FLOPs per byte. Without the
+store it is `64 x 128 / (2 x 192) = 21.3`. The ridge point is {ridge(a100)}, so DRAM is not
+the limit for this tile in the model.
+
+</details>
+
+**2. Conflicts with smaller thread tiles.** In step 5, set `BM = BN = 64, TM = TN = 4`.
+What is the conflict degree of each B load?
+
+<details>
+<summary>Answer</summary>
+
+`BN / TN = 16` thread columns, so lanes 0 to 15 are one thread row and lanes 16 to 31 the
+next. Both rows read the same B words, so they share them (a broadcast). The 16 columns
+read words `4 x tc + j`, 4 apart: banks `4 x tc mod 32`, and columns `tc` and `tc + 8`
+share a bank with different words. That is a {ex2[0]}-way conflict on each of the 4 B
+loads.
+
+</details>
+
+**3. Bigger thread tiles.** Why does no autotuned config use `TM = TN = 16`?
+
+<details>
+<summary>Answer</summary>
+
+A thread would hold 256 accumulators plus 32 register copies of A and B, about
+{ex3.regsPerThread} registers with the sim's estimate of 24 for everything else. The limit
+is {a100.maxRegsPerThread} registers per thread; past it the compiler spills to local
+memory, which lives in DRAM. Even a compiler that fit it in 255 would leave room for only
+one block of 256 threads per SM, too few warps to hide latency.
+
+</details>
+
+**4. Fix the bug.** Someone deletes the second `__syncthreads()` in `gemm_smem`, the one
+at the end of the loop body, and the results are still correct on their test. Why can it
+still be wrong?
+
+<details>
+<summary>Answer</summary>
+
+Without it, a fast warp can finish its `BK` multiply-adds, loop around and start writing
+the next tiles into `As` and `Bs` while a slower warp of the same block is still reading
+the current ones. The slow warp then multiplies values from two different tiles. Whether
+it happens depends on how the warps are scheduled, so a test can pass by luck.
+`compute-sanitizer --tool racecheck` reports the hazard.
+
+</details>
+
+**5. Why the model ties.** The simulation's search finds {tuned.tied} configs within 1% of
+the best on the {a100.name}. Why so many, and what would separate them?
+
+<details>
+<summary>Answer</summary>
+
+Once a tile has enough FLOPs per byte and few enough shared passes, both of those ceilings
+are above {fmt(peakGflops(a100))} GFLOP/s and the model returns the compute peak for all of
+them. What separates them on real hardware is what the model leaves out: occupancy and
+latency hiding, instruction overhead, how many blocks the grid has against the 108 SMs, and
+how the tiles share the L2 cache. Only timing them tells you, which is what an autotuner
+does.
+
+</details>
+
+## Further reading
+
+- [Simon Boehm, How to Optimize a CUDA Matmul Kernel for cuBLAS-like Performance: a Worklog](https://siboehm.com/articles/22/CUDA-MMM) (December 2022), the steps this chapter follows, measured on an RTX A6000, with [the source on GitHub](https://github.com/siboehm/SGEMM_CUDA).
+- [CUTLASS: Efficient GEMM in CUDA](https://github.com/NVIDIA/cutlass/blob/main/media/docs/cpp/efficient_gemm.md), how NVIDIA's open template library tiles a GEMM across blocks, warps and threads, including the warp tiling level this chapter stops before.
+- [cuBLAS documentation](https://docs.nvidia.com/cuda/cublas/), for `cublasSgemm` and its column-major convention.
+- [Triton tutorial: matrix multiplication](https://triton-lang.org/main/getting-started/tutorials/03-matrix-multiplication.html), a `tl.dot` kernel with autotuning and grouped program order for L2 reuse, and the [triton.autotune reference](https://triton-lang.org/main/python-api/generated/triton.autotune.html).
+- [CUDA C++ Programming Guide 12.4](https://docs.nvidia.com/cuda/archive/12.4.0/cuda-c-programming-guide/index.html), sections on shared memory and on the 48 KB static shared memory limit and the opt-in above it.
+- [Nsight Compute Profiling Guide](https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html), for the roofline, memory and shared memory sections.

@@ -2339,3 +2339,139 @@
 	color: var(--sim-text);
 	font-weight: 600;
 }
+
+/* GEMM tiler sim (chapter 20) */
+[data-sim='gemm-tiler'] select {
+	width: 100%;
+	max-width: 100%;
+}
+[data-sim='gemm-tiler'] input[type='range'] {
+	min-height: 44px;
+}
+[data-sim='gemm-tiler'] input[type='range']:disabled {
+	opacity: 0.45;
+}
+[data-sim='gemm-tiler'] .expressive-code .copy button {
+	width: 44px;
+	height: 44px;
+}
+.gt-actions {
+	align-content: end;
+}
+.gt-actions span {
+	color: var(--sim-muted);
+}
+.gt-actions button {
+	font: inherit;
+	font-weight: 500;
+	min-height: 44px;
+	padding: 0 0.9rem;
+	color: var(--sim-text);
+	background: transparent;
+	border: 1px solid var(--sim-line);
+	border-radius: 4px;
+	cursor: pointer;
+}
+.gt-actions button:hover:not(:disabled) {
+	border-color: var(--sim-active);
+}
+.gt-actions button:disabled {
+	opacity: 0.45;
+	cursor: default;
+}
+/* Heat ramp from the panel color to the accent; the counts are also printed as text. */
+.gt-heat-0 {
+	fill: var(--sim-block-b);
+}
+.gt-heat-1 {
+	fill: color-mix(in srgb, var(--sim-active) 25%, var(--sim-block-b));
+}
+.gt-heat-2 {
+	fill: color-mix(in srgb, var(--sim-active) 50%, var(--sim-block-b));
+}
+.gt-heat-3 {
+	fill: color-mix(in srgb, var(--sim-active) 75%, var(--sim-block-b));
+}
+.gt-heat-4 {
+	fill: var(--sim-active);
+}
+.gt-frame {
+	fill: none;
+	stroke: var(--sim-muted);
+}
+.gt-grid {
+	stroke: var(--sim-panel);
+	stroke-opacity: 0.6;
+}
+.gt-strip {
+	fill: var(--sim-warn-fill);
+	fill-opacity: 0.8;
+	stroke: var(--sim-warn);
+	stroke-dasharray: 3 2;
+}
+.gt-slice {
+	fill: var(--sim-warn);
+	stroke: var(--sim-warn);
+}
+.gt-strong {
+	fill: var(--sim-text);
+}
+.gt-thread {
+	fill: var(--sim-block-b);
+	stroke: var(--sim-line);
+}
+.gt-thread.is-warp {
+	fill: var(--sim-active);
+}
+.gt-me {
+	fill: none;
+	stroke: var(--sim-warn);
+	stroke-width: 2;
+}
+.gt-track {
+	fill: none;
+	stroke: var(--sim-line);
+}
+.gt-track.is-error {
+	fill: var(--sim-warn-fill);
+	stroke: var(--sim-warn);
+	stroke-dasharray: 4 3;
+}
+.gt-bar {
+	fill: var(--sim-active);
+}
+.gt-bar.is-dim {
+	fill: var(--sim-muted);
+}
+.gt-stats {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(10.5rem, 1fr));
+	gap: 0.5rem 1rem;
+	margin: 0.75rem 0 0;
+	font-size: var(--sl-text-sm);
+}
+.gt-stats dt {
+	color: var(--sim-muted);
+	font-size: var(--sl-text-xs);
+}
+.gt-stats dd {
+	margin: 0;
+	font-family: var(--sl-font-mono);
+	color: var(--sim-text);
+}
+.gt-res {
+	display: grid;
+	gap: 0.35rem;
+	margin: 0.75rem 0 0;
+	padding: 0;
+	list-style: none;
+	font-size: var(--sl-text-sm);
+}
+.gt-res li {
+	padding-inline-start: 0.6rem;
+	border-inline-start: 3px solid var(--sim-line);
+}
+.gt-res li.is-error {
+	border-inline-start: 3px dashed var(--sim-warn);
+	color: var(--sim-warn);
+}
