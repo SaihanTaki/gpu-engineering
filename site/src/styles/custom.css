@@ -523,6 +523,7 @@
 }
 .sim-race-table td {
 	font-family: var(--sl-font-mono);
+}
 
 /* Compile pipeline sim */
 .pipe-box {
