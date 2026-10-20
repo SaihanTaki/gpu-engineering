@@ -911,3 +911,115 @@
 .occ-limits strong {
 	font-weight: 600;
 }
+
+/* Coalescing sim (chapter 6) */
+[data-sim='coalescing'] .sim-field[hidden] {
+	display: none;
+}
+[data-sim='coalescing'] select {
+	width: 100%;
+	max-width: 100%;
+}
+[data-sim='coalescing'] input[type='range'] {
+	min-height: 44px;
+}
+[data-sim='coalescing'] .expressive-code .copy button {
+	width: 44px;
+	height: 44px;
+}
+.co-presets {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.5rem;
+	margin-bottom: 0.75rem;
+}
+.co-presets button {
+	font: inherit;
+	font-size: var(--sl-text-sm);
+	min-height: 44px;
+	padding: 0 0.8rem;
+	color: var(--sim-text);
+	background: transparent;
+	border: 1px solid var(--sim-muted);
+	border-radius: 4px;
+	cursor: pointer;
+}
+.co-presets button:hover {
+	border-color: var(--sim-active);
+}
+.co-lane {
+	fill: transparent;
+	stroke: var(--sim-line);
+}
+.co-lane.is-placed {
+	fill: var(--sim-block-a);
+	stroke: var(--sim-muted);
+}
+.co-lane.is-current {
+	fill: var(--sim-active);
+	stroke: var(--sim-active);
+}
+.co-lane-text {
+	font: 500 10px var(--sl-font-mono);
+	fill: var(--sim-text);
+	text-anchor: middle;
+}
+.co-lane-text.is-current {
+	fill: var(--sim-panel);
+}
+.co-sector {
+	fill: transparent;
+	stroke: var(--sim-muted);
+	stroke-dasharray: 3 2;
+}
+.co-sector.is-fetched {
+	fill: var(--sim-block-a);
+	stroke: var(--sim-muted);
+	stroke-dasharray: none;
+}
+.co-sector.is-current {
+	stroke: var(--sim-text);
+	stroke-width: 2;
+}
+.co-sector-text {
+	font: 10px var(--sl-font-mono);
+	fill: var(--sim-muted);
+	text-anchor: middle;
+}
+.co-elem {
+	fill: var(--sim-active);
+}
+.co-elem.is-current {
+	fill: var(--sim-text);
+}
+.co-legend {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.25rem 1.25rem;
+	margin: 0.5rem 0 0;
+	padding: 0;
+	list-style: none;
+	font-size: var(--sl-text-xs);
+}
+.co-legend li {
+	display: flex;
+	align-items: center;
+	gap: 0.4rem;
+}
+.co-legend .sim-swatch {
+	flex-shrink: 0;
+	width: 1.25rem;
+	height: 1.25rem;
+}
+.co-legend .sim-swatch.is-used {
+	background: var(--sim-active);
+	border-color: var(--sim-active);
+}
+.co-legend .sim-swatch.is-fetched {
+	background: var(--sim-block-a);
+	border-color: var(--sim-muted);
+}
+.co-legend .sim-swatch.is-idle {
+	background: transparent;
+	border: 1px dashed var(--sim-muted);
+}
