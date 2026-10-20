@@ -19,7 +19,7 @@ jobs:
           python-version: '3.12'
       - name: Install dependencies
         run: |
-          pip install numpy pytest numba-cuda==0.30.4 triton==3.8.0
+          pip install numpy pytest "numba-cuda[cu13]==0.30.4" triton==3.8.0
           pip install torch==2.14.1 --index-url https://download.pytorch.org/whl/cpu
       # No GPU on hosted runners; kernels/conftest.py switches Numba and
       # Triton to their CPU modes.
