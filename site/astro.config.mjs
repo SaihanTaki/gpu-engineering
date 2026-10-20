@@ -29,6 +29,7 @@ export default defineConfig({
 				// Add each part here when its first chapter exists, so no group is empty.
 				{ label: 'Part 0: Why GPUs?', items: [{ autogenerate: { directory: 'part-0-why-gpus' } }] },
 				{ label: 'Part 1: Foundations', items: [{ autogenerate: { directory: 'part-1-foundations' } }] },
+				{ label: 'Part 2: Memory hierarchy', items: [{ autogenerate: { directory: 'part-2-memory-hierarchy' } }] },
 			],
 		}),
 	],
