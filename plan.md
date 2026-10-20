@@ -170,8 +170,8 @@ in the course:
 - **Host requirement**: an NVIDIA driver plus the NVIDIA Container Toolkit
 
 ```bash
-docker run --gpus all -it --rm -p 8888:8888 -v "$PWD":/workspace \
-  ghcr.io/<org>/gpu-engineering:latest
+docker build -t gpu-engineering docker/
+docker run --gpus all -it --rm -p 8888:8888 -v "$PWD":/workspace gpu-engineering bash
 # inside the container
 make -C kernels/ch06-coalescing   # build the CUDA C++ version
 pytest kernels/ch06-coalescing    # check all three versions against NumPy
@@ -180,8 +180,7 @@ python kernels/ch06-coalescing/bench.py
 
 - Versions of CUDA, PyTorch, Triton and `numba-cuda` are pinned and listed on
   each chapter page, so the code a learner runs matches the course.
-- Built and published to GitHub Container Registry by CI on every release tag.
-- The same image runs the GPU benchmark job in CI.
+- Learners build the image locally; it is not published to a registry.
 - Profiling inside the container needs `--cap-add=SYS_ADMIN` (or the host's
   performance-counter setting enabled); Appendix B documents both.
 
@@ -293,7 +292,7 @@ unit-tested with Vitest separately from the SVG view.
   text and diagrams. Using separate licenses lets people reuse the kernels
   freely while derived versions of the course text stay open.
 - **Hosting**: public GitHub repo; the site deploys to GitHub Pages from `main`
-  with GitHub Actions. The Docker image is published to GitHub Container Registry.
+  with GitHub Actions. The Docker image is built locally, not published.
 - **Contributions**: `CONTRIBUTING.md` explains how to add a chapter, a sim or
   a kernel, using the chapter template from section 2. The sim style guide in
   `docs/` keeps contributed sims consistent.

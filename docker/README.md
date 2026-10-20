@@ -21,13 +21,7 @@ From the repository root:
 docker build -t gpu-engineering docker/
 ```
 
-CI publishes the same image to `ghcr.io/OWNER/gpu-engineering` on every
-release tag. Replace `OWNER` with the GitHub user or organization that hosts
-the repository, then pull it instead of building:
-
-```bash
-docker pull ghcr.io/OWNER/gpu-engineering:latest
-```
+The image is not published to a registry, so build it locally.
 
 ## Run
 

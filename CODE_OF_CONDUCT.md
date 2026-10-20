@@ -7,11 +7,9 @@ project space.
 
 ## Reporting
 
-Report unacceptable behavior to the maintainers at **[CONTACT EMAIL]**.
-Reports are handled privately, and the maintainers will respect the privacy
-of the person reporting.
-
-<!-- Maintainer: replace [CONTACT EMAIL] above with a monitored address before publishing. -->
+Report unacceptable behavior to the maintainers at
+[saihan0176@gmail.com](mailto:saihan0176@gmail.com). Reports are handled
+privately, and the maintainers will respect the privacy of the person reporting.
 
 Enforcement follows the
 [Enforcement Guidelines](https://www.contributor-covenant.org/version/2/1/code_of_conduct/#enforcement-guidelines)
