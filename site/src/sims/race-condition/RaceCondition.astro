@@ -1,0 +1,123 @@
+---
+import SimFrame from '@components/SimFrame.astro';
+import { CODE, MODE_IDS, MODE_NAMES, PRESET_IDS, PRESET_NAMES, THREAD_OPTIONS, type Mode, type Preset } from './model';
+
+interface Props {
+	threads?: number;
+	mode?: Mode;
+	preset?: Preset;
+}
+
+const { threads = 2, mode = 'plain', preset = 'lost-one' } = Astro.props;
+const variants = MODE_IDS.map((id) => ({ name: id, code: CODE[id], lang: 'cpp' }));
+// SimFrame shows the first variant until the script runs, so put the starting one first.
+variants.sort((a, b) => Number(b.name === mode) - Number(a.name === mode));
+const maxThreads = Math.max(...THREAD_OPTIONS);
+---
+
+<SimFrame title="Race condition: threads updating one counter" sim="race-condition" code={variants} config={{ threads, mode, preset, custom: [] }}>
+	<Fragment slot="params">
+		<label class="sim-field">
+			<span>Threads</span>
+			<select name="threads">
+				{THREAD_OPTIONS.map((t) => <option value={t} selected={t === threads}>{t}</option>)}
+			</select>
+		</label>
+		<label class="sim-field">
+			<span>Update</span>
+			<select name="mode">
+				{MODE_IDS.map((m) => <option value={m} selected={m === mode}>{MODE_NAMES[m]}</option>)}
+			</select>
+		</label>
+		<label class="sim-field">
+			<span>Interleaving</span>
+			<select name="preset">
+				{PRESET_IDS.map((p) => <option value={p} selected={p === preset}>{PRESET_NAMES[p]}</option>)}
+			</select>
+		</label>
+	</Fragment>
+
+	<div class="rc-pick" role="group" aria-label="Run one instruction of a thread" data-pick hidden={preset !== 'custom'}>
+		<span>Run next:</span>
+		{Array.from({ length: maxThreads }, (_, t) => <button type="button" data-thread={t}>Thread {t}</button>)}
+	</div>
+	<div class="sim-canvas" data-canvas>
+		<svg role="img" aria-label="The shared counter, each thread's register and instructions, the order the instructions ran in, and the expected and actual final count"></svg>
+	</div>
+	<ul class="rc-legend" aria-label="Legend">
+		<li><span class="rc-swatch is-now"></span>the instruction that just ran</li>
+		<li><span class="rc-swatch is-lost"></span>a store that overwrote other threads' updates</li>
+		<li><span class="rc-swatch is-future"></span>still to run</li>
+	</ul>
+
+	<Fragment slot="caption">
+		Model, not a measurement. One instruction runs per step, in the order you choose; on a GPU the hardware chooses, and
+		the order changes from run to run. The model leaves out warps, caches and memory latency. The three instructions are the
+		ones NVRTC emits for <code>count += 1</code> on a shared counter.
+	</Fragment>
+</SimFrame>
+
+<script>
+	import { Stepper } from '@sim-core/stepper';
+	import { bindControls } from '@sim-core/controls';
+	import { highlightLines, showVariant } from '@sim-core/code-sync';
+	import { describe, lastStep, lineOf, OPS, stateAt, type Config, type Mode, type Preset } from './model';
+	import { render } from './view';
+
+	function mount(frame: HTMLElement) {
+		const config: Config = JSON.parse(frame.dataset.config!);
+		const stepper = new Stepper(lastStep(config), 1000);
+		const canvas = frame.querySelector<HTMLElement>('[data-canvas]')!;
+		const svgEl = canvas.querySelector('svg')!;
+		const pick = frame.querySelector<HTMLElement>('[data-pick]')!;
+		const buttons = [...pick.querySelectorAll<HTMLButtonElement>('button')];
+		const field = (name: string) => frame.querySelector<HTMLSelectElement>(`[name="${name}"]`)!;
+		let code = showVariant(frame, config.mode);
+
+		const draw = () => {
+			const step = stepper.step;
+			render(svgEl, config, step, Math.max(260, canvas.clientWidth));
+			const ran = stateAt(config, step).event;
+			highlightLines(code, ran ? [lineOf(ran.op)] : []);
+			const s = stateAt(config, step);
+			buttons.forEach((b, t) => {
+				b.hidden = t >= config.threads;
+				b.disabled = t >= config.threads || s.threads[t].done >= OPS[config.mode].length;
+			});
+		};
+
+		const sync = bindControls(frame, stepper, (step) => describe(config, step));
+
+		frame.querySelector('.sim-params')!.addEventListener('input', () => {
+			config.threads = Number(field('threads').value);
+			config.mode = field('mode').value as Mode;
+			config.preset = field('preset').value as Preset;
+			config.custom = [];
+			pick.hidden = config.preset !== 'custom';
+			code = showVariant(frame, config.mode);
+			// A new setup starts at step 0, so the reader can predict before stepping.
+			stepper.setLast(lastStep(config));
+			sync(stepper.step);
+			draw();
+		});
+
+		buttons.forEach((b) =>
+			b.addEventListener('click', () => {
+				// Picking after stepping back replaces the rest of the order.
+				const kept = config.custom.slice(0, stepper.step);
+				const s = stateAt(config, stepper.step);
+				const t = Number(b.dataset.thread);
+				if (s.threads[t].done >= OPS[config.mode].length) return;
+				config.custom = [...kept, t];
+				stepper.setLast(lastStep(config));
+				stepper.goTo(stepper.last);
+			}),
+		);
+
+		stepper.onChange(draw);
+		new ResizeObserver(draw).observe(canvas);
+		draw();
+	}
+
+	document.querySelectorAll<HTMLElement>('[data-sim="race-condition"]').forEach(mount);
+</script>
