@@ -1,0 +1,435 @@
+---
+title: 23. Tensor cores and mixed precision
+description: FP32, TF32, FP16, BF16 and FP8 bit by bit, why tensor cores multiply in low precision and add in FP32, which lane of a warp holds which matrix element, and a WMMA GEMM in CUDA C++ next to tl.dot in Triton.
+sidebar:
+  order: 23
+banner:
+  content: Draft chapter. If something is wrong or unclear, use the edit link at the bottom of the page.
+---
+
+import BitLayout from '@sims/bit-layout/BitLayout.astro';
+import MmaFragment from '@sims/mma-fragment/MmaFragment.astro';
+import CodeTabs from '@components/CodeTabs.astro';
+import { Code } from '@astrojs/starlight/components';
+import { gpuById } from '@sim-core/gpu-specs';
+import { convert, FORMATS, formatById, fmtValue, hex, maxFinite, minNormal, minSubnormal } from '@sims/bit-layout/model';
+import cuda from '@kernels/ch23-tensor-cores/cuda/wmma_gemm.cuh?raw';
+import numba from '@kernels/ch23-tensor-cores/numba/fp16_gemm.py?raw';
+import triton from '@kernels/ch23-tensor-cores/triton/matmul.py?raw';
+import ptxCounts from '@kernels/ch23-tensor-cores/triton/show_ptx.out.txt?raw';
+
+export const t4 = gpuById('t4');
+export const a100 = gpuById('a100');
+export const h100 = gpuById('h100');
+export const peak = (x) => (x === null ? 'none' : x.toLocaleString('en-US'));
+export const ratio = (g, x) => (x === null ? 'n/a' : `${(x / g.peakFp32Tflops).toFixed(0)}x`);
+export const pow2 = (v) => `2^${Math.log2(v)}`;
+export const sci = (v) => (v >= 1e5 || v < 1e-3 ? v.toExponential(2).replace('e+', 'e') : String(v));
+export const f16 = formatById('fp16');
+export const bf16 = formatById('bf16');
+export const tenth = convert(f16, 0.1);
+export const third = convert(bf16, 1 / 3);
+export const ridge16 = (a100.peakFp16TensorTflops * 1000) / a100.memoryGbPerS;
+
+On the {a100.name}, NVIDIA lists {a100.peakFp32Tflops} TFLOPS for FP32
+arithmetic and {a100.peakFp16TensorTflops} TFLOPS for FP16 matrix multiplies
+on the tensor cores: {ratio(a100, a100.peakFp16TensorTflops)} as much. The
+GEMM from chapter 20, tuned as far as it goes on the CUDA cores, can never
+come near the second number. It is limited by the FP32 units it runs on.
+
+The faster number comes from a different unit that does a different
+operation: a small matrix multiply-accumulate per instruction, issued by a
+whole warp, on inputs with fewer bits. The price is precision. This chapter
+shows what those bits are, why tensor cores add in FP32 even when they
+multiply in FP16, and how a warp shares one matrix multiply between its 32
+lanes.
+
+## A floating-point number, bit by bit
+
+Every format here stores a sign bit `s`, an exponent field `e` of E bits and
+a mantissa field `m` of M bits. For a normal number, the value is
+
+```text
+(-1)^s x 1.m x 2^(e - bias)        1.m is binary: 1 + m / 2^M
+```
+
+The bias is 2<sup>E-1</sup> - 1, so the exponent field stores both positive
+and negative powers of two. Two field values are special. `e = 0` means a
+**subnormal** number, `0.m x 2^(1 - bias)`, which fills the gap between the
+smallest normal number and zero with evenly spaced values; with `m = 0` too
+it is zero. All ones in `e` means infinity (`m = 0`) or NaN.
+
+<table>
+	<thead>
+		<tr><th>Format</th><th>Bits</th><th>Exponent</th><th>Mantissa</th><th>Largest</th><th>Smallest normal</th><th>Smallest subnormal</th><th>Max relative rounding error</th></tr>
+	</thead>
+	<tbody>
+		{FORMATS.map((f) => (
+			<tr>
+				<td>{f.name}</td>
+				<td>{1 + f.expBits + f.manBits}</td>
+				<td>{f.expBits}</td>
+				<td>{f.manBits}</td>
+				<td>{sci(maxFinite(f))}</td>
+				<td>{pow2(minNormal(f))}</td>
+				<td>{pow2(minSubnormal(f))}</td>
+				<td>2^-{f.manBits + 1}</td>
+			</tr>
+		))}
+	</tbody>
+</table>
+
+The exponent bits set the **range**, the mantissa bits the **precision**.
+Read the table in pairs:
+
+- **FP16 and BF16** both take 16 bits. FP16 (IEEE 754 binary16) spends 5 on
+  the exponent and 10 on the mantissa: about 3 decimal digits, but nothing
+  above 65,504. BF16 keeps FP32's 8 exponent bits and FP32's range, and keeps
+  only 7 mantissa bits. BF16 is the top half of an FP32 number, so converting
+  is rounding off the low 16 bits.
+- **TF32** has FP32's exponent and FP16's mantissa, 19 bits in all. It is not
+  a storage format: values sit in ordinary 32-bit FP32 registers and memory,
+  and the tensor cores use only the top 19 bits.
+- **FP8** comes in two encodings, both 8 bits. E4M3 has more precision, E5M2
+  more range. The FP8 paper by Micikevicius et al. recommends "E4M3 for
+  weight and activation tensors, and E5M2 for gradient tensors". E5M2
+  follows the IEEE rules for infinity and NaN and is FP16 with 8 fewer
+  mantissa bits. E4M3 has no infinity and only one NaN pattern per sign,
+  `S.1111.111`, so its top exponent holds ordinary numbers up to 448 instead
+  of the 240 that IEEE rules would allow.
+
+### Rounding
+
+A real number almost never falls exactly on a value the format has, so the
+hardware rounds it, by default to the nearest one, and on a tie to the one
+whose last mantissa bit is 0 ("round to nearest, ties to even"). Between
+2<sup>k</sup> and 2<sup>k+1</sup> neighbouring values are
+2<sup>k-M</sup> apart, so rounding moves a normal number by at most half of
+that: a relative error of at most 2<sup>-(M+1)</sup>, the last column of the
+table. FP16 0.1 is {hex(f16, tenth)} = {fmtValue(tenth.value)}, off by
+{tenth.relError.toExponential(1)}. BF16 1/3 is {hex(bf16, third)} =
+{fmtValue(third.value)}, off by {third.relError.toExponential(1)}.
+
+Three things can go worse than that:
+
+- **Overflow.** A value past the largest number becomes infinity. In FP16
+  that happens at 65,520, not far above values a sum of squares can reach.
+- **Underflow.** Below the smallest normal number, the spacing stays fixed
+  while the numbers shrink, so subnormals have fewer significant bits. At or
+  below half the smallest subnormal, the value becomes 0.
+- **NaN.** E4M3 has no infinity. A conversion that does not saturate turns
+  an overflow into NaN; CUDA's `__nv_cvt_float_to_fp8` takes a
+  `__NV_SATFINITE` flag that clamps to 448 instead.
+
+Type a number, drag its magnitude, or click any bit of the format you are
+editing. The cards show the same value rounded to all six formats, with its
+bits, its error and whether it overflowed or underflowed. The bars below
+show each format's range on a log scale. **Next** walks through the edge
+cases.
+
+<BitLayout />
+
+Things to try:
+
+- **Type 2049.** FP16 has 11 significant bits, so above 2,048 only even
+  integers exist. 2049 is a tie and goes to 2048.
+- **Click the lowest mantissa bit** of FP16 1.0. The value becomes
+  1 + 2<sup>-10</sup>: the spacing of FP16 numbers near 1.
+- **Set every exponent bit of BF16.** You get infinity, or NaN once any
+  mantissa bit is set too. In E4M3, all ones is NaN and all ones with the
+  last mantissa bit cleared is 448.
+
+## Why the accumulator is FP32
+
+A matrix multiply is a set of dot products, and a dot product is a long
+sum. Each add rounds. With an FP16 running sum, every partial sum keeps 11
+significant bits, and the errors pile up with the length K of the sum.
+Worse, once the sum is large, small terms vanish into the rounding. The
+Numba kernel in this chapter adds 4,096 ones and gets 2,048 with an FP16
+accumulator: at 2,048 the spacing of FP16 numbers is 2, 2,048 + 1 is a tie,
+and the tie goes back to 2,048, every time. With an FP32 accumulator the
+answer is 4,096.
+
+Tensor cores keep the inputs small and the sum wide. The product of two FP16
+numbers has at most 22 significant bits, so it fits exactly in FP32's 24,
+and "FP16 inputs, FP32 accumulate" costs little accuracy beyond
+rounding the inputs. That is the setting the peak rates below assume, and on
+the {t4.name}, the {a100.name} and the {h100.name} NVIDIA lists the same
+tensor rate for an FP32 accumulator as for an FP16 one. An FP16 accumulator
+saves registers and output bytes, not tensor-core time.
+
+Training a network in FP16 needs two more measures, from Micikevicius et al.,
+*Mixed Precision Training*: an FP32 master copy of the weights that the
+updates are added to, and **loss scaling**. Some gradients are smaller than
+2<sup>-24</sup>, the smallest FP16 subnormal, and would become 0.
+Multiplying the loss by a factor S, often a power of two, scales every
+gradient by S by the chain rule and lifts them into FP16's range; the
+optimizer divides by S in FP32 before the update. Dynamic loss scaling, as
+in PyTorch's `torch.amp.GradScaler`, lowers S when a gradient overflows and
+skips that step. BF16 has FP32's range, so BF16 training usually needs no
+loss scaling. FP8 uses the same idea per tensor: the FP8 paper chooses a
+scale for each tensor so that its largest value lands near the largest FP8
+number.
+
+## What a tensor core computes
+
+A tensor core instruction computes
+
+```text
+D = A x B + C
+```
+
+for small fixed tiles: on the shape used below, A is 16 x 16, B is 16 x 8,
+and C and D are 16 x 8. The instruction is issued by a whole warp at once.
+No single lane holds A or B: each of the 32 lanes holds a few elements of
+each matrix in its registers, called its **fragment**, and the tensor core
+gathers them across the warp. All 32 lanes must take part, so a tensor-core
+instruction inside a branch that splits a warp is undefined (the
+CUDA programming guide warns that it is "likely to hang").
+
+The formats a tensor core accepts depend on the GPU, from NVIDIA's PTX ISA
+target notes for `mma` and the CUDA programming guide's WMMA tables:
+
+| | {t4.name} ({t4.architecture}, sm_75) | {a100.name} ({a100.architecture}, sm_80) | {h100.name} ({h100.architecture}, sm_90) |
+|---|---|---|---|
+| FP16 in, FP16 or FP32 accumulate | yes | yes | yes |
+| INT8 in, INT32 accumulate | yes | yes | yes |
+| BF16 in, FP32 accumulate | no | yes | yes |
+| TF32 in, FP32 accumulate | no | yes | yes |
+| FP64 | no | yes | yes |
+| FP8 E4M3, E5M2 in | no | no | yes |
+
+The PTX ISA lists BF16 and TF32 `mma` as needing sm_80 and FP8 as needing
+sm_89 or higher; NVIDIA's Hopper architecture article lists FP8 among the
+H100's tensor-core data types.
+
+Their peak rates, dense (no structured sparsity), from the same datasheets
+chapter 19 uses:
+
+| | {t4.name} | {a100.name} | {h100.name} |
+|---|---|---|---|
+| FP32 on CUDA cores, TFLOPS | {peak(t4.peakFp32Tflops)} | {peak(a100.peakFp32Tflops)} | {peak(h100.peakFp32Tflops)} |
+| TF32 tensor, TFLOPS | {peak(t4.peakTf32TensorTflops)} | {peak(a100.peakTf32TensorTflops)} ({ratio(a100, a100.peakTf32TensorTflops)}) | {peak(h100.peakTf32TensorTflops)} ({ratio(h100, h100.peakTf32TensorTflops)}) |
+| FP16/BF16 tensor, TFLOPS | {peak(t4.peakFp16TensorTflops)} ({ratio(t4, t4.peakFp16TensorTflops)}) | {peak(a100.peakFp16TensorTflops)} ({ratio(a100, a100.peakFp16TensorTflops)}) | {peak(h100.peakFp16TensorTflops)} ({ratio(h100, h100.peakFp16TensorTflops)}) |
+| FP8 tensor, TFLOPS | {peak(t4.peakFp8TensorTflops)} | {peak(a100.peakFp8TensorTflops)} | {peak(h100.peakFp8TensorTflops)} ({ratio(h100, h100.peakFp8TensorTflops)}) |
+| INT8 tensor, TOPS | {peak(t4.peakInt8TensorTops)} | {peak(a100.peakInt8TensorTops)} | {peak(h100.peakInt8TensorTops)} |
+
+The ratios are to each GPU's FP32 rate. The {t4.name} has no BF16, so its
+FP16/BF16 row is FP16 only. Each halving of the input width roughly doubles
+the rate, which is why the industry moved from FP32 to FP16 and BF16, and
+then to FP8.
+
+## Who holds what
+
+The CUDA C++ API for tensor cores is WMMA (warp matrix multiply-accumulate),
+in `<mma.h>`. Its fragments are opaque: the programming guide says "the
+mapping of matrix elements into fragment internal storage is unspecified and
+subject to change in future architectures." One level down, the PTX
+instruction `mma.sync` does document its layout, and that is the
+instruction Triton and libraries such as CUTLASS emit on Ampere. For
+`mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32` (FP16 A and B, FP32 C
+and D), the PTX ISA gives, with `groupID = laneid >> 2` and
+`threadID_in_group = laneid % 4`:
+
+```text
+A, 16 x 16, a0..a7 in four .f16x2 registers
+  row = groupID           for a0, a1, a4, a5;   groupID + 8 for a2, a3, a6, a7
+  col = 2 * threadID_in_group + (i & 1)   for i < 4;   the same + 8 for i >= 4
+B, 16 x 8, b0..b3 in two .f16x2 registers
+  row = 2 * threadID_in_group + (i & 1)   for i < 2;   the same + 8 for i >= 2
+  col = groupID
+C and D, 16 x 8, c0..c3 in four .f32 registers
+  row = groupID for i < 2;   groupID + 8 for i >= 2
+  col = 2 * threadID_in_group + (i & 1)
+```
+
+Pick a lane and see its 8 + 4 + 4 elements, or click any cell to see which
+lane holds it and in which register. Steps 4 to 7 follow the four outputs
+of the selected lane: each needs a row of A held by 4 lanes and a column of
+B held by 4 other lanes.
+
+<MmaFragment />
+
+The PTX ISA lists this f16 shape as needing sm_80. The {t4.name} (sm_75)
+has `mma.sync` m16n8k8 for FP16, and WMMA's 16 x 16 x 16 works on it.
+Hopper adds `wgmma`, issued by a warpgroup of four warps, which reads B (and
+optionally A) from shared memory, with tiles up to 64 x 256 x 16; it is
+beyond this chapter.
+
+## The code
+
+The CUDA version uses WMMA. Each warp declares three fragments, loads a
+16 x 16 tile of A and of B with `load_matrix_sync`, multiplies them into
+the accumulator with `mma_sync`, steps along K, and writes the 16 x 16
+result with `store_matrix_sync`. The last argument of each load is the
+leading dimension: the number of elements between consecutive rows, which
+the guide requires to be a multiple of 8 for `__half`. The tiles come
+straight from global memory. A fast GEMM stages them through shared memory
+as in chapter 20, which is what cuBLAS and CUTLASS do.
+
+numba-cuda 0.30.4 has no WMMA and no `mma`, so the Numba tab cannot use the
+tensor cores. It shows the arithmetic instead: FP16 arrays (NumPy
+`float16`), converted to FP32 for an FP32 sum in one kernel, and summed in
+FP16 with `cuda.fp16.hfma` in the other. These run on the CUDA cores.
+
+<CodeTabs
+	cuda={cuda}
+	numba={numba}
+	triton={triton}
+	titles={{ cuda: 'cuda/wmma_gemm.cuh', numba: 'numba/fp16_gemm.py', triton: 'triton/matmul.py' }}
+>
+	<div slot="triton-note">
+		Triton has no fragments and no warps in its code: `tl.dot(a, b, acc)` multiplies two blocks, and the compiler
+		picks the instructions and the fragment layout for the target. With FP16 or BF16 blocks it uses the tensor cores
+		where it can. With FP32 blocks, `input_precision` decides: `"tf32"`, the default on NVIDIA GPUs, rounds the inputs
+		to TF32 for the tensor cores; `"ieee"` keeps full FP32 on the CUDA cores; `"tf32x3"` splits each value into
+		pieces to recover most of the FP32 accuracy on the tensor cores. `allow_tf32=True` is the deprecated spelling of
+		`"tf32"`. The accumulator stays FP32 because the code creates it with `tl.zeros(..., dtype=tl.float32)`.
+	</div>
+</CodeTabs>
+
+The tests in `test_correctness.py` compare every kernel against an FP64
+NumPy product of the same FP16 inputs, with error bounds set by the
+accumulator's precision: about K x 2<sup>-24</sup> of the sum of
+|a| x |b| for FP32, K x 2<sup>-11</sup> for FP16. They include the
+2,048 stall above. Without a GPU, they run the Numba kernels on the
+simulator and the Triton kernel in its interpreter, compile the WMMA header
+with NVRTC for sm_75, sm_80 and sm_90, and compile the Numba kernels to PTX.
+
+## What the compiler emits
+
+`triton/show_ptx.py` compiles the Triton kernel with 128 x 128 x 32 tiles
+for three targets, without running it, and counts its multiply-accumulate
+instructions in the PTX. With Triton 3.8.0:
+
+<Code code={ptxCounts.trim()} lang="text" title="triton/show_ptx.out.txt" />
+
+The counts are per thread for one trip around the K loop.
+
+- **sm_80**, FP16: the `mma.sync` m16n8k16 instruction from the simulation
+  above. Four warps share a 128 x 128 tile, 64 x 64 each; that is 8 x 8
+  instructions per 16 of K, 64 for the 32 of K in one loop trip.
+- **sm_90**: `wgmma` on 64 x 128 tiles for the whole warpgroup.
+- **TF32**: a separate instruction with k = 8, because a TF32 value takes
+  32 bits in a register where FP16 takes 16.
+- **sm_75**: FP32 FMAs, 4,096 per thread, for every input type. Triton 3.8
+  did not use the {t4.name}'s tensor cores for this kernel. WMMA does
+  (the CUDA tab compiles to `wmma.mma.sync` for sm_75), and so does cuBLAS.
+- **"ieee"**: FMAs on every GPU, the same work as chapter 20's kernels.
+
+## On the roofline
+
+Chapter 19 put the FP16 tensor ridge of the {a100.name} at
+{ridge16.toFixed(0)} FLOP/byte, against 9.6 for FP32. A square GEMM that
+reads A and B once in FP16 and writes C once in FP32 moves 8N<sup>2</sup>
+bytes for 2N<sup>3</sup> FLOPs: N / 4 FLOP/byte. It needs N above
+{(4 * ridge16).toFixed(0)} before it can be compute-bound on the tensor
+cores. Every tile size, register and shared-memory decision from chapter
+20 matters more here, because the faster the arithmetic, the more reuse each
+byte needs to keep up.
+
+## Measure it
+
+On a GPU, from `kernels/ch23-tensor-cores`:
+
+```sh
+make -C cuda run ARCH=80
+python numba/fp16_gemm.py
+python triton/matmul.py
+ncu --section ComputeWorkloadAnalysis --section InstructionStats ./cuda/wmma_gemm
+```
+
+The CUDA program prints the time, the TFLOPS and the largest error of each
+WMMA kernel; the Triton script does the same for FP16, BF16, TF32 and FP32
+inputs. Things to look for:
+
+- The error of the FP16 accumulator against the FP32 one, at the same speed
+  or close to it.
+- In the Triton output, the TF32 error against the `"ieee"` error, and the
+  time between them.
+- In Nsight Compute, HMMA instructions in the instruction statistics and
+  the tensor pipe's utilization in the compute workload section. No HMMA
+  means the work did not reach the tensor cores.
+
+No GPU was available for this chapter. Every program here was compiled
+(CUDA with nvcc and NVRTC for sm_75, sm_80 and sm_90, Triton to PTX) and
+tested on the CPU, but none was timed, so no times or TFLOPS are quoted.
+
+## Exercises
+
+**1. Read the bits.** What is FP16 `0 10001 1010000000`?
+
+<details>
+<summary>Answer</summary>
+
+Exponent field 10001 = 17, minus the bias 15: 2<sup>2</sup>. Mantissa
+1.101 in binary = 1.625. The value is 1.625 x 4 = 6.5.
+
+</details>
+
+**2. Counting integers.** What is the largest N such that every integer from
+0 to N is exact in BF16? In FP16?
+
+<details>
+<summary>Answer</summary>
+
+A format with M mantissa bits has M + 1 significant bits, so every integer
+up to 2<sup>M+1</sup> is exact and 2<sup>M+1</sup> + 1 is not. BF16:
+2<sup>8</sup> = 256; 257 rounds to 256. FP16: 2<sup>11</sup> = 2,048, the
+number the FP16 sum of ones stops at.
+
+</details>
+
+**3. Find the lane.** In `mma.m16n8k16`, which lane holds A(10, 5), and
+under which name? Which lane holds D(3, 6)?
+
+<details>
+<summary>Answer</summary>
+
+A: row 10 is groupID + 8, so groupID = 2; column 5 is
+2 x threadID_in_group + 1 with i &lt; 4, so threadID_in_group = 2. Lane =
+4 x 2 + 2 = 10. Row + 8 and odd column, i &lt; 4: a3, the high half of
+register 1. D: row 3 = groupID, column 6 = 2 x 3 + 0, so lane 4 x 3 + 3 =
+15, element c0. Check both in the simulation.
+
+</details>
+
+**4. Loss scale.** A gradient is 2<sup>-27</sup>. What does it become in
+FP16? What is the smallest power-of-two loss scale that keeps it nonzero?
+
+<details>
+<summary>Answer</summary>
+
+The smallest FP16 subnormal is 2<sup>-24</sup>, and anything at or below
+half of it, 2<sup>-25</sup>, rounds to 0. So 2<sup>-27</sup> becomes 0.
+Scaled by 4 it is 2<sup>-25</sup>, a tie that goes to 0. Scaled by 8 it is
+2<sup>-24</sup> exactly. Real loss scales are much larger, often
+2<sup>10</sup> or more, to keep a few significant bits too.
+
+</details>
+
+**5. FP16 accumulate on tensor cores.** The WMMA kernel with an FP16
+accumulator adds 16 products per `mma_sync` before it rounds into C. Would
+it stall at 2,048 on the all-ones test like the Numba kernel?
+
+<details>
+<summary>Answer</summary>
+
+Not there. Each step adds 16, and from 2,048 to 4,096 FP16 values are 2
+apart, so 2,048 + 16 is exact, and so is every sum up to 4,096. A sum of
+ones would first lose steps of 16 above 2<sup>15</sup> = 32,768, where the
+spacing becomes 32 and 32,768 + 16 is a tie. How the tensor core rounds
+inside one instruction is not specified for WMMA, so this argument only
+covers the rounding into C.
+
+</details>
+
+## Further reading
+
+- [NVIDIA, PTX ISA: Matrix Fragments for mma.m16n8k16 with floating point type](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#warp-level-matrix-fragment-mma-16816-float): the layout in the second simulation; the [mma instruction](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#warp-level-matrix-instructions-mma) section lists which shapes and types need which sm.
+- [CUDA C++ Programming Guide 12.4, Warp Matrix Functions](https://docs.nvidia.com/cuda/archive/12.4.0/cuda-c-programming-guide/index.html#warp-matrix-functions): the WMMA API, its restrictions, and the element types and matrix sizes per architecture.
+- [Paulius Micikevicius et al., Mixed Precision Training](https://arxiv.org/abs/1710.03740) (ICLR 2018): FP32 master weights, loss scaling, and FP16 products accumulated in FP32.
+- [Paulius Micikevicius et al., FP8 Formats for Deep Learning](https://arxiv.org/abs/2209.05433) (2022): the E4M3 and E5M2 encodings, their special values, and per-tensor scaling.
+- [NVIDIA Hopper Architecture In-Depth](https://developer.nvidia.com/blog/nvidia-hopper-architecture-in-depth/): FP8 tensor cores and the Transformer Engine on the H100.
+- [NVIDIA Ampere architecture whitepaper](https://images.nvidia.com/aem-dam/en-zz/Solutions/data-center/nvidia-ampere-architecture-whitepaper.pdf): TF32 and BF16 on the A100's third-generation tensor cores.
+- [Triton, triton.language.dot](https://triton-lang.org/main/python-api/generated/triton.language.dot.html): `input_precision`, `out_dtype` and the accumulator argument.
