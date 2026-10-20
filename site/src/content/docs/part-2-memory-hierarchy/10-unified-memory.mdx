@@ -1,0 +1,463 @@
+---
+title: 10. Unified and pinned memory
+description: Pageable and pinned host memory, Unified Memory with cudaMallocManaged, page faults and migration, cudaMemPrefetchAsync and cudaMemAdvise, and system-allocated memory with HMM.
+sidebar:
+  order: 10
+banner:
+  content: Draft chapter. If something is wrong or unclear, use the edit link at the bottom of the page.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import PageMigration from '@sims/page-migration/PageMigration.astro';
+import CodeTabs from '@components/CodeTabs.astro';
+import { gpuById } from '@sim-core/gpu-specs';
+import { fmtMiB, fmtTime, PAGE_BYTES, pcieSeconds, summary } from '@sims/page-migration/model';
+import cuda from '@kernels/ch10-unified-memory/cuda/unified_memory.cu?raw';
+import numba from '@kernels/ch10-unified-memory/numba/unified_memory.py?raw';
+
+export const a100 = gpuById('a100');
+export const h100 = gpuById('h100');
+export const t4 = gpuById('t4');
+export const at = (gpu, mode, pages = 8, faultUs = 20) => summary({ gpu, mode, pages, faultUs });
+export const dA = at(a100, 'demand');
+export const pA = at(a100, 'prefetch');
+export const gA = at(a100, 'pageable');
+export const nA = at(a100, 'pinned');
+export const d16 = at(a100, 'demand', 16);
+export const p16 = at(a100, 'prefetch', 16);
+export const pH = at(h100, 'prefetch');
+export const breakEven = pH.total / 16;
+
+The same program can be written two ways. One allocates a host array and a
+device array and copies between them, as in chapter 3. The other calls
+`cudaMallocManaged` once and uses the same pointer on the CPU and in the
+kernel. The second is shorter and has no copies in it. In the simulation below,
+on an {a100.name} with a {fmtMiB(8 * PAGE_BYTES)} array and an assumed 20 µs
+per page fault, it takes {fmtTime(dA.total)} against {fmtTime(nA.total)} for
+the explicit version, and it pays for {dA.gpuFaults + dA.cpuFaults} page
+faults along the way. With one
+added call, `cudaMemPrefetchAsync`, it comes back to {fmtTime(pA.total)}.
+
+This chapter explains where the data really is in each case: pageable and
+pinned host memory, Unified Memory and its page faults, prefetching and
+hints, and plain `malloc` memory on systems where the GPU can use it.
+
+## Pageable and pinned host memory
+
+Memory from `malloc`, `new` or `mmap` is **pageable**. The operating system
+hands out virtual pages and may swap them to disk or move them to another
+physical location at any time. The GPU's copy engines move data by DMA (direct
+memory access): they read and write physical addresses over PCIe, with no CPU
+involved. A page that might move in the middle of a DMA cannot be its source.
+
+So when you `cudaMemcpy` from a pageable buffer, the driver first copies the
+data with the CPU into a **pinned** (page-locked) staging buffer that it owns,
+and the DMA reads from there. The
+[runtime API's synchronization notes](https://docs.nvidia.com/cuda/cuda-runtime-api/api-sync-behavior.html)
+describe it: for a pageable host-to-device copy, the call returns once "the
+pageable buffer has been copied to the staging memory for DMA transfer to
+device memory". The driver splits the copy into pieces and overlaps the
+staging with the DMA, but NVIDIA does not document the buffer size or how
+much of the cost the overlap hides.
+
+You can skip the staging by allocating pinned memory yourself:
+
+- `cudaMallocHost(&h_x, bytes)` allocates pinned host memory, and
+  `cudaFreeHost(h_x)` frees it.
+- `cudaHostAlloc(&h_x, bytes, flags)` does the same with flags; with
+  `cudaHostAllocDefault` it behaves like `cudaMallocHost`.
+- `cudaHostRegister(ptr, bytes, flags)` pins memory you already have from
+  `malloc` or `mmap`. `cudaHostUnregister` undoes it.
+
+The [programming guide](https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/understanding-memory.html#page-locked-host-memory)
+lists two reasons to pin. Pinned memory is required for copies that are
+asynchronous with respect to the CPU, which chapter 21 uses to overlap copies
+with kernels. It also makes ordinary synchronous copies faster. The
+[Best Practices Guide](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#pinned-memory)
+gives one figure: on PCIe x16 Gen3, pinned copies reach "roughly 12 GB/s",
+against a 16 GB/s peak.
+
+Pinning has costs. Pinned pages are taken away from the operating system's
+paging, and the Best Practices Guide warns that "pinned memory should not be
+overused" and that pinning "is a heavyweight operation" compared with a normal
+allocation. Allocate pinned buffers once and reuse them; do not pin and unpin
+inside a loop.
+
+### Mapped memory
+
+Pinned memory from `cudaMallocHost` or `cudaHostAlloc` is also **mapped**: a
+kernel can read and write it directly, with every access going over PCIe and
+nothing copied in advance. This is sometimes called zero-copy memory. It suits
+data that a kernel touches once, in a coalesced pattern (chapter 6). The guide
+says mapped memory "should not be considered a performant alternative to
+unified memory", because the data never moves closer to the GPU. Memory pinned
+with `cudaHostRegister` needs `cudaHostGetDevicePointer` to get the pointer a
+kernel can use.
+
+## Unified Memory
+
+`cudaMallocManaged(&x, bytes)` returns **managed memory**: one pointer that is
+valid in host code and in kernels. Behind it, the driver keeps each page in one
+processor's memory at a time and moves pages to whichever processor uses them.
+NVIDIA calls the feature Unified Memory.
+
+How much the system does on its own depends on the platform. The
+[programming guide](https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/understanding-memory.html#unified-memory-paradigms)
+names two device attributes to check:
+
+- `cudaDevAttrConcurrentManagedAccess` is 1 for **full** Unified Memory
+  support. This is Linux on compute capability 6.0 and later, which includes
+  every GPU in this course. Pages move on demand, through page faults, while
+  kernels run.
+- It is 0 for **limited** support: Windows, WSL, some Tegra devices and GPUs
+  older than compute capability 6.0. Managed memory "is first allocated in the
+  CPU's physical memory", it is moved to the GPU before a kernel launches,
+  page faulting "is only supported from the CPU side", and "the CPU must not
+  access managed memory while the GPU is active". You also cannot allocate
+  more managed memory than the GPU has.
+
+The rest of this chapter assumes full support.
+
+### Page faults and migration
+
+A managed allocation reserves addresses, not memory. A page gets physical
+memory where it is first touched. When the CPU writes `x[i] = i` in a loop, every
+page lands in CPU RAM.
+
+When a kernel then reads `x[i]`, the GPU looks up the address, finds no
+mapping for that page in its own page table, and raises a **page fault**. The
+SM's translations stall while the driver handles it: it finds where the page
+is, copies it over PCIe, unmaps it on the CPU and maps it on the GPU. Then the
+threads carry on. Later accesses to the same page are ordinary memory accesses.
+When the CPU reads the result, the same thing happens in reverse: CPU page
+faults pull each page back.
+
+NVIDIA's
+[allocator table](https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/unified-memory.html#table-um-allocators)
+gives the page sizes. Managed memory uses the system page size while it is on
+the CPU (4 KiB on every x86-64 CPU; Arm CPUs support 4, 16, 32 or 64 KiB) and
+2 MiB while it is on the GPU. The guide adds that "we typically migrate full
+memory pages" and that migration cost grows with page size.
+
+What NVIDIA does not document is how much data one fault actually moves. The
+driver groups faults and prefetches neighbouring data by its own heuristics. An
+[NVIDIA blog post from 2017](https://developer.nvidia.com/blog/maximizing-unified-memory-performance-cuda/)
+measured chunks of up to 896 KB on one test system and warned that "the
+performance heuristics might change in future". NVIDIA also publishes no
+fixed cost per fault. The simulation therefore treats both as assumptions, and
+says so on screen.
+
+## The simulation
+
+The program is `x = 2 * x`: the CPU fills `x`, a kernel doubles it, the CPU
+reads it back. Pick how the memory is handled:
+
+- **Managed, on-demand faults.** `cudaMallocManaged` and nothing else. Each
+  page the kernel touches faults and moves on its own; so does each page the
+  CPU reads afterwards.
+- **Managed + cudaMemPrefetchAsync.** The same allocation, with the whole array
+  prefetched to the GPU before the kernel and back to the host after it.
+- **cudaMemcpy from pageable.** `malloc` and `cudaMalloc`, with the driver's
+  staging copy in both directions.
+- **cudaMemcpy from pinned.** `cudaMallocHost` and `cudaMalloc`, one DMA each
+  way.
+
+Before you step through the first mode, predict how many faults it takes for
+8 pages. Then raise the fault cost and watch the gap to prefetching grow, and
+set it to 0 µs to see the two meet.
+
+<PageMigration />
+
+Three things to notice:
+
+1. **On-demand pays per page.** With 8 pages, the run takes {dA.gpuFaults} GPU
+   faults and {dA.cpuFaults} CPU faults, {dA.transfers} separate transfers. With
+   16 pages it is {d16.gpuFaults + d16.cpuFaults} faults. The bytes over PCIe
+   are the same as for prefetching, {fmtMiB(dA.bytes)} in total, so the PCIe part
+   of the time bar is the same; the difference is the fault handling.
+2. **Prefetch and pinned copies meet the same lower bound.** Both move the
+   whole array in one transfer each way: {fmtTime(pA.total)} and
+   {fmtTime(nA.total)} on the {a100.name}. NVIDIA's 2017 measurements on
+   P100 and V100 PCIe systems agree in shape: 10.9 GB/s for prefetching
+   against 11.4 GB/s for explicit copies, and 5.4 GB/s for a streaming kernel
+   that relied on faults.
+3. **Pageable copies do the work twice.** The data crosses CPU memory once
+   more, into the staging buffer, before it crosses PCIe. The model charges
+   that at the PCIe rate with no overlap, which gives {fmtTime(gA.total)}, an
+   upper estimate. Real drivers overlap part of it.
+
+<Aside type="caution">
+  The fault cost and the one-page-per-fault rule are assumptions, and real
+  migrations are not this regular. Use the simulation to see which costs
+  exist and how they scale with the number of pages, not to predict a time.
+  The [Measure it yourself](#measure-it-yourself) section shows how to count
+  the faults of a real run.
+</Aside>
+
+## Prefetching and hints
+
+`cudaMemPrefetchAsync` asks the driver to move a range of managed memory to a
+location before anyone touches it. In CUDA 13 the location is a
+`cudaMemLocation` struct, not a device number:
+
+```cpp
+// CUDA 13 runtime API
+cudaError_t cudaMemPrefetchAsync(const void *devPtr, size_t count,
+                                 struct cudaMemLocation location,
+                                 unsigned int flags, cudaStream_t stream = 0);
+cudaError_t cudaMemAdvise(const void *devPtr, size_t count,
+                          enum cudaMemoryAdvise advice,
+                          struct cudaMemLocation location);
+```
+
+CUDA 12 code that passes an `int` device, or `cudaCpuDeviceId` for the host,
+does not compile against CUDA 13. Set `type` to `cudaMemLocationTypeDevice`
+with `id` set to the device ordinal, or to `cudaMemLocationTypeHost`, where
+`id` is ignored. `flags` must be 0.
+
+```cpp
+cudaMemLocation gpu = {}, host = {};
+gpu.type = cudaMemLocationTypeDevice;
+gpu.id = device;
+host.type = cudaMemLocationTypeHost;
+
+cudaMemPrefetchAsync(x, bytes, gpu, 0, stream);   // before the kernel
+scale<<<blocks, 256, 0, stream>>>(x, n);
+cudaMemPrefetchAsync(x, bytes, host, 0, stream);  // before the CPU reads
+cudaStreamSynchronize(stream);
+```
+
+The prefetch is ordered in the stream like a kernel: the guide says the
+migration "does not begin until all prior operations in the stream have
+completed", and the kernel after it waits for it. Prefetching to a GPU
+requires `concurrentManagedAccess`. It is only a performance hint; accesses
+stay correct without it, and also while a migration is in flight.
+
+`cudaMemAdvise` sets longer-lived hints on a range:
+
+- `cudaMemAdviseSetReadMostly`: the data is mostly read. A processor that
+  reads it gets its own read-only copy instead of taking the page away from
+  the others. A write invalidates the copies.
+- `cudaMemAdviseSetPreferredLocation`: keep the data in this location's
+  memory. The guide says it "encourages the system to keep the data at the
+  preferred location, but does not guarantee it". Other processors may then map
+  it remotely instead of migrating it.
+- `cudaMemAdviseSetAccessedBy`: this location will access the data often, so
+  keep it mapped there wherever the data lives. This avoids faults without
+  moving the pages.
+
+The guide also warns that hints used incorrectly "might degrade performance".
+Measure with and without them.
+
+## System-allocated memory and HMM
+
+Chapter 3 said that passing a host pointer to a kernel fails, unless the system
+supports heterogeneous memory management. On some systems the GPU can use
+memory from plain `malloc`, `new` or `mmap`, and even stack and global
+variables passed through a pointer, with no CUDA allocation at all. The
+programming guide calls this full Unified Memory support for all
+allocations. There are two ways a system gets it:
+
+- **HMM** (Heterogeneous Memory Management) is a Linux kernel feature that the
+  NVIDIA driver uses to give PCIe GPUs the same model in software. It needs
+  Linux kernel 6.1.24+, 6.2.11+ or 6.3+, a GPU of compute capability 7.5 or
+  later, and a driver of version 535 or later installed with the open kernel
+  modules, according to the
+  [unified memory chapter](https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/unified-memory.html#unified-memory-on-devices-with-full-cuda-unified-memory-support).
+  NVIDIA's [HMM announcement](https://developer.nvidia.com/blog/simplifying-gpu-application-development-with-heterogeneous-memory-management/)
+  (CUDA 12.2, August 2023) adds that it is x86-64 only and that its page
+  migrations are "handled in chunks of 4 KB-page size". All three GPUs in
+  this course meet the compute capability requirement.
+- **ATS** (Address Translation Services) does it in hardware on systems where
+  the CPU and GPU share one page table, such as NVIDIA Grace Hopper. There the
+  GPU faults less and, where it can, accesses CPU memory remotely over the
+  NVLink C2C link instead of migrating it.
+  When ATS is present, HMM is disabled.
+
+Check for it in code with `cudaDevAttrPageableMemoryAccess`, which is 1 when
+"all system memory is fully-supported unified memory", or from the shell with
+`nvidia-smi -q | grep Addressing`, which prints `Addressing Mode : HMM` on an
+HMM system. `cudaDevAttrPageableMemoryAccessUsesHostPageTables` tells you
+which kind: 1 for hardware coherence (ATS), 0 for software (HMM).
+
+On those systems, `malloc` memory behaves like managed memory: it is placed on
+first touch, migrates on faults, and accepts `cudaMemPrefetchAsync` and
+`cudaMemAdvise`. What it does not give you is a guarantee of speed; the same
+fault costs apply, and `cudaMalloc` is still the way to get memory that is
+always on the GPU. Without HMM or ATS, a kernel that dereferences a `malloc`
+pointer fails with an illegal address error.
+
+## The code
+
+The CUDA program runs `x = 2 * x` five ways and times each one: `cudaMemcpy`
+from pageable and from pinned memory, managed memory with faults, managed
+memory with prefetching, and `malloc` memory used directly with a
+`cudaMemAdvise` hint. It reads `concurrentManagedAccess` and
+`pageableMemoryAccess` first and skips the runs the system cannot do.
+
+The Numba version covers the host-side choices Numba exposes:
+`cuda.to_device` from an ordinary NumPy array (pageable), `cuda.pinned_array`,
+`cuda.mapped_array` (the kernel works on host memory directly) and
+`cuda.managed_array`. Numba has no wrapper for `cudaMemPrefetchAsync` or
+`cudaMemAdvise`. Numba's documentation calls managed memory supported on
+Linux x86 and PowerPC and experimental on Windows and Linux AArch64. There is
+also `cuda.pinned(arr)` and `cuda.mapped(arr)`, context managers that pin or
+map an existing array for a block of code.
+
+<CodeTabs
+	cuda={cuda}
+	numba={numba}
+	titles={{ cuda: 'cuda/unified_memory.cu', numba: 'numba/unified_memory.py' }}
+>
+	<div slot="triton-note">
+		There is no Triton version. Triton kernels take tensors that are already on the GPU, so the choices in this
+		chapter belong to whoever allocates those tensors, usually PyTorch. In PyTorch, `tensor.pin_memory()` returns a
+		copy in pinned host memory, and `tensor.to("cuda", non_blocking=True)` from a pinned tensor gives an asynchronous
+		copy; from pageable memory it does not.
+	</div>
+</CodeTabs>
+
+The tests in `kernels/ch10-unified-memory/test_correctness.py` check every
+version against NumPy. Without a GPU, the Numba tests run in the CUDA
+simulator, which has no `managed_array`, so the managed test is skipped there.
+
+## Measure it yourself
+
+On a Linux machine with a GPU:
+
+```sh
+cd kernels/ch10-unified-memory
+make -C cuda run
+python numba/unified_memory.py
+nsys profile --cuda-um-cpu-page-faults=true --cuda-um-gpu-page-faults=true \
+    -o um ./cuda/unified_memory
+```
+
+Things to look for:
+
+- The GB/s of the pinned and pageable runs against the per-direction PCIe peak
+  of your card ({t4.pcieGbPerS} GB/s for Gen3, {a100.pcieGbPerS} for Gen4,
+  {h100.pcieGbPerS} for Gen5).
+- How far the on-demand run is behind the prefetch run, and whether the gap
+  changes with the array size (pass a count, for example
+  `./cuda/unified_memory 1000000`).
+- In the Nsight Systems timeline, the Unified Memory rows: how many GPU and
+  CPU faults each run takes, and how large the migrations are. Nsight Systems
+  warns that fault tracing "may cause significant runtime overhead", so do not
+  trust times from the traced run.
+
+## What the model leaves out
+
+The simulation moves exactly one 2 MiB page per fault and charges a fixed fault
+cost that you choose. The real driver groups faults, may move less than a page
+or prefetch more, and runs other warps while some wait. Read-mostly copies,
+preferred locations, access counters, oversubscription (managed allocations
+larger than GPU memory), multiple GPUs and the staging buffer's real size and
+overlap are all left out.
+
+## Exercises
+
+**1. Count the faults.** Set the simulation to managed on-demand with
+{fmtMiB(16 * PAGE_BYTES)} (16 pages). How many GPU faults, CPU faults and
+separate transfers does the run take? What are the counts with prefetching?
+
+<details>
+<summary>Answer</summary>
+
+{d16.gpuFaults} GPU faults while the kernel runs, {d16.cpuFaults} CPU faults
+while the host reads the result, so {d16.transfers} transfers of one page each.
+With prefetching: {p16.gpuFaults + p16.cpuFaults} faults and {p16.transfers}
+transfers of {fmtMiB(16 * PAGE_BYTES)}. Both move {fmtMiB(d16.bytes)} over
+PCIe in total.
+
+</details>
+
+**2. When does faulting double the time?** On an {h100.name} with 8 pages,
+what fault cost would make the on-demand run take twice as long as the
+prefetch run? Use the model's rules: 16 faults, the same PCIe and kernel time
+as prefetching.
+
+<details>
+<summary>Answer</summary>
+
+The prefetch run takes {fmtTime(pH.total)}: two transfers of {fmtMiB(8 * PAGE_BYTES)}
+at {h100.pcieGbPerS} GB/s, {fmtTime(2 * pcieSeconds(h100, 8 * PAGE_BYTES))}, plus
+the kernel, {fmtTime(pH.kernel)}. On-demand adds 16 fault costs on top of the
+same time, so it doubles when 16 x cost = {fmtTime(pH.total)}, at about
+{fmtTime(breakEven)} per fault. The faster the link, the smaller the fault cost
+that hurts, because the transfers it is compared with get shorter.
+
+</details>
+
+**3. Asynchronous, or not.** A program allocates its input with `malloc`, then
+calls `cudaMemcpyAsync` on a stream and launches a kernel on another stream,
+expecting the two to overlap. They do not. Why, and what is the fix?
+
+<details>
+<summary>Answer</summary>
+
+The source is pageable, so the driver has to stage it through its pinned
+buffer. The runtime API notes say that for transfers between device memory and
+pageable host memory the call "might be synchronous with respect to host", so
+the CPU may not reach the kernel launch until the copy is done. Allocate the
+buffer with `cudaMallocHost`, or pin the existing one once with
+`cudaHostRegister`. Chapter 21 covers overlapping copies and kernels in
+streams.
+
+</details>
+
+**4. Fix the bug.** This code works on Linux and crashes on Windows:
+
+```cpp
+float *x;
+cudaMallocManaged(&x, bytes);
+init(x, n);
+scale<<<blocks, 256>>>(x, n);
+printf("%f\n", x[0]);
+```
+
+What is wrong, and is it also wrong on Linux?
+
+<details>
+<summary>Answer</summary>
+
+The CPU reads `x[0]` right after the launch, while the kernel may still be
+running. On Windows `concurrentManagedAccess` is 0, and the CPU must not touch
+managed memory while the GPU is active, so the access fails. On Linux with full
+support the access is allowed, but it is a data race: it may print the value
+before or after the kernel doubles it. The fix in both cases is
+`cudaDeviceSynchronize()` (or a stream synchronize) before reading.
+
+</details>
+
+**5. Without HMM.** You take the `system_allocated` function from the CUDA
+program and run it on a machine whose driver uses the proprietary kernel
+modules, so `pageableMemoryAccess` is 0. What happens, and what are two ways to
+make the code work there?
+
+<details>
+<summary>Answer</summary>
+
+`cudaMemAdvise` returns an error first: for system-allocated memory and a
+device location, the runtime API requires that device to have a non-zero
+`pageableMemoryAccess`, and `CUDA_CHECK` exits. Remove the hint and the kernel dereferences a
+pointer the GPU has no mapping for, so it fails with an illegal address error,
+which leaves the context unusable (chapter 3). The program checks the
+attribute to avoid both. To make it
+work: allocate `x` with `cudaMallocManaged` instead of `malloc`, or copy it to
+a `cudaMalloc` buffer and back. Pinning it with `cudaHostRegister` and using
+the pointer from `cudaHostGetDevicePointer` also works, with every access going
+over PCIe.
+
+</details>
+
+## Further reading
+
+- [CUDA Programming Guide: unified and system memory](https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/understanding-memory.html), for the Unified Memory paradigms, page-locked and mapped memory.
+- [CUDA Programming Guide: Unified Memory](https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/unified-memory.html), with the allocator and page size table, HMM requirements, [prefetching](https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/unified-memory.html#data-prefetching) and [usage hints](https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/unified-memory.html#data-usage-hints).
+- [CUDA Runtime API: memory management](https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__MEMORY.html), the reference for `cudaMallocHost`, `cudaHostRegister`, `cudaMallocManaged`, `cudaMemPrefetchAsync` and `cudaMemAdvise`, and [API synchronization behavior](https://docs.nvidia.com/cuda/cuda-runtime-api/api-sync-behavior.html) for when copies from pageable memory block.
+- [CUDA C++ Best Practices Guide: pinned memory](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#pinned-memory) and [zero copy](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#zero-copy).
+- [Maximizing Unified Memory Performance in CUDA](https://developer.nvidia.com/blog/maximizing-unified-memory-performance-cuda/) (NVIDIA, 2017), on fault handling, the driver's prefetching and the measurements quoted above.
+- [Simplifying GPU Application Development with Heterogeneous Memory Management](https://developer.nvidia.com/blog/simplifying-gpu-application-development-with-heterogeneous-memory-management/) (NVIDIA, 2023), on HMM and system-allocated memory.
+- [Numba CUDA: memory management](https://nvidia.github.io/numba-cuda/user/memory.html), for `pinned_array`, `mapped_array` and `managed_array`.
+- [Nsight Systems User Guide](https://docs.nvidia.com/nsight-systems/UserGuide/index.html), for the Unified Memory fault tracing options.
