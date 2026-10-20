@@ -1,0 +1,340 @@
+---
+title: '11. Case study: matrix transpose'
+description: Three transpose kernels, naive, shared memory tiled and padded, and how 32-byte sectors and 32 shared memory banks decide which one runs near the memory bandwidth.
+sidebar:
+  order: 11
+banner:
+  content: Draft chapter. If something is wrong or unclear, use the edit link at the bottom of the page.
+---
+
+import { Code } from '@astrojs/starlight/components';
+import Transpose from '@sims/transpose/Transpose.astro';
+import CodeTabs from '@components/CodeTabs.astro';
+import { gpuById } from '@sim-core/gpu-specs';
+import { accesses, clockGhz, estimate, fmt, sharedCost, totalsAt, LAST_STEP } from '@sims/transpose/model';
+import cuda from '@kernels/ch11-transpose/cuda/transpose_kernels.cuh?raw';
+import numba from '@kernels/ch11-transpose/numba/transpose.py?raw';
+import triton from '@kernels/ch11-transpose/triton/transpose.py?raw';
+import summary from '@kernels/ch11-transpose/generated/summary.txt?raw';
+
+export const a100 = gpuById('a100');
+export const t4 = gpuById('t4');
+export const h100 = gpuById('h100');
+export const cfg = { gpu: 'a100', n: 1024, tile: 'first', row: 0 };
+export const tot = (k, c = cfg) => totalsAt(c, k, LAST_STEP);
+export const est = (g, k) => estimate(g, tot(k));
+export const pctOf = (g, k) => Math.round((100 * est(g, k).gbPerS) / g.memoryGbPerS);
+export const naive = tot('naive');
+export const tiled = tot('tiled');
+export const pitch34 = sharedCost({ kind: 'shared-load', index: Array.from({ length: 32 }, (_, l) => l * 34 + 5) }).degree;
+export const edge = { ...cfg, n: 1000, tile: 'last' };
+export const edgeLanes = accesses(edge, 'naive')[0].index.filter((i) => i !== null).length;
+export const ns = (x) => x.toFixed(3);
+
+Copying a matrix and transposing it move exactly the same bytes: every
+element is read once and written once. Yet on a Tesla K20c, Mark Harris
+measured a straightforward transpose of a 1024 x 1024 float matrix at
+55.3 GB/s and a copy at 136.0 GB/s. Same bytes, about 40% of the speed.
+Two changes to the transpose, one of them a single extra column in an array,
+brought it to 144.3 GB/s on the same GPU.
+
+This chapter works through those three kernels. It uses nothing new: only the
+ideas of chapters 6, 7 and 8, applied to one problem where all three matter at
+once.
+
+## What the last three chapters said
+
+- **Coalescing (chapter 6).** A warp's load or store is served in 32-byte
+  sectors. When the 32 lanes touch 32 consecutive 4-byte words, that is 128
+  bytes in 4 sectors. When they touch 32 words far apart, it is 32 sectors,
+  and 7 of every 8 bytes moved are thrown away.
+- **Shared memory tiles (chapter 7).** A block can copy a tile of global
+  memory into `__shared__` memory, call `__syncthreads()` so every thread sees
+  the whole tile, and then read the tile in any order it likes.
+- **Bank conflicts (chapter 8).** Shared memory is split into 32 banks, and
+  successive 4-byte words go to successive banks. If several lanes of a warp
+  ask one bank for different words, those requests are served one after
+  another. Padding each row of a tile by one word moves a column's words into
+  different banks.
+
+## The problem
+
+`in` has `rows x cols` floats in row-major order, so element `(r, c)` is at
+`in[r * cols + c]`. The transpose `out` has `cols x rows` floats and
+`out[c * rows + r] = in[r * cols + c]`.
+
+Every kernel here follows Harris's article: the matrix is cut into 32 x 32
+tiles, and each tile is handled by one block of 32 x 8 threads. Each thread
+moves 4 elements in a loop, so `threadIdx.x` picks a column of the tile and
+`threadIdx.y + j` a row, with `j = 0, 8, 16, 24`. A warp is the 32 threads
+with the same `threadIdx.y`, so on each pass through the loop a warp handles
+one row of the tile.
+
+### Naive
+
+```cpp
+out[x * rows + (y + j)] = in[(y + j) * cols + x];
+```
+
+For one warp, `x` runs over 32 consecutive values. The read `in[(y + j) * cols + x]`
+touches 32 neighbouring words: {naive.loadSectors} sectors, fully used. The
+write `out[x * rows + (y + j)]` touches 32 words that are `rows` floats apart,
+a column of `out`: {naive.storeSectors} sectors, each carrying 4 useful bytes
+out of 32. The warp moves {fmt(naive.sectorBytes)} bytes of sectors to transfer
+{naive.usefulBytes} bytes of data.
+
+Swapping the roles does not help. If lanes walk down a column of `in`, the
+read is the strided one instead. One side of a transpose always walks a column.
+
+### Tiled through shared memory
+
+The fix is to do the column walk somewhere it costs less. The block reads its
+tile row by row, coalesced, into shared memory. After `__syncthreads()`, the
+block writes the mirrored tile of `out` row by row, also coalesced. The
+transpose happens in the middle, when each lane reads a *column* of the
+shared tile:
+
+```cpp
+tile[threadIdx.y + j][threadIdx.x] = in[(y + j) * cols + x];   // row in, row of tile
+__syncthreads();
+out[(y + j) * rows + x] = tile[threadIdx.x][threadIdx.y + j];  // column of tile, row out
+```
+
+Note the second pair of indices. After the barrier, `x` and `y` are rebuilt
+from `blockIdx.y` and `blockIdx.x` swapped, because tile `(bx, by)` of `in`
+becomes tile `(by, bx)` of `out`. Now both global accesses are {tiled.loadSectors}
+sectors per warp. The barrier is required: the column a lane reads was written
+by 32 different threads, in all 8 warps of the block.
+
+### Padded
+
+`tile` is `float[32][32]`, so word `tile[i][k]` is word `32 * i + k` and lives
+in bank `(32 * i + k) % 32 = k`. Reading a column means `k` is fixed and `i`
+runs over the lanes: all 32 lanes ask the same bank for 32 different words.
+That is a 32-way bank conflict, served in 32 passes instead of 1.
+
+Declaring the tile one word wider fixes it:
+
+```cpp
+__shared__ float tile[TILE][TILE + 1];
+```
+
+Now `tile[i][k]` is word `33 * i + k`, in bank `(i + k) % 32`. Down a column,
+`i` changes by one per lane, so the bank does too: 32 lanes, 32 banks, one
+pass. Rows still map to 32 different banks, so the store into the tile stays
+conflict free. The extra column costs 32 x 4 = 128 bytes of shared memory per
+block and is never read.
+
+## One warp through the three kernels
+
+The simulation follows one warp through all three kernels at once, request by
+request. For global memory it draws each 32-byte sector the request touches,
+filled where a lane uses its word. For shared memory it draws the 32 banks,
+with a column as tall as the number of different words that bank must serve.
+Before you step, guess how many sectors each kernel moves in total. At the
+last step it shows an estimated bandwidth for each kernel on the GPU you pick.
+
+<Transpose />
+
+Things to try:
+
+- **Size 1001.** Rows of 1001 floats are 4,004 bytes, not a multiple of 32,
+  so most rows start partway into a sector. Move the row slider: the coalesced
+  read becomes 5 sectors for every row that is not a multiple of 8.
+- **Size 1000, last tile.** The last tile covers columns 992 to 1023, but only
+  {edgeLanes} of them exist. The bounds check turns the other lanes off. Rows 8
+  to 31 of that tile are outside the matrix, so for them the whole warp does
+  nothing.
+- **The {t4.name}.** Compare the tiled and padded bars with the
+  {a100.name}. The next section explains why they differ.
+
+## Where the estimate comes from
+
+The bars are a model, not a measurement. They assume every warp on the GPU
+does what this warp does and ask which of two things takes longer:
+
+- **Sector traffic.** Every sector counts as 32 bytes at the GPU's memory
+  bandwidth from the spec sheet: {fmt(a100.memoryGbPerS)} GB/s for the
+  {a100.name}.
+- **Shared memory passes.** Each bank delivers 4 bytes per clock, so one SM's
+  shared memory serves one conflict-free warp request per clock. The clock is
+  derived from the datasheet's peak FP32 rate, peak / (SMs x FP32 lanes x 2),
+  which gives {clockGhz(a100).toFixed(2)} GHz for the {a100.name}.
+
+For the default warp on the {a100.name}, the tiled kernel moves 256 bytes of
+sectors, {ns(est(a100, 'tiled').globalNs)} ns at {fmt(a100.memoryGbPerS)} GB/s, and
+needs {tiled.sharedPasses} shared memory passes (1 for the row store, 32 for
+the column load), {ns(est(a100, 'tiled').sharedNs)} ns of shared memory time
+across all 108 SMs. Shared memory is the slower one, so the model gives
+{fmt(est(a100, 'tiled').gbPerS)} GB/s, {pctOf(a100, 'tiled')}% of peak. The
+naive kernel is limited by its sectors at {pctOf(a100, 'naive')}%, and the
+padded one reaches {pctOf(a100, 'padded')}%.
+
+On the {t4.name}, memory is much slower relative to the SMs:
+{fmt(t4.memoryGbPerS)} GB/s for 40 SMs. The same 33 passes take
+{ns(est(t4, 'tiled').sharedNs)} ns, less than the {ns(est(t4, 'tiled').globalNs)} ns
+the sectors take, so in this model the conflicts are hidden behind the memory
+traffic and the tiled and padded bars are equal. The real hardware does not
+promise that. A conflicted request also keeps its warp waiting longer, and
+this model counts throughput only. Run the kernels and compare.
+
+What the model leaves out: the L1 and L2 caches, which can merge the naive
+kernel's partial sector writes from neighbouring warps before they reach
+DRAM; latency and the number of warps available to hide it; DRAM page and
+partition effects; and the cost of the barrier. Harris's measurements, which
+are real but on GPUs from 2010 and 2012, give the shape the model predicts:
+on the Tesla M2050, 18.8 GB/s naive, 51.3 tiled and 99.5 padded, against a
+copy kernel at 105.2.
+
+## The code
+
+All three languages have the same three kernels, except Triton. Unlike
+Harris's version, which assumes the sizes are multiples of 32, every kernel
+here checks bounds, so any `rows x cols` works.
+
+<CodeTabs
+	cuda={cuda}
+	numba={numba}
+	triton={triton}
+	titles={{ cuda: 'cuda/transpose_kernels.cuh', numba: 'numba/transpose.py', triton: 'triton/transpose.py' }}
+>
+	<div slot="triton-note">
+		Triton has no shared memory in its language, and no threads to give a tile to. A program loads a 32 x 32
+		block of `in` as one tensor and stores it to `out`, either with `tl.trans` or by storing the same tensor through
+		swapped strides, the naive kernel's index math. Both are fast for the same reason: the compiler picks a thread
+		layout for each load and store from which addresses are contiguous, rows for the load and columns of the
+		tensor for the store, and moves the data between the two layouts through shared memory. You do not write the
+		staging, the barrier or the layout. The listing below is from compiling both kernels for sm_80 with
+		`generate.py`.
+	</div>
+</CodeTabs>
+
+The CUDA kernels are in a header with no host code, so the tests can compile
+them with NVRTC on a machine without `nvcc`. `cuda/transpose.cu` includes it,
+times each kernel and checks it against a CPU loop. In Numba,
+`cuda.shared.array` needs its shape at compile time, so `make_shared(pad)`
+builds one kernel per padding.
+
+What the Triton compiler produced for the two Triton kernels, counted in its
+TTGIR (`ttg.convert_layout`, the layout change) and PTX (shared memory stores,
+loads and barriers):
+
+<Code code={summary} lang="text" title="generated/summary.txt" />
+
+Both variants compile to the same plan: one layout conversion, lowered to
+shared memory stores, a `bar.sync` and shared memory loads. The global loads
+and stores in the PTX are `ld.global.v4.b32` and `st.global.v4.b32`, 16 bytes
+per thread, so both global sides are coalesced. Whether the conversion's
+shared memory accesses conflict is the compiler's business; check the
+profiler, as below.
+
+## Measure it yourself
+
+On a GPU, from `kernels/ch11-transpose`:
+
+```sh
+make -C cuda run
+python numba/transpose.py
+python triton/transpose.py
+ncu --section MemoryWorkloadAnalysis_Tables ./cuda/transpose 4096 4096
+```
+
+Each program prints the time and effective bandwidth of every kernel,
+`2 x rows x cols x 4` bytes over the time. The CUDA one also times a
+device-to-device `cudaMemcpy` of the same bytes as the ceiling to compare
+with. Things to look for:
+
+- The order of the three kernels, and how far the padded one is from the copy.
+- In Nsight Compute's memory tables, the sectors per request of global stores:
+  near 32 for `transpose_naive`, near 4 for the other two.
+- The shared memory bank conflicts for loads: large for `transpose_shared<0>`,
+  near zero for `transpose_shared<1>`. The metric is
+  `l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum`.
+- How much your measured gap between tiled and padded differs from the
+  model's estimate for your GPU.
+
+## Exercises
+
+**1. Count the sectors.** For the naive kernel on a 1024 x 1024 matrix, how
+many sectors does one warp move per loop iteration, and what fraction of
+those bytes does it use?
+
+<details>
+<summary>Answer</summary>
+
+The read is 32 consecutive floats, 128 bytes at an aligned address:
+{naive.loadSectors} sectors. The write is 32 floats 4,096 bytes apart:
+{naive.storeSectors} sectors. That is {naive.loadSectors + naive.storeSectors}
+sectors, {fmt(naive.sectorBytes)} bytes, for {naive.usefulBytes} bytes of
+data: {Math.round((100 * naive.usefulBytes) / naive.sectorBytes)}%.
+
+</details>
+
+**2. The wrong padding.** A colleague pads the tile by two:
+`__shared__ float tile[32][34]`. What is the conflict degree of a column read?
+
+<details>
+<summary>Answer</summary>
+
+Word `34 * i + k` is in bank `(2 * i + k) % 32`. As `i` runs from 0 to 31,
+`2 * i % 32` takes only the 16 even values, each twice: lanes `i` and
+`i + 16` hit the same bank. That is a {pitch34}-way conflict. Any odd pitch
+works, because an odd number and 32 share no factor.
+
+</details>
+
+**3. Ragged edges.** The matrix is 1000 x 1000. How many blocks does the grid
+have, and how many lanes of the warp handling row 0 of the last tile pass the
+bounds check?
+
+<details>
+<summary>Answer</summary>
+
+`ceil(1000 / 32) = 32` tiles per side, so 32 x 32 = 1,024 blocks. The last
+tile starts at column 31 x 32 = 992, so columns 992 to 999 exist:
+{edgeLanes} lanes. In the simulation, pick size 1000 and the last tile.
+
+</details>
+
+**4. Fix the bug.** Someone deletes `__syncthreads()` from
+`transpose_shared`, and the output is right on their test matrix. Why can it
+still be wrong?
+
+<details>
+<summary>Answer</summary>
+
+After the first loop, a lane reads `tile[threadIdx.x][threadIdx.y + j]`, a
+word that another thread wrote, usually one in a different warp. Without the barrier nothing makes that warp finish its
+store first, so the read can return whatever was in shared memory before. It
+can pass a test by luck, depending on how the warps happen to be scheduled.
+`compute-sanitizer --tool racecheck` reports the hazard.
+
+</details>
+
+**5. Why the {t4.name} bars match.** Using the model's numbers, explain why
+the tiled and padded estimates are equal on the {t4.name} but not on the
+{h100.name}.
+
+<details>
+<summary>Answer</summary>
+
+The model takes the slower of sector time and shared memory time. On the
+{t4.name}, the sectors take {ns(est(t4, 'tiled').globalNs)} ns and the 33
+passes {ns(est(t4, 'tiled').sharedNs)} ns, so memory sets the time with or
+without the conflicts. On the {h100.name}, the sectors take
+{ns(est(h100, 'tiled').globalNs)} ns and the 33 passes
+{ns(est(h100, 'tiled').sharedNs)} ns, so the conflicts set it:
+{fmt(est(h100, 'tiled').gbPerS)} GB/s against {fmt(est(h100, 'padded').gbPerS)}
+padded. The faster the memory is relative to the SMs, the more a conflict
+shows. This is the model's answer; latency, which it ignores, can make
+conflicts cost something on any GPU.
+
+</details>
+
+## Further reading
+
+- [Mark Harris, An Efficient Matrix Transpose in CUDA C/C++](https://developer.nvidia.com/blog/efficient-matrix-transpose-cuda-cc/) (NVIDIA Technical Blog, 2013), the kernels this chapter follows, with the [full source on GitHub](https://github.com/parallel-forall/code-samples/blob/master/series/cuda-cpp/transpose/transpose.cu). Its measurements are for the Tesla M2050 and K20c with ECC on.
+- [CUDA C++ Best Practices Guide: coalesced access to global memory](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#coalesced-access-to-global-memory), the 32-byte transaction rule, and [shared memory and memory banks](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#shared-memory-and-memory-banks). Its [C = AA<sup>T</sup> example](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#shared-memory-in-matrix-multiplication-c-aat) uses the same `TILE_DIM + 1` padding.
+- [CUDA C++ Programming Guide 12.4: shared memory on compute capability 5.x and later](https://docs.nvidia.com/cuda/archive/12.4.0/cuda-c-programming-guide/index.html#shared-memory-5-x), the bank rules the simulation uses, and [device memory accesses](https://docs.nvidia.com/cuda/archive/12.4.0/cuda-c-programming-guide/index.html#device-memory-accesses), for the 256-byte alignment of allocations.
+- [Triton: tl.trans](https://triton-lang.org/main/python-api/generated/triton.language.trans.html).
+- [Nsight Compute Profiling Guide](https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html), for the Memory Workload Analysis tables and shared memory metrics.
