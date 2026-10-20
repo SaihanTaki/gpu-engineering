@@ -27,6 +27,7 @@ export default defineConfig({
 			sidebar: [
 				{ label: 'Start here', items: [{ label: 'How this course works', slug: 'start' }] },
 				// Add each part here when its first chapter exists, so no group is empty.
+				{ label: 'Part 0: Why GPUs?', items: [{ autogenerate: { directory: 'part-0-why-gpus' } }] },
 				{ label: 'Part 1: Foundations', items: [{ autogenerate: { directory: 'part-1-foundations' } }] },
 			],
 		}),
