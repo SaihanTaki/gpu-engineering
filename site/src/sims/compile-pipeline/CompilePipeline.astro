@@ -1,0 +1,185 @@
+---
+import SimFrame from '@components/SimFrame.astro';
+import { PATHS, PATH_IDS, excerpt, lookLines, type PathId } from './model';
+import cudaSrc from '@kernels/ch0-2-software-stack/cuda/saxpy.cu?raw';
+import numbaSrc from '@kernels/ch0-2-software-stack/numba/saxpy.py?raw';
+import tritonSrc from '@kernels/ch0-2-software-stack/triton/saxpy.py?raw';
+import numbaLl from '@kernels/ch0-2-software-stack/generated/numba.ll?raw';
+import numbaPtx from '@kernels/ch0-2-software-stack/generated/numba.ptx?raw';
+import numbaSass from '@kernels/ch0-2-software-stack/generated/numba.sass?raw';
+import tritonTtir from '@kernels/ch0-2-software-stack/generated/triton.ttir?raw';
+import tritonTtgir from '@kernels/ch0-2-software-stack/generated/triton.ttgir?raw';
+import tritonLlir from '@kernels/ch0-2-software-stack/generated/triton.llir?raw';
+import tritonPtx from '@kernels/ch0-2-software-stack/generated/triton.ptx?raw';
+import tritonSass from '@kernels/ch0-2-software-stack/generated/triton.sass?raw';
+
+interface Props {
+	path?: PathId;
+}
+
+const { path = 'triton' } = Astro.props;
+
+const FILES: Record<string, string> = {
+	'cuda/saxpy.cu': cudaSrc,
+	'numba/saxpy.py': numbaSrc,
+	'triton/saxpy.py': tritonSrc,
+	'generated/numba.ll': numbaLl,
+	'generated/numba.ptx': numbaPtx,
+	'generated/numba.sass': numbaSass,
+	'generated/triton.ttir': tritonTtir,
+	'generated/triton.ttgir': tritonTtgir,
+	'generated/triton.llir': tritonLlir,
+	'generated/triton.ptx': tritonPtx,
+	'generated/triton.sass': tritonSass,
+};
+
+// One code variant per stage (the excerpt) plus one for the whole file. The
+// client only switches between them and highlights the lines in `meta`.
+const code: { name: string; code: string; lang: string }[] = [];
+const meta: Record<string, { file?: string; from?: number; to?: number; total?: number; lines: number[] }> = {};
+for (const id of PATH_IDS) {
+	for (const s of PATHS[id].stages) {
+		const name = `${id}:${s.id}`;
+		if (s.commands) {
+			code.push({ name, code: s.commands, lang: 'bash' });
+			meta[name] = { lines: [] };
+		} else if (s.file) {
+			const text = FILES[s.file];
+			const ex = excerpt(text, s.excerpt ?? { start: '' });
+			const lines = lookLines(ex.code, s.look);
+			code.push({ name, code: ex.code, lang: s.lang ?? 'txt' });
+			meta[name] = { file: s.file, from: ex.from, to: ex.to, total: ex.total, lines };
+			// Expressive Code drops leading blank lines (cuobjdump output starts with one), so drop them here and shift the highlights.
+			const all = text.replace(/\n$/, '').split('\n');
+			const skipped = all.findIndex((l) => l.trim() !== '');
+			code.push({ name: `${name}:full`, code: all.slice(skipped).join('\n'), lang: s.lang ?? 'txt' });
+			meta[`${name}:full`] = { file: s.file, total: ex.total, lines: lines.map((n) => n + ex.from - 1 - skipped) };
+		}
+	}
+}
+---
+
+<SimFrame title="From source to machine code" sim="compile-pipeline" code={code} config={{ path, meta }}>
+	<Fragment slot="params">
+		<label class="sim-field">
+			<span>Path</span>
+			<select name="path">
+				{PATH_IDS.map((id) => <option value={id} selected={id === path}>{PATHS[id].label}</option>)}
+			</select>
+		</label>
+	</Fragment>
+
+	<div class="sim-canvas" data-canvas><svg role="img" aria-label="Compilation stages of the selected path, left to right"></svg></div>
+
+	<div class="sim-parts" role="group" aria-label="Stages" data-stages></div>
+
+	<dl class="pipe-detail" data-detail>
+		<div><dt>Made by</dt><dd data-made></dd></div>
+		<div><dt>Next</dt><dd data-read></dd></div>
+		<div><dt>Look for</dt><dd data-notice></dd></div>
+	</dl>
+
+	<div class="pipe-listing">
+		<p class="pipe-listing-note" data-listing-note></p>
+		<label class="sim-check" data-whole-label>
+			<input type="checkbox" name="whole" />
+			<span>Show the whole file</span>
+		</label>
+	</div>
+
+	<Fragment slot="caption">
+		Every listing is real compiler output for sm_80 (an A100), made by kernels/ch0-2-software-stack/generate.py with the
+		versions in generated/VERSIONS.txt. Excerpts are unedited slices of those files. The CUDA C++ path has no
+		listings here because nvcc was not available where they were generated; its dashed stages show the commands to
+		run instead.
+	</Fragment>
+</SimFrame>
+
+<script>
+	import { Stepper } from '@sim-core/stepper';
+	import { bindControls } from '@sim-core/controls';
+	import { highlightLines, showVariant } from '@sim-core/code-sync';
+	import { PATHS, describe, lastStep, stageAt, type PathId } from './model';
+	import { render } from './view';
+
+	type Meta = Record<string, { file?: string; from?: number; to?: number; total?: number; lines: number[] }>;
+
+	function mount(frame: HTMLElement) {
+		const config: { path: PathId; meta: Meta } = JSON.parse(frame.dataset.config!);
+		let path = config.path;
+		const stepper = new Stepper(lastStep(path), 1800);
+		const canvas = frame.querySelector<HTMLElement>('[data-canvas]')!;
+		const svgEl = canvas.querySelector('svg')!;
+		const stagesEl = frame.querySelector<HTMLElement>('[data-stages]')!;
+		const q = (sel: string) => frame.querySelector<HTMLElement>(sel)!;
+		const whole = frame.querySelector<HTMLInputElement>('input[name="whole"]')!;
+		const wholeLabel = q('[data-whole-label]');
+		const note = q('[data-listing-note]');
+
+		const go = (i: number, fromButton = false) => {
+			stepper.pause();
+			stepper.goTo(i);
+			// The buttons are rebuilt on draw; keep keyboard focus on the one just pressed.
+			if (fromButton) stagesEl.querySelector<HTMLButtonElement>('[aria-pressed="true"]')?.focus({ preventScroll: true });
+		};
+
+		const draw = () => {
+			const step = stepper.step;
+			const stages = PATHS[path].stages;
+			const s = stageAt(path, step);
+			render(svgEl, path, step, Math.max(240, canvas.clientWidth), go);
+
+			stagesEl.replaceChildren(
+				...stages.map((st, i) => {
+					const b = document.createElement('button');
+					b.type = 'button';
+					b.textContent = st.label;
+					b.setAttribute('aria-pressed', String(i === step));
+					b.addEventListener('click', () => go(i, true));
+					return b;
+				}),
+			);
+
+			q('[data-made]').textContent = s.made;
+			q('[data-read]').textContent = s.read;
+			q('[data-notice]').textContent = s.notice;
+
+			const name = `${path}:${s.id}`;
+			const m = config.meta[name];
+			const hasWhole = Boolean(m?.file) && !(m.from === 1 && m.to === m.total);
+			wholeLabel.hidden = !hasWhole;
+			const variant = hasWhole && whole.checked ? `${name}:full` : name;
+			const shown = config.meta[variant];
+
+			if (s.commands) {
+				note.textContent =
+					'Commands to run in the course Docker image. Their output is not shown here: the listings on this page were generated on a machine without nvcc.';
+			} else if (!m) {
+				note.textContent = 'No listing for this stage. It happens inside the driver when the program runs.';
+			} else if (variant.endsWith(':full') || !hasWhole) {
+				note.textContent = `Whole file: ${m.file}, ${m.total} lines.`;
+			} else {
+				note.textContent = `Excerpt: lines ${m.from} to ${m.to} of ${m.file} (${m.total} lines).`;
+			}
+			const block = showVariant(frame, m ? variant : '');
+			highlightLines(block, shown?.lines ?? []);
+		};
+
+		frame.querySelector<HTMLSelectElement>('select[name="path"]')!.addEventListener('change', (e) => {
+			const current = stageAt(path, stepper.step).id;
+			path = (e.target as HTMLSelectElement).value as PathId;
+			stepper.setLast(lastStep(path));
+			// Stay on the same kind of stage (say PTX) when the new path has one.
+			const same = PATHS[path].stages.findIndex((s) => s.id === current);
+			if (same > 0) stepper.goTo(same);
+		});
+		whole.addEventListener('change', draw);
+
+		bindControls(frame, stepper, (step) => describe(path, step));
+		stepper.onChange(draw);
+		new ResizeObserver(draw).observe(canvas);
+		draw();
+	}
+
+	document.querySelectorAll<HTMLElement>('[data-sim="compile-pipeline"]').forEach(mount);
+</script>
