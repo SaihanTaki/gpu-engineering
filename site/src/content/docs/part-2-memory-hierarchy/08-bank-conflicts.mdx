@@ -1,0 +1,316 @@
+---
+title: 8. Bank conflicts
+description: How shared memory splits into 32 banks, why a warp that asks one bank for several words waits for each of them, and how padding and XOR swizzling spread a column read over all the banks.
+sidebar:
+  order: 8
+banner:
+  content: Draft chapter. If something is wrong or unclear, use the edit link at the bottom of the page.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import BankGrid from '@sims/bank-grid/BankGrid.astro';
+import CodeTabs from '@components/CodeTabs.astro';
+import { BANKS, BANK_BYTES } from '@sims/bank-grid/model';
+import cuda from '@kernels/ch08-bank-conflicts/cuda/row_sums.cu?raw';
+import numba from '@kernels/ch08-bank-conflicts/numba/row_sums.py?raw';
+import triton from '@kernels/ch08-bank-conflicts/triton/row_sums.py?raw';
+
+Here are two declarations of a shared memory tile:
+
+```cpp
+__shared__ float tile[32][32];
+__shared__ float tile[32][33];
+```
+
+The second one wastes a column: no thread ever reads `tile[r][32]`. Yet the
+CUDA Programming Guide uses exactly this change as its example fix for a
+kernel that reads the tile one column at a time. With the first declaration,
+the guide calls each column read of a warp a 32-way bank conflict: 32
+accesses, one after the other, where one would do. With the second, the read
+is done in one. This chapter explains why, and
+gives a second fix that wastes no memory at all.
+
+## 32 banks
+
+Shared memory is not one memory that answers 32 requests at once. It is split
+into **banks**. The CUDA Programming Guide says: "Shared memory has {BANKS} banks that are organized such that successive 32-bit words map to
+successive banks. Each bank has a bandwidth of 32 bits per clock cycle." So
+for a byte address `a` in shared memory:
+
+```cpp
+int word = a / 4;      // 4-byte words
+int bank = word % 32;  // successive words, successive banks
+```
+
+Word 0 is in bank 0, word 1 in bank 1, word 31 in bank 31, and word 32 is
+back in bank 0. Each bank can deliver one {BANK_BYTES}-byte word per cycle. A warp
+whose 32 lanes ask for 32 words in 32 different banks gets all of them at
+once.
+
+## Conflicts and the conflict degree
+
+When two lanes of one warp ask for **different** words in the **same** bank,
+the guide calls it a **bank conflict**: the bank can only send one of those
+words at a time, so the accesses are serialized. The hardware splits the warp's
+request into several passes. Nsight Compute calls each pass a **wavefront**,
+and a request that needs `n` wavefronts instead of one is an **n-way bank
+conflict**. The `n` is the **conflict degree**: the largest number of distinct
+words that any one bank has to send.
+
+Only the busiest bank counts. If bank 0 must send 4 words and every other bank
+sends 1, the request takes 4 wavefronts, the same as if every bank sent 4.
+
+Conflicts are about lanes of the same warp in the same instruction. Two
+different warps, or two different instructions of one warp, never conflict
+with each other.
+
+## Broadcast
+
+Lanes that read the **same** 32-bit word do not conflict. The guide says that
+for reads "the word is broadcast to the requesting threads". If all 32 lanes
+read `tile[0][0]`, one wavefront serves them all. If lanes 0 to 3 read one word
+and lanes 4 to 7 read the next one, the bank of each word sends it once.
+
+For writes the rule is similar: when several lanes write the same address, only
+one of the writes lands, and which one is undefined. Write to one address from
+one lane, or use an atomic.
+
+## Strides
+
+Most shared memory indexing looks like `s[lane * S]` for some stride `S` in
+elements. With 4-byte elements, lane `i` hits bank `(i * S) % 32`, and the
+conflict degree turns out to be the greatest common divisor of `S` and 32:
+
+| Stride `S` | Banks used | Conflict degree |
+| --- | --- | --- |
+| 1, 3, 17, any odd number | all 32 | 1 |
+| 2 | 16 | 2 |
+| 4 | 8 | 4 |
+| 16 | 2 | 16 |
+| 32, 64 | 1 | 32 |
+
+Odd strides are always conflict-free, because an odd number shares no factor
+with 32. Powers of two are the worst case, and they are also the most common
+strides, because tile widths are usually powers of two.
+
+## The column read
+
+A 2D array in C++ is stored row by row, so in `float tile[32][32]` the element
+`tile[r][c]` is word `r * 32 + c`, in bank `c`. A whole row sits in 32
+different banks, and a whole column sits in one bank.
+
+Reading a row is fine: lane `i` reads `tile[r][i]`, banks 0 to 31. Reading a
+column is the worst case: lane `i` reads `tile[i][c]`, 32 different words that
+are all in bank `c`, a 32-way conflict. Kernels read columns of a tile all the
+time. A transpose does (chapter 11), and so does any kernel where each thread
+works along one row of a tile that the warp loaded together.
+
+### Padding
+
+Declare the tile with one extra column, `float tile[32][33]`. Now `tile[r][c]`
+is word `r * 33 + c`, in bank `(r + c) % 32`. Down a column, `r` goes from 0 to
+31 and the bank moves by one each time, so the 32 lanes hit 32 different
+banks. Rows are still conflict-free.
+
+The cost is 32 unused words per tile, about 3% of a 32 by 32 tile. Padding also
+moves the start of every row off a 16-byte boundary, so the rows can no longer
+be read with aligned `float4` loads. And it fixes the column read only. A
+diagonal read, `tile[i][i]`, is conflict-free in the plain tile (word `33 * i`,
+bank `i`) and becomes 2-way in the padded one (word `34 * i`, bank `2i % 32`).
+
+### Swizzling
+
+A **swizzle** keeps the plain 32-column tile and stores each element in a
+different column of its own row: element `(r, c)` goes to column `c ^ r`, where
+`^` is bitwise XOR.
+
+```cpp
+tile[r][c ^ r] = value;     // store
+float v = tile[r][c ^ r];   // load the same element back
+```
+
+For a fixed row `r`, `c ^ r` takes every value from 0 to 31 exactly once as
+`c` does, so each row still holds its 32 elements and no memory is wasted. For a
+fixed column `c`, the 32 rows land in columns `c ^ 0`, `c ^ 1`, ... `c ^ 31`,
+which are again 32 different values, so a column read touches 32 different
+banks. The cost is one XOR in every index, and every reader and writer of the
+tile has to agree on it. A tile with more rows than 32 uses `c ^ (r % 32)`.
+
+Libraries and compilers use swizzles. Triton's swizzled shared memory layout,
+for example, is an XOR swizzle. The simulation uses the simplest one.
+
+## Try it
+
+Each lane of one warp reads one float of a tile with 32 columns, element
+`k = (lane / G) * S`. The grid has one column per bank and one row per
+wavefront. Start with the column read, stride 32, and predict the number of
+wavefronts before you step. Then switch the layout to padding and to the
+swizzle. After that, try stride 64, stride 33, and `G = 2` with stride 32.
+
+<BankGrid />
+
+Stride 64 reads every other row of column 0. Padding moves row `r` by `r`
+banks, so rows 0 and 32 still meet in bank 0, rows 2 and 34 in bank 2, and so
+on: 2-way. Stride 33 is the diagonal, conflict-free in the plain tile and 2-way
+with padding. With `G = 2`, pairs of lanes share a word, so bank 0 has 16
+words to send instead of 32.
+
+<Aside type="tip">
+  Picking a layout comes down to which reads and writes the tile gets. List every access of the warp to the
+  tile, work out its bank pattern, and choose the padding or swizzle that keeps all of them conflict-free.
+</Aside>
+
+## The code
+
+The chapter's kernels compute the sum of every row of a matrix whose column
+count is a multiple of 32. A block is one warp and handles 32 rows. For each
+group of 32 columns, the warp loads a 32 by 32 tile into shared memory, row by
+row, with coalesced global reads (chapter 6) and conflict-free shared memory
+stores. Then every lane adds up its own row of the tile. In step `j` of that
+loop, lane `i` reads `tile[i][j]`, so the warp reads column `j`: the 32-way
+conflict from the simulation, 32 times per tile.
+
+There are three versions of the kernel: the plain tile, the padded tile and the
+swizzled tile. They do the same arithmetic and produce the same sums. The tests
+in `kernels/ch08-bank-conflicts/` check them against NumPy.
+
+<CodeTabs
+	cuda={cuda}
+	numba={numba}
+	triton={triton}
+	titles={{ cuda: 'cuda/row_sums.cu', numba: 'numba/row_sums.py', triton: 'triton/row_sums.py' }}
+>
+	<div slot="triton-note">
+		Triton has no `__shared__` arrays, so there is nothing to pad or swizzle by hand. The kernel below loads a
+		block with `tl.load` and reduces it with `tl.sum`. When the compiler decides a block has to go through shared
+		memory, for example the operands of `tl.dot` or a change of layout between threads, it also picks the shared
+		memory layout. Triton's swizzled shared layout permutes elements with an XOR, controlled by three parameters,
+		`vec`, `perPhase` and `maxPhase`. Its description in Triton's source says: "In order to avoid shared memory
+		bank conflicts, elements may be swizzled."
+		Whether this particular kernel uses shared memory at all is the compiler's choice.
+	</div>
+</CodeTabs>
+
+What changes between the languages:
+
+- **CUDA C++** writes the plain and padded versions as one template, `row_sums<PAD>`,
+  so the only difference is the `+ PAD` in the declaration.
+- **Numba** needs a constant shape for `cuda.shared.array`, so it has three
+  separate kernels. The CUDA simulator the tests use without a GPU runs them
+  correctly but does not model banks, so it cannot show the conflict.
+- **Triton** has one kernel and no layout choices to make.
+
+The inputs in the tests are small integers, so every sum is exact and the
+order of the additions does not matter.
+
+## Measure it yourself
+
+On a machine with an NVIDIA GPU, build the CUDA program and run it under
+Nsight Compute:
+
+```sh
+make -C kernels/ch08-bank-conflicts/cuda
+kernels/ch08-bank-conflicts/cuda/row_sums
+ncu --section MemoryWorkloadAnalysis_Tables --section SourceCounters \
+    kernels/ch08-bank-conflicts/cuda/row_sums
+```
+
+- The program prints the time of each version. Do not expect a 32 times
+  difference: the kernel also reads global memory and adds numbers, and other
+  warps run while one waits.
+- The **shared memory table** of Memory Workload Analysis lists, for shared
+  loads and stores, the number of requests, wavefronts and bank conflicts. For
+  the plain version, expect about 32 wavefronts per shared load request; for
+  the padded and swizzled versions, about one.
+- **Source Counters** shows the same per line of source, with metrics such as
+  `memory_l1_wavefronts_shared` next to `memory_l1_wavefronts_shared_ideal`,
+  and the average conflict degree per shared memory instruction.
+
+If `ncu` reports a section name as unknown, `ncu --list-sections` prints the
+ones your version has. The times depend on your GPU, so none are quoted here.
+
+## Exercises
+
+**1. Predict the degree.** A warp reads `float s[1024]` with `s[lane * S]`.
+What is the conflict degree for `S = 4`, `S = 6` and `S = 7`?
+
+<details>
+<summary>Answer</summary>
+
+The degree is the greatest common divisor of `S` and 32. For `S = 4` it is 4:
+lanes hit banks 0, 4, 8, ... 28, and each of those 8 banks gets 4 words. For
+`S = 6` it is 2: `6i % 32` repeats every 16 lanes, so lanes `i` and `i + 16`
+share a bank, with different words. For `S = 7` it is 1, since 7 is odd.
+
+</details>
+
+**2. Padding is not free.** In `float tile[32][33]`, lane `i` reads
+`tile[i][i]`. What is the conflict degree? What is it in `float tile[32][32]`?
+
+<details>
+<summary>Answer</summary>
+
+Padded: the word is `33i + i = 34i`, in bank `34i % 32 = 2i % 32`. Only the 16
+even banks are used, each by two lanes (`i` and `i + 16`), so it is 2-way. Plain:
+the word is `32i + i = 33i`, in bank `i`, which is conflict-free. Set stride 33 in
+the simulation to check both.
+
+</details>
+
+**3. Broadcast or conflict.** Lane `i` reads `tile[i / 4][0]` from
+`float tile[32][32]`. How many wavefronts does the read take? And for
+`tile[0][i / 4]`?
+
+<details>
+<summary>Answer</summary>
+
+`tile[i / 4][0]` gives 8 distinct words, rows 0 to 7 of column 0, all in bank 0.
+Each word is broadcast to its 4 lanes, but the bank still has to send 8 words:
+8 wavefronts, an 8-way conflict. That is stride 32 with `G = 4` in the simulation.
+`tile[0][i / 4]` reads words 0 to 7 in banks 0 to 7: one wavefront, each word
+broadcast to 4 lanes.
+
+</details>
+
+**4. Fix the bug.** A block of `dim3(32, 32)` threads loads a tile with
+`tile[threadIdx.y][threadIdx.x] = in[...]` and later reads
+`tile[threadIdx.x][threadIdx.y]`, with `__shared__ float tile[32][32]`. Which of
+the two accesses conflicts, how badly, and what are two fixes?
+
+<details>
+<summary>Answer</summary>
+
+A warp holds 32 threads with the same `threadIdx.y` and `threadIdx.x` from 0 to
+31. The store writes one row, conflict-free. The load reads one column,
+`tile[0..31][y]`, a 32-way conflict. Fix 1: declare `tile[32][33]`. Fix 2: keep
+`tile[32][32]` and swizzle both accesses, storing to
+`tile[threadIdx.y][threadIdx.x ^ threadIdx.y]` and reading from
+`tile[threadIdx.x][threadIdx.y ^ threadIdx.x]`. Element `(r, c)` lives at column
+`c ^ r` in both, so the load finds what the store wrote. Chapter 11 uses this
+access pattern.
+
+</details>
+
+**5. Run it.** Run `pytest kernels/ch08-bank-conflicts`. On a GPU, run the
+Nsight Compute command above and find the shared load wavefronts of each of the
+three kernels. Before you look, predict the ratio between the plain kernel and
+the padded one.
+
+<details>
+<summary>Answer</summary>
+
+The column reads, `tile[lane][j]`, are 32-way in the plain kernel and
+conflict-free in the padded one, so they need 32 times as many wavefronts. The
+stores are conflict-free in both. Shared loads in this kernel are only the
+column reads, so the plain kernel's shared load wavefronts should be close to 32
+times the padded kernel's. The swizzled kernel should match the padded one.
+
+</details>
+
+## Further reading
+
+- [CUDA Programming Guide: shared memory access patterns](https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/writing-cuda-kernels.html#shared-memory-access-patterns), the source for the 32 banks, the 4-byte bank width and broadcast, with figures of strided and irregular accesses.
+- [CUDA Programming Guide: shared memory bank conflicts](https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/writing-cuda-kernels.html#shared-memory-bank-conflicts), the column read and the `+1` padding fix.
+- [Nsight Compute Profiling Guide](https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html), for the definition of a wavefront, the Memory Workload Analysis tables and the shared memory source metrics.
+- [Using Shared Memory in CUDA C/C++](https://developer.nvidia.com/blog/using-shared-memory-cuda-cc/), NVIDIA Technical Blog, with a section on bank conflicts.
+- [Triton: TritonGPUAttrDefs.td](https://github.com/triton-lang/triton/blob/main/include/triton/Dialect/TritonGPU/IR/TritonGPUAttrDefs.td), the definition of Triton's swizzled shared memory layout and its `vec`, `perPhase` and `maxPhase` parameters.
