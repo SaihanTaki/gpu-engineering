@@ -1850,3 +1850,94 @@
 [data-sim='reduction-tree'] input[type='range'] {
 	min-height: 44px;
 }
+
+/* Sparse formats sim (chapter 18) */
+.sp-empty {
+	fill: none;
+	stroke: var(--sim-line);
+	stroke-opacity: 0.5;
+}
+.sp-nz,
+.sp-ptr,
+.sp-work {
+	fill: var(--sim-block-b);
+	stroke: var(--sim-line);
+}
+.sp-nz.is-done,
+.sp-work.is-done {
+	fill: var(--sim-block-a);
+}
+.sp-nz.is-now,
+.sp-work.is-now,
+.sp-pad.is-now {
+	fill: var(--sim-active);
+	stroke: var(--sim-active);
+}
+.sp-pad {
+	fill: var(--sim-warn-fill);
+	stroke: var(--sim-warn);
+	stroke-dasharray: 3 2;
+}
+.sp-pad.is-done {
+	stroke-dasharray: none;
+}
+.sp-idle {
+	fill: none;
+	stroke: var(--sim-muted);
+	stroke-dasharray: 2 2;
+}
+.sp-cell-text.is-now {
+	fill: var(--sim-panel);
+}
+.sp-tick {
+	stroke: var(--sim-text);
+	stroke-width: 2;
+}
+.sp-legend,
+.sp-totals {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.25rem 1.25rem;
+	margin: 0.5rem 0 0;
+	padding: 0;
+	list-style: none;
+	font-size: var(--sl-text-xs);
+}
+.sp-legend li {
+	display: flex;
+	align-items: center;
+	gap: 0.4rem;
+}
+.sp-swatch {
+	flex-shrink: 0;
+	width: 1rem;
+	height: 0.75rem;
+	border: 1px solid var(--sim-line);
+	border-radius: 2px;
+}
+.sp-swatch.is-now {
+	background: var(--sim-active);
+	border-color: var(--sim-active);
+}
+.sp-swatch.is-done {
+	background: var(--sim-block-a);
+}
+.sp-swatch.is-idle {
+	border: 1px dashed var(--sim-muted);
+}
+.sp-swatch.is-pad {
+	background: var(--sim-warn-fill);
+	border: 1px dashed var(--sim-warn);
+}
+.sp-totals {
+	display: grid;
+	gap: 0.35rem;
+	font-size: var(--sl-text-sm);
+}
+.sp-totals li {
+	padding-inline-start: 0.6rem;
+	border-inline-start: 3px solid var(--sim-line);
+}
+.sp-totals li.is-current {
+	border-inline-start-color: var(--sim-active);
+}
