@@ -31,6 +31,7 @@ export default defineConfig({
 				{ label: 'Part 1: Foundations', items: [{ autogenerate: { directory: 'part-1-foundations' } }] },
 				{ label: 'Part 2: Memory hierarchy', items: [{ autogenerate: { directory: 'part-2-memory-hierarchy' } }] },
 				{ label: 'Part 3: Parallel patterns', items: [{ autogenerate: { directory: 'part-3-parallel-patterns' } }] },
+				{ label: 'Part 4: Performance engineering', items: [{ autogenerate: { directory: 'part-4-performance-engineering' } }] },
 			],
 		}),
 	],
