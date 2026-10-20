@@ -2126,3 +2126,105 @@
 [data-sim='scan'] input[type='range'] {
 	min-height: 44px;
 }
+
+/* Stream timeline sim (chapter 21) */
+[data-sim='stream-timeline'] select {
+	width: 100%;
+	max-width: 100%;
+}
+[data-sim='stream-timeline'] input[type='range'] {
+	min-height: 44px;
+}
+[data-sim='stream-timeline'] .expressive-code .copy button {
+	width: 44px;
+	height: 44px;
+}
+.st-link {
+	margin: 0 0 0.5rem;
+	font-family: var(--sl-font-mono);
+	font-size: var(--sl-text-xs);
+	color: var(--sim-muted);
+}
+.st-lane,
+.st-axis {
+	stroke: var(--sim-line);
+}
+.st-future {
+	fill: none;
+	stroke: var(--sim-muted);
+	stroke-dasharray: 3 2;
+}
+.st-h2d {
+	fill: var(--sim-block-a);
+	stroke: var(--sim-muted);
+}
+.st-kernel {
+	fill: var(--sim-active);
+	stroke: var(--sim-active);
+}
+.st-d2h {
+	fill: url(#st-hatch);
+	stroke: var(--sim-muted);
+}
+.st-hatch-bg {
+	fill: var(--sim-block-b);
+}
+.st-hatch-line {
+	stroke: var(--sim-muted);
+	stroke-width: 1.5;
+}
+.st-now-op {
+	fill: none;
+	stroke: var(--sim-text);
+	stroke-width: 2;
+}
+.st-cursor {
+	stroke: var(--sim-warn);
+	stroke-width: 2;
+}
+.st-bar-text {
+	font: 500 11px var(--sl-font-mono);
+	fill: var(--sim-text);
+	text-anchor: middle;
+	pointer-events: none;
+}
+.st-bar-text.on-kernel {
+	fill: var(--sl-color-black);
+}
+.st-end {
+	text-anchor: end;
+}
+.st-legend,
+.st-totals {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.25rem 1.25rem;
+	margin: 0.5rem 0 0;
+	padding: 0;
+	list-style: none;
+	font-family: var(--sl-font-mono);
+	font-size: var(--sl-text-xs);
+}
+.st-legend li {
+	display: flex;
+	align-items: center;
+	gap: 0.4rem;
+}
+.st-legend .sim-swatch {
+	flex-shrink: 0;
+}
+.sim-swatch.st-sw-h2d {
+	background: var(--sim-block-a);
+	border-color: var(--sim-muted);
+}
+.sim-swatch.st-sw-kernel {
+	background: var(--sim-active);
+}
+.sim-swatch.st-sw-d2h {
+	background: repeating-linear-gradient(45deg, var(--sim-muted) 0 1.5px, var(--sim-block-b) 1.5px 4px);
+	border-color: var(--sim-muted);
+}
+.sim-swatch.st-sw-future {
+	background: none;
+	border: 1px dashed var(--sim-muted);
+}
