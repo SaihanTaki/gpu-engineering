@@ -1,0 +1,521 @@
+---
+title: 21. Streams and concurrency
+description: The default stream and its implicit synchronization, pinned memory and cudaMemcpyAsync, overlapping copies with kernels by chunking over streams, copy engines, events, and CUDA Graphs.
+sidebar:
+  order: 21
+banner:
+  content: Draft chapter. If something is wrong or unclear, use the edit link at the bottom of the page.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import StreamTimeline from '@sims/stream-timeline/StreamTimeline.astro';
+import CodeTabs from '@components/CodeTabs.astro';
+import { gpuById } from '@sim-core/gpu-specs';
+import { DEFAULTS, fmtTime, fmtX, summary } from '@sims/stream-timeline/model';
+import cuda from '@kernels/ch21-streams/cuda/streams.cu?raw';
+import numba from '@kernels/ch21-streams/numba/streams.py?raw';
+
+export const a100 = gpuById('a100');
+export const t4 = gpuById('t4');
+export const h100 = gpuById('h100');
+export const at = (extra = {}) => summary({ gpu: a100, ...DEFAULTS, ...extra });
+export const base = at();
+export const one = at({ streams: 1 });
+export const four = at({ streams: 4 });
+export const shared = at({ streams: 4, engines: 1 });
+export const pageable = at({ streams: 4, pinned: false });
+export const small = (chunks) => at({ streams: 4, mib: 16, overheadUs: 20, chunks });
+export const s2 = small(2);
+export const s4 = small(4);
+export const s8 = small(8);
+export const s16 = small(16);
+
+A program copies {DEFAULTS.mib} MiB to an {a100.name}, runs a kernel on it, and
+copies the result back. Done the plain way, with `cudaMemcpy`, a launch and
+`cudaMemcpy` again, each step waits for the one before it. While the data
+crosses PCIe the SMs have nothing to do, and while the kernel runs the PCIe
+link is idle. In the model below this takes {fmtTime(base.serial)}.
+
+Split the array into 8 chunks and issue the copy, kernel and copy for each
+chunk into one of four **streams**, and the copy of chunk 1 can run while the
+kernel works on chunk 0. The same work then takes {fmtTime(four.total)}, about
+{fmtX(four.speedup)} faster. Put all 8 chunks into a single stream instead and
+it takes {fmtTime(one.total)}, slightly slower than not chunking at all. All
+three numbers are model estimates from the simulation in this chapter.
+
+This chapter covers what a stream is, why the default stream gets in the way,
+why the copies need pinned memory, how many copies the hardware can run at
+once, how to time and order work across streams with events, and how CUDA
+Graphs cut the launch cost of a pipeline you run many times.
+
+## Streams and the default stream
+
+A **stream** is a queue of GPU work. The programming guide defines it as "a
+sequence of commands (possibly issued by different host threads) that execute
+in order". Work in one stream runs in the order it was issued. Work in
+different streams has no order between them: it "may execute ... out of order
+with respect to one another or concurrently", and the guide warns that this
+"should therefore not be relied upon for correctness".
+
+Every launch and copy goes into some stream. If you do not name one, it goes
+into the **default stream**. Which default stream depends on a compiler flag,
+as the
+[programming guide's default stream section](https://docs.nvidia.com/cuda/archive/12.9.2/cuda-c-programming-guide/index.html#default-stream)
+explains:
+
+- `--default-stream legacy`, which is what you get when you pass no flag. The
+  default stream is "a special stream called the NULL stream", one per device,
+  shared by all host threads.
+- `--default-stream per-thread`, or defining `CUDA_API_PER_THREAD_DEFAULT_STREAM`
+  on the command line (`-DCUDA_API_PER_THREAD_DEFAULT_STREAM=1`). Then "the
+  default stream is a regular stream and each host thread has its own default
+  stream". A `#define` in the source does not work with `nvcc`, because `nvcc`
+  includes `cuda_runtime.h` before your code.
+
+The legacy NULL stream is the one that surprises people. The
+[current guide](https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/asynchronous-execution.html#legacy-default-stream)
+calls it a blocking stream: "when an operation is launched into this default
+stream, it will synchronize with all other blocking streams". The section on
+implicit synchronization states the rule you have to keep in mind: "two
+operations from different streams cannot run concurrently if any CUDA operation
+on the NULL stream is submitted in-between them, unless the streams are
+non-blocking streams (created with the `cudaStreamNonBlocking` flag)". So one
+`cudaMemset` or kernel launch without a stream argument, in the middle of a
+pipeline, splits it into a before and an after.
+
+Plain `cudaMemcpy` is in the same position. The guide's section on graph
+capture says that synchronous calls "such as `cudaMemcpy()`, enqueue work to the
+legacy stream and synchronize it before returning".
+
+### Creating streams
+
+```cpp
+cudaStream_t s;
+cudaStreamCreate(&s);                                  // blocking stream
+cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking);  // does not sync with the NULL stream
+
+kernel<<<blocks, threads, 0, s>>>(args);               // fourth launch argument: the stream
+cudaMemcpyAsync(dst, src, bytes, cudaMemcpyHostToDevice, s);
+
+cudaStreamDestroy(s);
+```
+
+"By default, streams created with `cudaStreamCreate()` are blocking streams",
+in the guide's words, and the blocking and non-blocking semantics "refer only to
+how the streams synchronize with the default stream". Two streams you create
+never wait for each other unless you make them, with an event (below). The
+third launch argument is the dynamic shared memory size from chapter 7; pass 0
+when there is none.
+
+## Pinned memory and cudaMemcpyAsync
+
+`cudaMemcpyAsync` takes a stream and returns to the host before the copy is
+done. That is what lets one host thread queue a whole pipeline up front. The
+condition is the one from chapter 10: the host buffer has to be pinned, so
+that a copy engine can read it by DMA while the CPU goes on with other work.
+The
+[programming guide](https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/asynchronous-execution.html#launching-memory-transfers-in-cuda-streams)
+says that "the host buffers must be pinned and page-locked" for the copy to be
+asynchronous. With pageable memory the call still works, but "will revert to a
+synchronous behavior which will not overlap with other work". It recommends
+allocating the buffers with `cudaMallocHost()`.
+
+This is the most common reason that a correct-looking stream pipeline shows no
+overlap in a profiler. Nothing fails; the copies just run one after another.
+
+## Overlapping copies and kernels by chunking
+
+A kernel cannot start on data that has not arrived, so one big copy, one big
+kernel and one big copy back cannot overlap with each other. Split the array
+into chunks and each chunk becomes a small pipeline of its own: copy in,
+compute, copy out. Chunks in different streams have no order between them, so
+while chunk 0 is in its kernel, chunk 1 can be on its way in and, a step later,
+chunk 0 on its way out.
+
+```cpp
+size_t chunk = (n + NCHUNKS - 1) / NCHUNKS;
+for (int c = 0; c < NCHUNKS; c++) {
+    cudaStream_t st = s[c % NSTREAMS];
+    size_t off = c * chunk, m = min(chunk, n - off);
+    cudaMemcpyAsync(d + off, h + off, m * 4, cudaMemcpyHostToDevice, st);
+    work<<<(m + 255) / 256, 256, 0, st>>>(d + off, m);
+    cudaMemcpyAsync(h + off, d + off, m * 4, cudaMemcpyDeviceToHost, st);
+}
+cudaDeviceSynchronize();
+```
+
+With three stages of equal length `t` and `n` chunks, the first chunk's copy
+back cannot start before `2t / n`, and after that one chunk finishes every
+`t / n`. The whole run takes about `(n + 2) t / n` against `3t` serially, which
+approaches 3x as the chunk count grows. Two things stop it from getting there:
+every copy and launch has a fixed cost, which grows with the number of chunks,
+and the stages are rarely the same length. The slowest stage sets the pace.
+
+Within one stream the chunks are still in order. With one stream, the H2D copy
+of chunk 1 waits for the D2H copy of chunk 0, and nothing overlaps. You need at
+least two streams. With two, each stream still runs its own chunks one stage at
+a time, so the second stream only fills the gaps of the first; three or four
+streams let all three stages stay busy.
+
+### Copy engines
+
+The copies do not run on the SMs. They run on the GPU's **copy engines** (the
+CUDA API calls them asynchronous engines), DMA units that move data over PCIe
+while the SMs run kernels. How many a GPU has decides which copies can overlap:
+
+- With one copy engine, an H2D copy and a D2H copy cannot run at the same
+  time. Copies can overlap kernels, but not each other.
+- With two, one copy in each direction and a kernel can all run at once.
+
+The device attribute `asyncEngineCount` (`cudaDevAttrAsyncEngineCount`) reports
+it. The
+[CUDA 12.9 programming guide](https://docs.nvidia.com/cuda/archive/12.9.2/cuda-c-programming-guide/index.html#concurrent-data-transfers)
+says that copy and kernel overlap is supported when it is "greater than zero",
+and that "some devices of compute capability 2.x and higher can overlap copies
+to and from the device", which the attribute shows by being "equal to 2". In
+both cases "any host memory involved in the transfers must be page-locked".
+NVIDIA's `deviceQuery` sample prints it as `Concurrent copy and kernel
+execution: Yes with N copy engine(s)`.
+
+NVIDIA does not publish the count per GPU model in its data sheets, so query it
+on your card; the CUDA program in this chapter prints it. The one place NVIDIA
+gives counts is Mark Harris's
+[2012 post on overlapping transfers](https://developer.nvidia.com/blog/how-overlap-data-transfers-cuda-cc/),
+for two older cards: "the C1060 has a single copy engine and a single kernel
+engine", and "the C2050 has two copy engines, one for host-to-device transfers
+and another for device-to-host transfers". The same post shows that on those
+cards the order in which the host issued the copies changed how much
+overlapped, and that for compute capability 3.5 devices (the K20 series) "the
+Hyper-Q feature eliminates the need to tailor the launch order".
+
+## The simulation
+
+The simulation runs the loop above and draws every operation on a time axis
+three ways: by stream, by the engine that runs it, and the serial run (one
+chunk in one stream) for comparison. The PCIe bandwidth comes from the GPU
+preset. Kernel time is set relative to the copy time of a chunk, so the ratio
+of compute to transfer stays the same when you change the GPU or the size.
+
+Each step is one moment when an operation starts or finishes, and the status
+line says why each one starts when it does: its stream was waiting for it, or
+its engine just became free. Before stepping, predict the total time for one
+stream; then switch to two, three and four streams.
+
+<StreamTimeline />
+
+Things to try:
+
+1. **Streams.** With {DEFAULTS.chunks} chunks and two copy engines: one stream
+   takes {fmtTime(one.total)}, two take {fmtTime(base.total)}, four take
+   {fmtTime(four.total)}. With four streams each engine row is one unbroken
+   run of 8 operations, each row one stage behind the row above.
+2. **One copy engine.** Four streams with a shared copy engine take
+   {fmtTime(shared.total)}. The copy engine row has no gaps: both directions
+   now queue for it, and the total equals its busy time,
+   {fmtTime(shared.bound)}.
+3. **Pageable memory.** Every copy pays the staging copy from chapter 10, and
+   nothing overlaps: {fmtTime(pageable.total)}, slower than the serial run
+   from pinned memory.
+4. **Kernel time.** Set the kernel to 2x the copy time. Now the compute row is
+   the one with no gaps, and the copy engines wait for it. More streams cannot
+   help past that point.
+
+<Aside type="caution">
+  Every time here is a model estimate. Copies run at the per-direction PCIe
+  peak, which real copies do not reach (chapter 10 quotes NVIDIA's "roughly 12
+  GB/s" for pinned copies on a 16 GB/s Gen3 link). The fixed cost per operation
+  is an assumption you set. Real GPUs can run small kernels from different
+  streams at once, and the driver may schedule work in an order this model
+  does not.
+</Aside>
+
+## Events
+
+An **event** is a marker you record into a stream. It completes when all work
+queued in that stream before it has completed. Events do two jobs.
+
+**Timing.** The GPU records a timestamp when the event is reached, and
+`cudaEventElapsedTime` gives the time between two events "in milliseconds with
+a resolution of around 0.5 microseconds", according to the
+[runtime API reference](https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__EVENT.html).
+This times GPU work without the host's clock or a synchronization in the
+measured span:
+
+```cpp
+cudaEvent_t start, stop;
+cudaEventCreate(&start);
+cudaEventCreate(&stop);
+cudaEventRecord(start, 0);
+pipeline();                       // work in s[0..3]
+cudaEventRecord(stop, 0);
+cudaEventSynchronize(stop);       // the host waits for this event only
+float ms;
+cudaEventElapsedTime(&ms, start, stop);
+```
+
+Recording into stream 0, the legacy NULL stream, is deliberate here: an event
+there waits for all blocking streams, so `stop` brackets every stream of the
+pipeline. Record it into `s[0]` instead and it times only the first stream.
+
+**Dependencies between streams.** `cudaStreamWaitEvent(stream, event)` makes
+all later work in `stream` wait until `event` has completed, without blocking
+the host:
+
+```cpp
+cudaEventRecord(ready, s[0]);         // after s[0] has produced x
+cudaStreamWaitEvent(s[1], ready, 0);  // s[1] waits for it on the GPU
+consume<<<g, b, 0, s[1]>>>(x);
+```
+
+An event used only for ordering does not need a timestamp; create it with
+`cudaEventCreateWithFlags(&e, cudaEventDisableTiming)`.
+
+## Synchronizing with the host
+
+When the host needs results, it waits. There are three levels:
+
+- `cudaEventSynchronize(e)` waits for one event.
+- `cudaStreamSynchronize(s)` "waits until all preceding commands in the given
+  stream have completed", and leaves other streams running.
+- `cudaDeviceSynchronize()` "waits until all preceding commands in all streams
+  of all host threads have completed". The
+  [guide](https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/asynchronous-execution.html#explicit-synchronization)
+  calls it "rather heavy handed".
+
+Use the narrowest one that covers the data you are about to read. The guide's
+two guidelines for concurrency are short: issue all independent operations
+before dependent ones, and delay synchronization of any kind as long as
+possible.
+
+## CUDA Graphs
+
+A pipeline of 16 chunks is 48 API calls, and the host pays a fixed cost for
+each. Chapter 12 showed how much that cost can be next to a short kernel.
+When the same sequence runs many times, a **CUDA Graph** lets you hand it to
+the driver once and then launch it with one call.
+
+The
+[programming guide](https://docs.nvidia.com/cuda/archive/12.9.2/cuda-c-programming-guide/index.html#cuda-graphs)
+describes three stages: definition, instantiation and execution.
+Instantiation "takes a snapshot of the graph template, validates it, and
+performs much of the setup and initialization of work with the aim of
+minimizing what needs to be done at launch". The easiest way to define a graph
+is to record it from existing stream code with **stream capture**:
+
+```cpp
+cudaGraph_t graph;
+cudaGraphExec_t exec;
+cudaStreamBeginCapture(s[0], cudaStreamCaptureModeGlobal);
+cudaEventRecord(fork, s[0]);
+for (int i = 1; i < NSTREAMS; i++) cudaStreamWaitEvent(s[i], fork, 0);
+pipeline();                                    // the same loop as before
+for (int i = 1; i < NSTREAMS; i++) {
+    cudaEventRecord(join[i], s[i]);
+    cudaStreamWaitEvent(s[0], join[i], 0);
+}
+cudaStreamEndCapture(s[0], &graph);
+cudaGraphInstantiate(&exec, graph, 0);
+
+for (int step = 0; step < steps; step++) cudaGraphLaunch(exec, s[0]);
+```
+
+While a stream is captured, its work is recorded, not run. Other streams join
+the capture when they wait on an event recorded in it, and they must join back
+into the origin stream before capture ends; the two event loops do that. The
+graph keeps the cross-stream structure, so the overlap stays.
+
+Two rules from the guide matter for this code. Capture works on "any CUDA
+stream except `cudaStreamLegacy` (the "NULL stream")", and while any blocking
+stream is being captured, "any attempted use of the legacy stream is invalid",
+which includes synchronous calls like `cudaMemcpy`. Also, a graph records
+pointers and sizes as they were at capture. To run it on other buffers, update
+the executable graph (`cudaGraphExecUpdate`) or capture again.
+
+How much a graph saves depends on how short the operations are. Alan Gray's
+[Getting Started with CUDA Graphs](https://developer.nvidia.com/blog/cuda-graphs/)
+(NVIDIA, 2019) ran a kernel that takes 2.9 µs on a Tesla V100, 20 times per
+step. Synchronizing after every launch gave 9.6 µs per kernel; launching them
+back to back in a stream gave 3.8 µs; one graph launch for the 20 kernels gave
+3.4 µs. For chunks that take milliseconds to copy, as in the simulation's
+defaults, the launch cost is a small part of the total and a graph changes
+little. It pays off when there are many small operations.
+
+## The code
+
+The CUDA program runs the copy, compute, copy pipeline four ways and checks
+each one against the serial result bit for bit: serial in the default stream,
+chunked over streams from pinned memory, the same from pageable memory, and
+the pinned pipeline captured into a CUDA Graph and replayed. It prints the
+device's `asyncEngineCount` first. The kernel lives in
+`streams_kernels.cuh` and repeats `v = 0.999 v + 0.001` a set number of times,
+so you can make a chunk's kernel shorter or longer than its copies.
+
+The Numba version builds the same pipeline with `cuda.stream()`,
+`cuda.pinned_array` for the host buffers, and `copy_to_device` and
+`copy_to_host` with a `stream=` argument on slices of one device array. A
+kernel goes to a stream with a fourth launch parameter: `work[blocks, threads,
+stream](...)`. Numba's `cuda.event()` gives events with `record`, `wait` and
+`elapsed_time`. The Numba CUDA simulator, which the tests use when there is no
+GPU, runs everything synchronously; its event class says that the events "do
+not record timing info, and all simulation is synchronous". The tests there
+check results, not overlap.
+
+<CodeTabs cuda={cuda} numba={numba} titles={{ cuda: 'cuda/streams.cu', numba: 'numba/streams.py' }}>
+	<div slot="triton-note">
+		There is no Triton version. Triton launches kernels; it does not manage streams or copies. When PyTorch is
+		imported, a Triton kernel is launched into PyTorch's current stream: in Triton 3.8, the driver gets the stream
+		from `torch._C._cuda_getCurrentRawStream` (see `triton/backends/driver.py`). So to put a Triton kernel on a stream,
+		launch it inside `with torch.cuda.stream(s):`, and use `tensor.to("cuda", non_blocking=True)` from a pinned tensor
+		for the copies. PyTorch's notes on CUDA streams add that with non-default streams "it is the user's
+		responsibility to ensure proper synchronization", for example with `torch.cuda.Stream.wait_stream()`.
+	</div>
+</CodeTabs>
+
+The tests in `kernels/ch21-streams/test_correctness.py` check the Numba
+pipeline against the serial run for several stream and chunk counts, including
+a ragged last chunk and more chunks than elements, and the serial run against
+NumPy. They compile the CUDA kernel with NVRTC for `sm_75`, `sm_80` and
+`sm_90` and the Numba kernel to real PTX. They build and run the CUDA program
+when `nvcc` is present.
+
+## Measure it yourself
+
+On a Linux machine with a GPU:
+
+```sh
+cd kernels/ch21-streams
+make -C cuda run
+./cuda/streams 16777216 4 16 100     # n, streams, chunks, kernel iterations
+python numba/streams.py
+nsys profile --trace=cuda -o streams ./cuda/streams
+```
+
+Things to look for:
+
+- `asyncEngineCount` on your GPU, and whether the pinned pipeline's speedup
+  over serial fits the simulation with that many copy engines.
+- The pageable run. It should be close to the serial time or slower.
+- The Nsight Systems timeline. Each stream gets its own row; with overlap,
+  copies and kernels of different streams sit at the same time. If they do
+  not, look for a pageable buffer or a call into the default stream.
+- The kernel iterations. Change the fourth argument until a chunk's kernel
+  takes about as long as its copy, then try 2x and 0.5x and compare with the
+  simulation's kernel time setting.
+- Graph against streams. With 16 chunks of 4 MiB the difference is small; try
+  a small `n` and many chunks, for example `./cuda/streams 65536 4 64 10`, where
+  launch cost is a larger share.
+
+## What the model leaves out
+
+The simulation runs one kernel at a time, assumed to fill the GPU, while real
+GPUs can run kernels from several streams at once when each leaves SMs free.
+Copies run at the PCIe peak with no ramp-up and no difference between
+directions. Every operation pays the same fixed cost, on the engine that runs
+it; the real cost is partly on the host and partly hidden behind earlier work.
+The pageable mode treats every copy as fully synchronous, including the
+staging copy at the PCIe rate. Stream priorities, host callbacks, multiple
+GPUs, peer copies and the hardware queues behind streams are left out.
+
+## Exercises
+
+**1. One stream.** In the simulation, set one stream and {DEFAULTS.chunks}
+chunks, with the defaults otherwise. Predict the total before you step. Why is
+it slower than the serial run?
+
+<details>
+<summary>Answer</summary>
+
+{fmtTime(one.total)} against {fmtTime(one.serial)}. In one stream, every
+operation waits for the one before it, so the H2D copy of chunk 1 waits for the
+D2H copy of chunk 0 and nothing overlaps. The copies and the kernel move the
+same bytes as the serial run, but there are 24 operations instead of 3, and
+each pays the {DEFAULTS.overheadUs} µs fixed cost: 21 x {DEFAULTS.overheadUs} µs
+= {21 * DEFAULTS.overheadUs} µs more.
+
+</details>
+
+**2. One copy engine.** With four streams and {DEFAULTS.chunks} chunks, the
+run takes {fmtTime(four.total)} with two copy engines. What is the total with
+one, and what is the fastest any schedule could do on that hardware?
+
+<details>
+<summary>Answer</summary>
+
+{fmtTime(shared.total)}. With one engine, the 8 H2D and 8 D2H copies all queue
+for it: 16 copies of {fmtTime(shared.bound / 16)} each (copy plus fixed cost),
+{fmtTime(shared.bound)} of work on that engine alone. No schedule can finish
+before the busiest engine has done its work, and this one already matches it.
+The kernels fit into the gaps between copies.
+
+</details>
+
+**3. How many chunks?** Set four streams, 16 MiB, and 20 µs fixed cost. Try 2,
+4, 8 and 16 chunks. Which is fastest, and why does more chunks stop helping?
+
+<details>
+<summary>Answer</summary>
+
+2 chunks: {fmtTime(s2.total)}, 4: {fmtTime(s4.total)}, 8: {fmtTime(s8.total)},
+16: {fmtTime(s16.total)}. Eight is fastest. More chunks shorten the time to
+fill and drain the pipeline, which is about two chunk-stages, but every chunk
+adds three fixed costs. At 16 chunks of 1 MiB, a copy takes about 33 µs on the
+{a100.name}'s {a100.pcieGbPerS} GB/s link, so the 20 µs fixed cost is more
+than a third of each operation.
+
+</details>
+
+**4. Fix the overlap.** This pipeline is correct, but a profile shows no
+overlap at all. `h_in` and `h_out` are pinned and the streams come from
+`cudaStreamCreate`. What is wrong?
+
+```cpp
+for (int c = 0; c < NCHUNKS; c++) {
+    cudaStream_t st = s[c % NSTREAMS];
+    cudaMemcpyAsync(d_in + off(c), h_in + off(c), bytes_c, cudaMemcpyHostToDevice, st);
+    cudaMemset(d_out + off(c), 0, bytes_c);
+    work<<<g, b, 0, st>>>(d_in + off(c), d_out + off(c), m);
+    cudaMemcpyAsync(h_out + off(c), d_out + off(c), bytes_c, cudaMemcpyDeviceToHost, st);
+}
+```
+
+<details>
+<summary>Answer</summary>
+
+`cudaMemset` has no stream argument, so it goes to the legacy default stream.
+That stream synchronizes with every blocking stream: the memset waits for all
+work issued before it in all streams, and work issued after it waits for the
+memset. Each chunk is cut off from the next. Use
+`cudaMemsetAsync(d_out + off(c), 0, bytes_c, st)`. Creating the streams with
+`cudaStreamNonBlocking`, or compiling with `--default-stream per-thread`, also
+removes the implicit synchronization, but then the memset is no longer ordered
+before the kernel, which is a bug of its own.
+
+</details>
+
+**5. The timer is wrong.** A program times the four-stream pipeline with
+`cudaEventRecord(start, s[0])` before the loop and `cudaEventRecord(stop,
+s[0])` after it, and reports a time that is clearly too short. Why, and what
+are two fixes?
+
+<details>
+<summary>Answer</summary>
+
+An event in `s[0]` completes when the work in `s[0]` before it is done. It
+does not wait for `s[1]`, `s[2]` or `s[3]`, so `stop` can complete while other
+streams are still copying. Fix it by recording both events in the legacy
+default stream (stream 0), which waits for all blocking streams, as the CUDA
+program does; or by recording an event at the end of each other stream and
+making `s[0]` wait for them with `cudaStreamWaitEvent` before recording
+`stop`, as the Numba program does.
+
+</details>
+
+## Further reading
+
+- [CUDA Programming Guide: asynchronous execution](https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/asynchronous-execution.html), on streams, the legacy and per-thread default streams, events, explicit and implicit synchronization, and an introduction to graphs.
+- [CUDA C++ Programming Guide 12.9: asynchronous concurrent execution](https://docs.nvidia.com/cuda/archive/12.9.2/cuda-c-programming-guide/index.html#asynchronous-concurrent-execution), with the sections on concurrent data transfers, the default stream, and [CUDA Graphs](https://docs.nvidia.com/cuda/archive/12.9.2/cuda-c-programming-guide/index.html#cuda-graphs) including stream capture and its prohibited operations.
+- [CUDA Runtime API: event management](https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__EVENT.html) and [stream management](https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__STREAM.html).
+- [How to Overlap Data Transfers in CUDA C/C++](https://developer.nvidia.com/blog/how-overlap-data-transfers-cuda-cc/) (Mark Harris, NVIDIA, 2012), on chunked pipelines and copy engines, with the C1060 and C2050 counts quoted above.
+- [Getting Started with CUDA Graphs](https://developer.nvidia.com/blog/cuda-graphs/) (Alan Gray, NVIDIA, 2019), with the V100 launch overhead measurements quoted above.
+- [deviceQuery](https://github.com/NVIDIA/cuda-samples/blob/master/cpp/1_Utilities/deviceQuery/deviceQuery.cpp) in NVIDIA's CUDA samples, which prints the copy engine count.
+- [Numba CUDA: streams and events](https://nvidia.github.io/numba-cuda/user/memory.html#streams) and [PyTorch: CUDA streams](https://docs.pytorch.org/docs/stable/notes/cuda.html#cuda-streams).
