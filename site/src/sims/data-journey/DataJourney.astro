@@ -1,0 +1,97 @@
+---
+import SimFrame from '@components/SimFrame.astro';
+import { GPUS } from '@sim-core/gpu-specs';
+import { arrayBytes, CODE, DEFAULT_N, fmt, fmtBytes, SIZES } from './model';
+
+interface Props {
+	gpu?: (typeof GPUS)[number]['id'];
+	/** Number of float32 elements; one of SIZES (2^10, 2^16, 2^20, 2^24, 2^28, 2^30). */
+	n?: number;
+}
+
+const { gpu = 'a100', n = DEFAULT_N } = Astro.props;
+---
+
+<SimFrame title="Data journey: c = a + b on the GPU" sim="data-journey" code={[{ name: 'host', code: CODE, lang: 'cpp' }]} config={{ gpu, n }}>
+	<Fragment slot="params">
+		<label class="sim-field">
+			<span>GPU</span>
+			<select name="gpu">
+				{GPUS.map((g) => <option value={g.id} selected={g.id === gpu}>{g.name}, PCIe Gen{g.pcieGen}</option>)}
+			</select>
+		</label>
+		<label class="sim-field">
+			<span>Elements <code>n</code> (float32)</span>
+			<select name="n">
+				{SIZES.map((s) => <option value={s} selected={s === n}>{fmt(s)}, {fmtBytes(arrayBytes(s))} per array</option>)}
+			</select>
+		</label>
+	</Fragment>
+
+	<div class="sim-canvas" data-canvas>
+		<svg role="img" aria-label="CPU RAM, the PCIe link, GPU memory and a row of SMs, showing which arrays are where, above a time bar"></svg>
+	</div>
+
+	<ul class="dj-times" data-times aria-label="Time estimates, lower bounds from peak bandwidth"></ul>
+
+	<Fragment slot="caption">
+		Times are lower bounds computed from NVIDIA's peak figures, not measurements: each copy is bytes divided by the
+		per-direction PCIe peak, and the kernel is 3 x n x 4 bytes divided by peak memory bandwidth. Real copies from
+		ordinary (pageable) host memory are slower, and fixed costs per call, such as allocation, launch and driver work,
+		are left out. Only some of the SMs are drawn.
+	</Fragment>
+</SimFrame>
+
+<script>
+	import { Stepper } from '@sim-core/stepper';
+	import { bindControls } from '@sim-core/controls';
+	import { highlightLines, showVariant } from '@sim-core/code-sync';
+	import { gpuById } from '@sim-core/gpu-specs';
+	import { describe, fmtTime, lastStep, pct, stateAt, times } from './model';
+	import { render } from './view';
+
+	function mount(frame: HTMLElement) {
+		const config = JSON.parse(frame.dataset.config!);
+		let gpu = gpuById(config.gpu);
+		let n: number = config.n;
+		const stepper = new Stepper(lastStep, 1600);
+		const canvas = frame.querySelector<HTMLElement>('[data-canvas]')!;
+		const svgEl = canvas.querySelector('svg')!;
+		const timesEl = frame.querySelector<HTMLElement>('[data-times]')!;
+		const code = showVariant(frame, 'host');
+
+		const draw = () => {
+			const st = stateAt(gpu, n, stepper.step);
+			render(svgEl, gpu, n, st, Math.max(260, canvas.clientWidth));
+			highlightLines(code, st.lines);
+			const t = times(gpu, n);
+			const rows: [string, string, number][] = [
+				['is-copy', 'Copy in, a and b over PCIe', t.copyIn],
+				['is-kernel', `Kernel, ${gpu.memory} traffic`, t.kernel],
+				['is-copy', 'Copy out, c over PCIe', t.copyOut],
+			];
+			timesEl.replaceChildren(
+				...rows.map(([cls, name, s]) => {
+					const li = document.createElement('li');
+					const sw = document.createElement('span');
+					sw.className = `sim-swatch ${cls}`;
+					li.append(sw, `${name}: ${fmtTime(s)} (${pct(s, t.total)})`);
+					return li;
+				}),
+			);
+		};
+
+		frame.querySelector('.sim-params')!.addEventListener('change', () => {
+			gpu = gpuById(frame.querySelector<HTMLSelectElement>('select[name="gpu"]')!.value);
+			n = Number(frame.querySelector<HTMLSelectElement>('select[name="n"]')!.value);
+			stepper.setLast(lastStep);
+		});
+
+		bindControls(frame, stepper, (step) => describe(gpu, n, step));
+		stepper.onChange(draw);
+		new ResizeObserver(draw).observe(canvas);
+		draw();
+	}
+
+	document.querySelectorAll<HTMLElement>('[data-sim="data-journey"]').forEach(mount);
+</script>
