@@ -911,3 +911,133 @@
 .occ-limits strong {
 	font-weight: 600;
 }
+
+/* Page migration sim (chapter 10) */
+[data-sim='page-migration'] select {
+	width: 100%;
+	max-width: 100%;
+}
+[data-sim='page-migration'] input[type='range'] {
+	min-height: 44px;
+}
+[data-sim='page-migration'] .expressive-code .copy button {
+	width: 44px;
+	height: 44px;
+}
+.pm-page {
+	fill: transparent;
+	stroke: var(--sim-muted);
+}
+.pm-page.is-none {
+	stroke: var(--sim-line);
+	stroke-dasharray: 4 3;
+}
+.pm-page.is-x {
+	fill: var(--sim-block-a);
+	stroke: var(--sim-muted);
+}
+.pm-page.is-2x {
+	fill: var(--sim-active);
+	stroke: var(--sim-active);
+}
+.pm-page.is-moving {
+	stroke: var(--sim-text);
+	stroke-width: 2.5;
+}
+.pm-page.is-fault {
+	stroke: var(--sim-warn);
+	stroke-width: 3;
+	stroke-dasharray: 5 3;
+}
+.pm-page-text {
+	font: 500 12px var(--sl-font-mono);
+	fill: var(--sim-text);
+	text-anchor: middle;
+	pointer-events: none;
+}
+.pm-page.is-2x + .pm-page-text {
+	fill: var(--sl-color-black);
+}
+.pm-page-label {
+	font: 500 12px var(--sl-font-mono);
+	fill: var(--sim-text);
+}
+.pm-page.is-2x + .pm-page-label {
+	fill: var(--sl-color-black);
+}
+.pm-fault-text {
+	font: 600 11px var(--sl-font-mono);
+	fill: var(--sim-warn);
+}
+.pm-link {
+	fill: var(--sim-block-b);
+	stroke: var(--sim-muted);
+}
+.pm-link.is-busy {
+	stroke: var(--sim-active);
+}
+.pm-arrow {
+	stroke: var(--sim-active);
+	stroke-width: 2.5;
+}
+.pm-arrowhead {
+	fill: var(--sim-active);
+}
+.pm-stripe-bg {
+	fill: var(--sim-block-b);
+}
+.pm-stripe {
+	stroke: var(--sim-muted);
+	stroke-width: 3;
+}
+.pm-seg-track {
+	fill: transparent;
+	stroke: var(--sim-line);
+}
+.pm-seg-pcie {
+	fill: url(#pm-stripes);
+}
+.pm-seg-fault {
+	fill: var(--sim-warn);
+}
+.pm-seg-staging {
+	fill: var(--sim-block-a);
+	stroke: var(--sim-muted);
+}
+.pm-seg-kernel {
+	fill: var(--sim-active);
+}
+.pm-seg-frame {
+	fill: none;
+	stroke: var(--sim-muted);
+}
+.pm-counts {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.25rem 1.25rem;
+	margin: 0.5rem 0 0;
+	padding: 0;
+	list-style: none;
+	font-family: var(--sl-font-mono);
+	font-size: var(--sl-text-xs);
+}
+.pm-counts li {
+	display: flex;
+	align-items: center;
+	gap: 0.4rem;
+}
+.pm-counts .sim-swatch {
+	flex-shrink: 0;
+}
+.sim-swatch.pm-seg-pcie {
+	background: repeating-linear-gradient(45deg, var(--sim-muted) 0 2px, var(--sim-block-b) 2px 4px);
+}
+.sim-swatch.pm-seg-fault {
+	background: var(--sim-warn);
+}
+.sim-swatch.pm-seg-staging {
+	background: var(--sim-block-a);
+}
+.sim-swatch.pm-seg-kernel {
+	background: var(--sim-active);
+}
