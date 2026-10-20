@@ -1,0 +1,131 @@
+---
+import SimFrame from '@components/SimFrame.astro';
+import { GPUS } from '@sim-core/gpu-specs';
+import { CODE, KERNEL_IDS, KERNEL_NAMES, SIZES, type Config, type KernelId } from './model';
+
+interface Props {
+	gpu?: Config['gpu'];
+	n?: (typeof SIZES)[number];
+	tile?: Config['tile'];
+	row?: number;
+	code?: KernelId;
+}
+
+const { gpu = 'a100', n = 1024, tile = 'first', row = 0, code = 'tiled' } = Astro.props;
+const variants = KERNEL_IDS.map((id) => ({ name: id, code: CODE[id], lang: 'cpp' }));
+// SimFrame shows the first variant until the script runs, so put the starting one first.
+variants.sort((a, b) => Number(b.name === code) - Number(a.name === code));
+---
+
+<SimFrame title="Transpose: one warp through three kernels" sim="transpose" code={variants} config={{ gpu, n, tile, row, code }}>
+	<Fragment slot="params">
+		<label class="sim-field">
+			<span>GPU (for the estimate)</span>
+			<select name="gpu">
+				{GPUS.map((g) => <option value={g.id} selected={g.id === gpu}>{g.name}, {g.memoryGbPerS.toLocaleString('en-US')} GB/s</option>)}
+			</select>
+		</label>
+		<label class="sim-field">
+			<span>Matrix size n x n</span>
+			<select name="n">
+				{SIZES.map((s) => <option value={s} selected={s === n}>{s} x {s}</option>)}
+			</select>
+		</label>
+		<label class="sim-field">
+			<span>Tile</span>
+			<select name="tile">
+				<option value="first" selected={tile === 'first'}>First tile, top left</option>
+				<option value="last" selected={tile === 'last'}>Last tile, bottom right</option>
+			</select>
+		</label>
+		<label class="sim-field">
+			<span>Tile row this warp moves <output data-out="row">{row}</output></span>
+			<input type="range" name="row" min="0" max="31" value={row} />
+		</label>
+		<label class="sim-field">
+			<span>Code panel</span>
+			<select name="code">
+				{KERNEL_IDS.map((id) => <option value={id} selected={id === code}>{KERNEL_NAMES[id]}</option>)}
+			</select>
+		</label>
+	</Fragment>
+
+	<div class="sim-canvas" data-canvas>
+		<svg role="img" aria-label="For each kernel, the 32-byte sectors or the 32 shared memory banks the warp's current request touches, then estimated bandwidth bars"></svg>
+	</div>
+	<ul class="tr-legend" aria-label="Legend">
+		<li><span class="tr-swatch is-sector"><span></span></span>sector: 32 bytes, filled where a lane uses its 4-byte word</li>
+		<li><span class="tr-swatch is-bank"></span>bank column: one block per word the bank must serve</li>
+		<li><span class="tr-swatch is-conflict"></span>more than one word in a bank: serialized passes</li>
+	</ul>
+	<ul class="tr-totals" data-totals aria-label="Running totals for this warp"></ul>
+
+	<Fragment slot="caption">
+		Model, not a measurement. Global requests are counted in 32-byte sectors from a 256-byte aligned base; shared
+		requests in passes, the most distinct words any of the 32 banks gets. The bandwidth bar assumes every warp on the GPU
+		does what this one does, charges each sector at the GPU's memory bandwidth and each pass one clock of an SM's shared
+		memory, and takes the slower of the two. It leaves out caches that merge partial sectors, latency, the other loop
+		iterations and DRAM page effects.
+	</Fragment>
+</SimFrame>
+
+<script>
+	import { Stepper } from '@sim-core/stepper';
+	import { bindControls } from '@sim-core/controls';
+	import { highlightLines, showVariant } from '@sim-core/code-sync';
+	import { gpuById } from '@sim-core/gpu-specs';
+	import { describe, estimate, fmt, KERNEL_IDS, KERNEL_NAMES, LAST_STEP, lineAt, totalsAt, type Config, type KernelId } from './model';
+	import { render } from './view';
+
+	function mount(frame: HTMLElement) {
+		const config: Config & { code: KernelId } = JSON.parse(frame.dataset.config!);
+		const stepper = new Stepper(LAST_STEP, 1100);
+		const canvas = frame.querySelector<HTMLElement>('[data-canvas]')!;
+		const svgEl = canvas.querySelector('svg')!;
+		const totalsEl = frame.querySelector<HTMLElement>('[data-totals]')!;
+		const field = <T extends HTMLElement>(name: string) => frame.querySelector<T>(`[name="${name}"]`)!;
+		let code = showVariant(frame, config.code);
+
+		const draw = () => {
+			const step = stepper.step;
+			render(svgEl, config, step, Math.max(260, canvas.clientWidth));
+			const line = lineAt(config.code, step);
+			highlightLines(code, line === null ? [] : [line]);
+			const g = gpuById(config.gpu);
+			totalsEl.replaceChildren(
+				...KERNEL_IDS.map((k) => {
+					const t = totalsAt(config, k, step);
+					const li = document.createElement('li');
+					const name = document.createElement('strong');
+					name.textContent = `${KERNEL_NAMES[k]}:`;
+					const shared = k === 'naive' ? 'no shared memory' : `${t.sharedPasses} shared ${t.sharedPasses === 1 ? 'pass' : 'passes'}`;
+					let s = ` ${t.loadSectors} load + ${t.storeSectors} store sectors, ${shared}; ${fmt(t.sectorBytes)} bytes moved for ${fmt(t.usefulBytes)} used.`;
+					const e = estimate(g, t);
+					if (step === LAST_STEP && e.gbPerS !== null) s += ` Model estimate ${fmt(e.gbPerS)} GB/s.`;
+					li.append(name, s);
+					return li;
+				}),
+			);
+		};
+
+		frame.querySelector('.sim-params')!.addEventListener('input', () => {
+			config.gpu = field<HTMLSelectElement>('gpu').value as Config['gpu'];
+			config.n = Number(field<HTMLSelectElement>('n').value);
+			config.tile = field<HTMLSelectElement>('tile').value as Config['tile'];
+			config.row = Number(field<HTMLInputElement>('row').value);
+			config.code = field<HTMLSelectElement>('code').value as KernelId;
+			frame.querySelector<HTMLElement>('[data-out="row"]')!.textContent = String(config.row);
+			code = showVariant(frame, config.code);
+			// The step stays put so a change is compared at the same point; the status must follow it.
+			sync(stepper.step);
+			draw();
+		});
+
+		const sync = bindControls(frame, stepper, (step) => describe(config, step));
+		stepper.onChange(draw);
+		new ResizeObserver(draw).observe(canvas);
+		draw();
+	}
+
+	document.querySelectorAll<HTMLElement>('[data-sim="transpose"]').forEach(mount);
+</script>
