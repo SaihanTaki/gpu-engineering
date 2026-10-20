@@ -39,6 +39,16 @@ export interface GpuSpec {
 	pcieGen: 3 | 4 | 5;
 	/** Peak PCIe x16 bandwidth in one direction, GB/s. */
 	pcieGbPerS: number;
+	/** Peak rates at boost clock, dense (no structured sparsity). TFLOPS, or TOPS for INT8. */
+	peakFp32Tflops: number;
+	peakFp64Tflops: number;
+	/** Null where the tensor cores have no TF32 mode. */
+	peakTf32TensorTflops: number | null;
+	/** FP16 inputs with FP32 accumulate; BF16 runs at the same rate where supported. */
+	peakFp16TensorTflops: number;
+	/** Null where the tensor cores have no FP8 mode. */
+	peakFp8TensorTflops: number | null;
+	peakInt8TensorTops: number;
 	sources: string[];
 }
 
@@ -79,6 +89,17 @@ export const GPUS: GpuSpec[] = [
 		pcieGen: 3,
 		// Datasheet: x16 PCIe Gen3, 32 GB/s. One direction of Gen3 x16 is 8 GT/s x 16 x 128/130 / 8 = 15.75 GB/s, so 32 sums both; we use half.
 		pcieGbPerS: 16,
+		// Datasheet: single precision 8.1 TFLOPS.
+		peakFp32Tflops: 8.1,
+		// Not published for T4. Turing whitepaper: FP64 runs at 1/32 of the FP32 rate; 40 SMs x 2 FP64 units x 2 x 1.59 GHz = 0.254.
+		peakFp64Tflops: 0.25,
+		// Turing tensor cores have no TF32 mode (introduced with Ampere).
+		peakTf32TensorTflops: null,
+		// Turing whitepaper Table 5: 65 TFLOPS with FP16 or FP32 accumulate; datasheet "Mixed-Precision (FP16/FP32) 65 TFLOPS". No BF16 on Turing.
+		peakFp16TensorTflops: 65,
+		peakFp8TensorTflops: null,
+		// Datasheet: INT8 130 TOPS.
+		peakInt8TensorTops: 130,
 		sources: [
 			'https://images.nvidia.com/aem-dam/en-zz/Solutions/design-visualization/technologies/turing-architecture/NVIDIA-Turing-Architecture-Whitepaper.pdf',
 			'https://www.nvidia.com/content/dam/en-zz/Solutions/Data-Center/tesla-t4/t4-tensor-core-datasheet-951643.pdf',
@@ -120,6 +141,16 @@ export const GPUS: GpuSpec[] = [
 		pcieGen: 4,
 		// Datasheet: PCIe Gen4 64 GB/s, both directions summed (Gen4 x16 is 31.5 GB/s each way); we use half.
 		pcieGbPerS: 32,
+		// Datasheet (Jun 2021): FP32 19.5, FP64 9.7 TFLOPS.
+		peakFp32Tflops: 19.5,
+		peakFp64Tflops: 9.7,
+		// Datasheet dense figures; the starred values twice as large are with sparsity.
+		peakTf32TensorTflops: 156,
+		// Datasheet: FP16 and BF16 tensor 312 TFLOPS; Ampere whitepaper lists 312 with FP32 accumulate too.
+		peakFp16TensorTflops: 312,
+		// FP8 tensor cores arrived with Hopper.
+		peakFp8TensorTflops: null,
+		peakInt8TensorTops: 624,
 		sources: [
 			'https://images.nvidia.com/aem-dam/en-zz/Solutions/data-center/nvidia-ampere-architecture-whitepaper.pdf',
 			'https://www.nvidia.com/content/dam/en-zz/Solutions/Data-Center/a100/pdf/nvidia-a100-datasheet-us-nvidia-1758950-r4-web.pdf',
@@ -162,6 +193,15 @@ export const GPUS: GpuSpec[] = [
 		pcieGen: 5,
 		// Product page: PCIe Gen5 128 GB/s, both directions summed (Gen5 x16 is 63 GB/s each way); we use half.
 		pcieGbPerS: 64,
+		// Product page, H100 SXM: FP32 67, FP64 34 TFLOPS. The pre-launch whitepaper lists 60 and 30 at an unfinalized clock.
+		peakFp32Tflops: 67,
+		peakFp64Tflops: 34,
+		// Product page tensor figures are with sparsity (TF32 989, FP16/BF16 1,979, FP8 3,958, INT8 3,958 TOPS); dense is half.
+		peakTf32TensorTflops: 494.5,
+		// Hopper whitepaper: FP16 tensor rate is the same with FP16 or FP32 accumulate.
+		peakFp16TensorTflops: 989.5,
+		peakFp8TensorTflops: 1979,
+		peakInt8TensorTops: 1979,
 		sources: [
 			'https://developer.nvidia.com/blog/nvidia-hopper-architecture-in-depth/',
 			'https://www.nvidia.com/en-us/data-center/h100/',

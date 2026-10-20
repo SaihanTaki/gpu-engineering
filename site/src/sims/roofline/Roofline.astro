@@ -1,0 +1,140 @@
+---
+import SimFrame from '@components/SimFrame.astro';
+import { GPUS, gpuById } from '@sim-core/gpu-specs';
+import {
+	fmtNum,
+	fmtPow2,
+	LOG2_BYTES_MAX,
+	LOG2_BYTES_MIN,
+	LOG2_FLOPS_MAX,
+	LOG2_FLOPS_MIN,
+	LOG2_STEP,
+	peakTflops,
+	PRESETS,
+	presetAi,
+	ROOF_IDS,
+	ROOF_NAMES,
+	type Config,
+} from './model';
+
+interface Props {
+	gpu?: Config['gpu'];
+	roof?: Config['roof'];
+	log2Flops?: number;
+	log2Bytes?: number;
+}
+
+const { gpu = 'a100', roof = 'fp32', log2Flops = 30, log2Bytes = 32 } = Astro.props;
+const g = gpuById(gpu);
+---
+
+<SimFrame title="Roofline: where does your kernel sit?" sim="roofline" config={{ gpu, roof, log2Flops, log2Bytes }}>
+	<Fragment slot="params">
+		<label class="sim-field">
+			<span>GPU</span>
+			<select name="gpu">
+				{GPUS.map((x) => <option value={x.id} selected={x.id === gpu}>{x.name}, {x.memoryGbPerS.toLocaleString('en-US')} GB/s</option>)}
+			</select>
+		</label>
+		<label class="sim-field">
+			<span>Compute roof</span>
+			<select name="roof">
+				{
+					ROOF_IDS.map((r) => (
+						<option value={r} selected={r === roof} disabled={peakTflops(g, r) === null}>
+							{ROOF_NAMES[r]}
+						</option>
+					))
+				}
+			</select>
+		</label>
+		<label class="sim-field">
+			<span>Work <output data-out="flops">{fmtPow2(log2Flops, 'FLOP')}</output></span>
+			<input type="range" name="log2Flops" min={LOG2_FLOPS_MIN} max={LOG2_FLOPS_MAX} step={LOG2_STEP} value={log2Flops} aria-valuetext={fmtPow2(log2Flops, 'FLOP')} />
+		</label>
+		<label class="sim-field">
+			<span>DRAM traffic <output data-out="bytes">{fmtPow2(log2Bytes, 'B')}</output></span>
+			<input type="range" name="log2Bytes" min={LOG2_BYTES_MIN} max={LOG2_BYTES_MAX} step={LOG2_STEP} value={log2Bytes} aria-valuetext={fmtPow2(log2Bytes, 'B')} />
+		</label>
+	</Fragment>
+
+	<div class="sim-canvas" data-canvas>
+		<svg role="img" aria-label="Log-log roofline chart: attainable throughput against arithmetic intensity, with a bandwidth slope, one flat roof per precision, numbered markers for kernels from earlier chapters and a diamond for your kernel"></svg>
+	</div>
+	<ul class="rf-legend" aria-label="Legend">
+		<li><span class="rf-swatch is-kernel"></span>your kernel</li>
+		<li><span class="rf-swatch is-preset"></span>kernel from an earlier chapter</li>
+		<li><span class="rf-swatch is-roof"></span>selected roof</li>
+		<li><span class="rf-swatch is-other"></span>other precisions</li>
+	</ul>
+	<p class="rf-readout" data-readout></p>
+	<ol class="rf-presets" aria-label="Numbered markers">
+		{
+			PRESETS.map((p) => (
+				<li>
+					{p.name} (chapter {p.chapter}): {p.flops === 0 ? 'no FLOPs, not on the chart' : `${fmtNum(presetAi(p))} FLOP/byte`}
+				</li>
+			))
+		}
+	</ol>
+
+	<Fragment slot="caption">
+		Model estimates. A kernel sits on the roof only if it reaches peak bandwidth or peak arithmetic; real kernels sit
+		below it. Bandwidth is DRAM only (no L2 or L1 roofs), peaks are NVIDIA's dense figures at boost clock, and the
+		markers count FP32 data with every byte going to DRAM once. Step through the markers with the controls below.
+	</Fragment>
+</SimFrame>
+
+<script>
+	import { Stepper } from '@sim-core/stepper';
+	import { bindControls } from '@sim-core/controls';
+	import { gpuById } from '@sim-core/gpu-specs';
+	import { describe, fmtNum, fmtPow2, fmtUs, kernelPoint, LAST_STEP, peakTflops, roofFor, type Config } from './model';
+	import { render } from './view';
+
+	function mount(frame: HTMLElement) {
+		const config: Config = JSON.parse(frame.dataset.config!);
+		const stepper = new Stepper(LAST_STEP, 2200);
+		const canvas = frame.querySelector<HTMLElement>('[data-canvas]')!;
+		const svgEl = canvas.querySelector('svg')!;
+		const readout = frame.querySelector<HTMLElement>('[data-readout]')!;
+		const items = frame.querySelectorAll<HTMLElement>('.rf-presets li');
+		const field = <T extends HTMLElement>(name: string) => frame.querySelector<T>(`[name="${name}"]`)!;
+		const out = (name: string) => frame.querySelector<HTMLElement>(`[data-out="${name}"]`)!;
+
+		const draw = () => {
+			render(svgEl, config, stepper.step, Math.max(280, canvas.clientWidth));
+			const p = kernelPoint(config);
+			const unit = config.roof === 'int8' ? 'TOPS' : 'TFLOPS';
+			readout.textContent = `Your kernel: ${fmtNum(p.ai)} ${config.roof === 'int8' ? 'ops' : 'FLOP'}/byte, at most ${fmtNum(p.tflops)} ${unit} (${p.bound}-bound), model estimate ${fmtUs(p.timeUs)}.`;
+			items.forEach((li, i) => li.classList.toggle('is-current', i + 1 === stepper.step));
+		};
+
+		frame.querySelector('.sim-params')!.addEventListener('input', () => {
+			config.gpu = field<HTMLSelectElement>('gpu').value as Config['gpu'];
+			const g = gpuById(config.gpu);
+			const roofSel = field<HTMLSelectElement>('roof');
+			for (const o of roofSel.options) o.disabled = peakTflops(g, o.value as Config['roof']) === null;
+			config.roof = roofFor(g, roofSel.value as Config['roof']);
+			roofSel.value = config.roof;
+			config.log2Flops = Number(field<HTMLInputElement>('log2Flops').value);
+			config.log2Bytes = Number(field<HTMLInputElement>('log2Bytes').value);
+			const f = fmtPow2(config.log2Flops, 'FLOP');
+			const b = fmtPow2(config.log2Bytes, 'B');
+			out('flops').textContent = f;
+			out('bytes').textContent = b;
+			field<HTMLInputElement>('log2Flops').setAttribute('aria-valuetext', f);
+			field<HTMLInputElement>('log2Bytes').setAttribute('aria-valuetext', b);
+			// The step stays put so a change is compared at the same marker; the status must follow it.
+			sync(stepper.step);
+			draw();
+		});
+
+		const sync = bindControls(frame, stepper, (step) => describe(config, step));
+		stepper.onChange(draw);
+		new ResizeObserver(draw).observe(canvas);
+		draw();
+	}
+
+	document.querySelectorAll<HTMLElement>('[data-sim="roofline"]').forEach(mount);
+</script>
