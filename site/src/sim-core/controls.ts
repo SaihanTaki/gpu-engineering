@@ -4,7 +4,7 @@ import type { Stepper } from './stepper';
  * Wires the static control bar rendered by SimFrame.astro to a Stepper.
  *
  * Keyboard (while focus is inside the sim, but not in a form field):
- *   Space / K  play or pause
+ *   Space / K  play or pause (Space on a button presses that button)
  *   ← / →      step back / forward
  *   Home       reset
  */
@@ -49,6 +49,8 @@ export function bindControls(
 		switch (event.key) {
 			case ' ':
 			case 'k':
+				// Space on a focused button must press that button, not toggle play.
+				if (event.key === ' ' && target.closest('button')) return;
 				event.preventDefault();
 				stepper.toggle();
 				break;
