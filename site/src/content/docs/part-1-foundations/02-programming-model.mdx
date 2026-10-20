@@ -1,0 +1,221 @@
+---
+title: 2. The programming model
+description: How a CUDA kernel launch turns into a grid of blocks and threads, and how each thread works out which data is its own.
+sidebar:
+  order: 2
+banner:
+  content: Draft chapter. If something is wrong or unclear, use the edit link at the bottom of the page.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import GridIndexing from '@sims/grid-indexing/GridIndexing.astro';
+import CodeTabs from '@components/CodeTabs.astro';
+import cuda from '@kernels/ch02-programming-model/cuda/whoami.cu?raw';
+import numba from '@kernels/ch02-programming-model/numba/whoami.py?raw';
+import triton from '@kernels/ch02-programming-model/triton/whoami.py?raw';
+
+You launch a million threads and every one of them runs the same function,
+line for line. There is no loop handing out work. So how does thread 7,341
+know that element 7,341 is the one it should write?
+
+The answer is the whole of the CUDA programming model, and it fits in one line
+of arithmetic.
+
+## One function, many threads
+
+A **kernel** is a function marked `__global__`. The CPU (the **host**) launches
+it, and the GPU (the **device**) runs it once per thread:
+
+```cpp
+whoami<<<gridDim, blockDim>>>(out, n);
+```
+
+The two numbers in the triple angle brackets say how many threads to start.
+They are not one flat count. Threads come in **blocks**, and the blocks form a
+**grid**:
+
+- `blockDim` is the number of threads in each block. A block can hold at most
+  1024 threads.
+- `gridDim` is the number of blocks. In one dimension that can be up to
+  2<sup>31</sup> - 1, so you will run out of data long before you run out of blocks.
+
+Inside the kernel, every thread can read four built-in variables:
+`threadIdx` (its position inside its block), `blockIdx` (its block's position
+in the grid), and the launch sizes `blockDim` and `gridDim`. Each one has
+`.x`, `.y` and `.z` parts. This chapter uses `.x` until the 2D section.
+
+Why two levels? Blocks are the unit the hardware schedules. Each block runs
+entirely on one streaming multiprocessor (SM), and the threads of one block can
+share fast on-chip memory and wait for each other, which chapter 7 uses.
+In a normal launch, different blocks cannot wait for each other. That
+restriction is what lets the same kernel run on a laptop GPU with a few dozen
+SMs or a data-center GPU with more than a hundred: the hardware hands out
+blocks to whichever SM is free, in any order.
+
+## The global index
+
+A thread's position in the whole grid is its block's starting point plus its
+offset inside the block:
+
+```cpp
+int i = blockIdx.x * blockDim.x + threadIdx.x;
+```
+
+With 8 threads per block, block 0 covers `i` = 0 to 7, block 1 covers 8 to 15,
+and so on. Thread 3 of block 2 gets `i = 2 * 8 + 3 = 19`. Every thread in the
+grid gets a different `i`, and that is how each one claims its element.
+
+Step through a launch below. Hover over or tap a thread to see its arithmetic,
+or type a block and thread number into the inspector.
+
+<GridIndexing />
+
+## Two details that break real kernels
+
+**Round the number of blocks up.** For `n = 20` and 8 threads per block,
+`20 / 8` in integer arithmetic is 2. Two blocks give 16 threads, and elements
+16 to 19 are never touched. No error is reported; the output is just wrong.
+The usual fix is to round up:
+
+```cpp
+int blocks = (n + threads - 1) / threads;   // 3 for n = 20, threads = 8
+```
+
+In the simulation, switch **Number of blocks** to `n / blockDim` and step
+through to see the elements that no thread reaches.
+
+**Check the bounds.** Rounding up means the last block usually has threads
+past the end of the array. Three blocks of 8 is 24 threads for 20 elements, so
+four threads have `i` from 20 to 23. Without `if (i < n)`, they write past the
+end of `out`. That is undefined behavior: it may corrupt another buffer, crash
+with an illegal address error, or appear to work until the day it does not.
+Clear the **Bounds check** box in the simulation to see where those writes land.
+
+<Aside type="tip">
+  Rounding up and checking bounds always go together. Make them a habit for every
+  kernel, even when your test sizes happen to divide evenly.
+</Aside>
+
+## Two dimensions
+
+For images and matrices it is easier to think in rows and columns. Launch
+sizes can be `dim3` values with an `x` and a `y`:
+
+```cpp
+dim3 block(16, 16);
+dim3 grid((width + 15) / 16, (height + 15) / 16);
+whoami2d<<<grid, block>>>(out, width, height);
+```
+
+Inside the kernel, compute a column from `x` and a row from `y`, check both
+bounds, and turn the pair into an offset into the row-major array:
+
+```cpp
+int col = blockIdx.x * blockDim.x + threadIdx.x;
+int row = blockIdx.y * blockDim.y + threadIdx.y;
+if (col < width && row < height) {
+    out[row * width + col] = row * width + col;
+}
+```
+
+Mapping `x` to columns is a deliberate choice. Threads with consecutive
+`threadIdx.x` then touch consecutive addresses in memory, which is the access
+pattern GPU memory serves fastest. Chapter 6 measures why.
+
+The total threads per block is the product of the dimensions, so `dim3(16, 16)`
+is 256 threads and `dim3(32, 32)` is 1024, the maximum.
+
+## The code
+
+Here is the complete chapter code in each language. Each file launches a 1D
+and a 2D kernel, and the tests in `kernels/ch02-programming-model/` check every
+version against NumPy.
+
+<CodeTabs
+	cuda={cuda}
+	numba={numba}
+	triton={triton}
+	titles={{ cuda: 'cuda/whoami.cu', numba: 'numba/whoami.py', triton: 'triton/whoami.py' }}
+>
+	<div slot="triton">
+		Triton has no `threadIdx`. A Triton program handles a whole block of elements at once:
+		`tl.program_id(0)` plays the role of `blockIdx.x`, and `tl.arange(0, BLOCK)` gives the offsets that
+		`threadIdx.x` would. The mask does the job of the bounds check. How many hardware threads work on each
+		block is the compiler's choice, tuned with the `num_warps` launch option.
+	</div>
+</CodeTabs>
+
+What changes between the languages:
+
+- **CUDA C++** spells everything out: allocating device memory, copying results
+  back, and checking errors after every call.
+- **Numba** gives the same thread model in Python. `cuda.grid(1)` is a
+  shortcut for `blockIdx.x * blockDim.x + threadIdx.x`, and the launch is
+  written `whoami[blocks, threads](...)` instead of with angle brackets.
+- **Triton** launches a grid of programs with `whoami[grid](...)`. The block
+  size `BLOCK` must be a power of two because `tl.arange` only accepts powers
+  of two.
+
+## Exercises
+
+**1. Predict the index.** A kernel is launched with `<<<4, 32>>>`. Which `i`
+does thread 5 of block 3 compute? How many threads does the launch start?
+
+<details>
+<summary>Answer</summary>
+
+`i = 3 * 32 + 5 = 101`. The launch starts 4 * 32 = 128 threads.
+
+</details>
+
+**2. Find the bug.** This launch is meant to process `n = 1000` elements:
+
+```cpp
+int threads = 256;
+int blocks = n / threads;
+scale<<<blocks, threads>>>(data, n);
+```
+
+Which elements are never processed, and what is the fix?
+
+<details>
+<summary>Answer</summary>
+
+`1000 / 256` is 3 in integer division, so 768 threads run and elements 768 to
+999 are skipped. Use `(n + threads - 1) / threads`, which gives 4 blocks, and
+make sure the kernel checks `i < n`, since 4 blocks start 1024 threads.
+
+</details>
+
+**3. Count the idle threads.** You process a 1920 by 1080 image with
+`dim3 block(16, 16)` and a rounded-up grid. How many blocks run, and how many
+threads fail the bounds check?
+
+<details>
+<summary>Answer</summary>
+
+1920 / 16 = 120 blocks across. 1080 / 16 = 67.5, which rounds up to 68 blocks
+down. That is 120 * 68 = 8160 blocks and 2,088,960 threads. The image has
+2,073,600 pixels, so 15,360 threads (the bottom 8 rows of the last block row,
+across 1920 columns) fail the check.
+
+</details>
+
+**4. Run it.** Run `pytest kernels/ch02-programming-model`. Then change the
+call `run(20, 8)` at the bottom of `numba/whoami.py` to `run(5, 8)` and run
+the script. How many blocks launch, and how many threads skip the store? On a
+machine without a GPU, set `NUMBA_ENABLE_CUDASIM=1` before running the script.
+
+<details>
+<summary>Answer</summary>
+
+One block of 8 threads launches. Threads 5, 6 and 7 fail `i < out.size`, so
+3 threads skip the store and the table has 5 rows.
+
+</details>
+
+## Further reading
+
+- [CUDA C++ Programming Guide](https://docs.nvidia.com/cuda/cuda-c-programming-guide/), the sections on the programming model and on thread hierarchy.
+- [Numba CUDA: writing kernels](https://nvidia.github.io/numba-cuda/user/kernels.html), for `cuda.grid` and launch configuration.
+- [Triton tutorial: vector addition](https://triton-lang.org/main/getting-started/tutorials/01-vector-add.html), the block-level version of the same idea.

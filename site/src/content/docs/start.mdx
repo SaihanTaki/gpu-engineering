@@ -1,0 +1,60 @@
+---
+title: How this course works
+description: What each chapter contains, how to use the simulations, and how to run the code with or without a GPU.
+---
+
+## What a chapter contains
+
+Each chapter starts from one concrete question, explains the idea, and then
+gives you a simulation to step through. After the simulation comes the same
+kernel written three ways:
+
+- **CUDA C++** is the reference version. It is closest to what the hardware runs.
+- **Numba** writes CUDA kernels in Python with the same thread model as C++.
+- **Triton** works one level up. You write code for a whole block of data, and
+  the compiler decides what each thread does. Where a chapter is about threads
+  or warps, the Triton tab explains what Triton handles for you instead.
+
+Pick a language tab once and every chapter opens on that language.
+
+Chapters end with exercises. Answers are folded under each question so you can
+try first.
+
+## Using a simulation
+
+Each simulation shows one idea, simplified so you can see it. It is not a
+model of real timing. The caption under each one says what it leaves out.
+
+| Control | Mouse or touch | Keyboard, with focus inside the simulation |
+|---|---|---|
+| Play or pause | Play | Space or K |
+| One step forward or back | Next, Back | Right and left arrow |
+| Start over | Reset | Home |
+| Jump to any step | Drag the step slider | Tab to the slider, then arrow keys |
+
+The text under the controls describes the current step, so you can follow a
+simulation without seeing the drawing. Changing a parameter restarts the
+simulation from step 0.
+
+## Running the code
+
+All kernels live in the `kernels/` folder of the repository, one folder per
+chapter, each with a `test_correctness.py` that checks every version against
+NumPy.
+
+**With an NVIDIA GPU**, use the course Docker image. It has the CUDA toolkit,
+PyTorch, Triton, Numba and the Nsight profilers at the versions the course is
+tested with. You need the NVIDIA driver and the NVIDIA Container Toolkit on the
+host. From the repository root:
+
+```bash
+docker build -t gpu-engineering docker/
+docker run --gpus all -it --rm -p 8888:8888 -v "$PWD":/workspace gpu-engineering bash
+pytest kernels
+make -C kernels/ch02-programming-model/cuda run
+```
+
+**Without a GPU**, the Python versions still run on your CPU. Numba has a CUDA
+simulator and Triton has an interpreter; the test setup turns both on when it
+finds no GPU. They are slow and only useful for checking that code is correct,
+not for measuring speed. The CUDA C++ versions need a GPU.

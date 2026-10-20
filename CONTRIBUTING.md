@@ -42,29 +42,28 @@ Chapters are MDX files in `site/src/content/docs/part-N-*/`, for example
 `site/src/content/docs/part-2-memory/06-coalescing.mdx`. The sidebar is built
 from these folders.
 
-Frontmatter fields:
+Frontmatter uses Starlight's standard fields:
 
 | Field | Meaning |
 |---|---|
-| `title` | Page title |
+| `title` | Page title, starting with the chapter number |
 | `description` | One sentence, used for search and link previews |
-| `chapter` | Chapter number as a string, for example `"6"` or `"0.1"` |
-| `status` | `planned`, `draft` or `ready` |
-| `prerequisites` | Chapter numbers to read first, for example `["2", "4"]` |
-| `kernels` | Folder under `kernels/`, for example `ch06-coalescing` |
-| `colab` | Notebook path under `notebooks/` |
+| `sidebar.order` | Chapter number, so the sidebar lists chapters in order |
+| `banner` | Set `content` to mark a chapter as a draft |
 
 ```mdx
 ---
-title: Global memory and coalescing
+title: 6. Global memory and coalescing
 description: Why the order in which threads read memory decides bandwidth.
-chapter: "6"
-status: draft
-prerequisites: ["2", "4"]
-kernels: ch06-coalescing
-colab: ch06-coalescing.ipynb
+sidebar:
+  order: 6
+banner:
+  content: Draft chapter. Report problems with the link at the bottom of the page.
 ---
 ```
+
+Add a new part folder to the `sidebar` list in `site/astro.config.mjs` when its
+first chapter is written, so the sidebar never shows empty groups.
 
 Follow the chapter structure in section 2 of `plan.md`. Open a chapter request
 issue first if the chapter is not in the plan.
