@@ -1,0 +1,180 @@
+---
+import SimFrame from '@components/SimFrame.astro';
+import { LINE_BYTES, PARAM, PATTERNS, PER_LINE, type Pattern } from './model';
+
+interface Props {
+	pattern?: Pattern;
+	param?: number;
+	accesses?: number;
+	l1Lines?: number;
+	l2Lines?: number;
+}
+
+const { pattern = 'sequential', param = 8, accesses = 128, l1Lines = 4, l2Lines = 16 } = Astro.props;
+const names: Record<Pattern, string> = {
+	sequential: 'Sequential: a[i]',
+	strided: 'Strided: a[i * stride]',
+	window: 'Reuse window: a[i % window]',
+	random: 'Random: a[random in range]',
+};
+const code = [
+	{ name: 'sequential', lang: 'cpp', code: 'for (int i = 0; i < n; ++i)\n    sum += a[i];' },
+	{ name: 'strided', lang: 'cpp', code: 'for (int i = 0; i < n; ++i)\n    sum += a[i * stride];' },
+	{ name: 'window', lang: 'cpp', code: 'for (int i = 0; i < n; ++i)\n    sum += a[i % window];' },
+	{ name: 'random', lang: 'cpp', code: '// idx[i] is random in [0, range)\nfor (int i = 0; i < n; ++i)\n    sum += a[idx[i]];' },
+].sort((a, b) => Number(b.name === pattern) - Number(a.name === pattern));
+const presets = [
+	{ label: 'Sequential', pattern: 'sequential', param: 8, accesses: 128 },
+	{ label: 'Stride 8', pattern: 'strided', param: 8, accesses: 128 },
+	{ label: 'Window fits L1', pattern: 'window', param: 32, accesses: 128 },
+	{ label: 'Window fits L2 only', pattern: 'window', param: 64, accesses: 192 },
+	{ label: 'Window bigger than L2', pattern: 'window', param: 160, accesses: 256 },
+	{ label: 'Random over 1024', pattern: 'random', param: 1024, accesses: 128 },
+];
+const p = PARAM[pattern];
+---
+
+<SimFrame title="Cache sim: one thread's loads through L1 and L2" sim="cache-sim" code={code} config={{ pattern, param, accesses, l1Lines, l2Lines }}>
+	<Fragment slot="params">
+		<label class="sim-field">
+			<span>Access pattern</span>
+			<select name="pattern">
+				{PATTERNS.map((id) => <option value={id} selected={id === pattern}>{names[id]}</option>)}
+			</select>
+		</label>
+		<label class="sim-field">
+			<span><span data-param-label>{p ? p.label : 'No parameter for sequential'}</span> <output data-out="param">{p ? param : ''}</output></span>
+			<input type="range" name="param" min={p?.min ?? 1} max={p?.max ?? 32} step={p?.step ?? 1} value={param} disabled={!p} />
+		</label>
+		<label class="sim-field">
+			<span>Accesses <output data-out="accesses">{accesses}</output></span>
+			<input type="range" name="accesses" min="16" max="256" step="16" value={accesses} />
+		</label>
+		<label class="sim-field">
+			<span>L1 size</span>
+			<select name="l1Lines">
+				{[2, 4, 8].map((n) => <option value={n} selected={n === l1Lines}>{n} lines ({n * LINE_BYTES} bytes)</option>)}
+			</select>
+		</label>
+		<label class="sim-field">
+			<span>L2 size</span>
+			<select name="l2Lines">
+				{[8, 16, 32].map((n) => <option value={n} selected={n === l2Lines}>{n} lines ({n * LINE_BYTES} bytes)</option>)}
+			</select>
+		</label>
+	</Fragment>
+
+	<div class="cache-presets" role="group" aria-label="Try these">
+		{presets.map((preset) => <button type="button" data-preset={JSON.stringify(preset)}>{preset.label}</button>)}
+	</div>
+
+	<p class="cache-result" data-result aria-live="polite"></p>
+	<div class="sim-canvas" data-canvas>
+		<svg role="img" aria-label="L1 and L2 cache lines, most recently used first, and a timeline of every access by where it was served from"></svg>
+	</div>
+	<ul class="cache-legend" aria-label="Legend">
+		<li><span class="cache-key is-hit" aria-hidden="true"></span>Filled slot: the line was found here (hit).</li>
+		<li><span class="cache-key is-filled" aria-hidden="true"></span>Outlined slot: the line was just copied in after a miss.</li>
+		<li>Slots are ordered most recently used first; the last one is evicted next.</li>
+		<li>Timeline bars: short for an L1 hit, middle for an L2 hit, tall for a read from DRAM.</li>
+	</ul>
+
+	<Fragment slot="caption">
+		Scaled down: one thread, {PER_LINE} floats per {LINE_BYTES}-byte line (one sector), and caches of a few lines. Real
+		L1 and L2 lines are 128 bytes of four sectors, L1 is per SM and shared by all its warps, and L2 is shared by all
+		SMs. NVIDIA does not document the associativity, replacement policy or address hashing of either cache; the model
+		assumes fully associative caches with least-recently-used (LRU) replacement. It models reads only, with no
+		prefetching and no timing.
+	</Fragment>
+</SimFrame>
+
+<script>
+	import { Stepper } from '@sim-core/stepper';
+	import { bindControls } from '@sim-core/controls';
+	import { highlightLines, showVariant } from '@sim-core/code-sync';
+	import { describe, PARAM, pct, simulate, totals, type Config, type Pattern } from './model';
+	import { render } from './view';
+
+	const DEFAULT_PARAM: Record<Pattern, number> = { sequential: 8, strided: 8, window: 64, random: 512 };
+
+	function mount(frame: HTMLElement) {
+		const c: Config = JSON.parse(frame.dataset.config!);
+		let sim = simulate(c);
+		const stepper = new Stepper(c.accesses, 250);
+		const canvas = frame.querySelector<HTMLElement>('[data-canvas]')!;
+		const svgEl = canvas.querySelector('svg')!;
+		const result = frame.querySelector<HTMLElement>('[data-result]')!;
+		const field = <T extends HTMLElement>(name: string) => frame.querySelector<T>(`[name="${name}"]`)!;
+		const param = field<HTMLInputElement>('param');
+		const paramLabel = frame.querySelector<HTMLElement>('[data-param-label]')!;
+		const out = (name: string) => frame.querySelector<HTMLElement>(`[data-out="${name}"]`)!;
+		let code = showVariant(frame, c.pattern);
+
+		const draw = () => {
+			const step = stepper.step;
+			render(svgEl, c, sim, step, Math.max(260, canvas.clientWidth));
+			const t = totals(sim, step);
+			const missed = t.accesses - t.l1;
+			result.textContent =
+				step === 0
+					? `${c.accesses} accesses queued. Predict the L1 hit rate before you start.`
+					: `After ${t.accesses} of ${c.accesses}: L1 hits ${t.l1} (${pct(t.l1, t.accesses)}), L2 hits ${t.l2} of ${missed} L1 misses (${pct(t.l2, missed)}), DRAM reads ${t.dram} (${t.dramBytes} bytes).`;
+			highlightLines(code, step > 0 ? [c.pattern === 'random' ? 3 : 2] : []);
+		};
+
+		const syncParam = (reset: boolean) => {
+			const p = PARAM[c.pattern];
+			param.disabled = !p;
+			paramLabel.textContent = p ? p.label : 'No parameter for sequential';
+			if (p) {
+				param.min = String(p.min);
+				param.max = String(p.max);
+				param.step = String(p.step);
+				if (reset) param.value = String(DEFAULT_PARAM[c.pattern]);
+			}
+			out('param').textContent = p ? param.value : '';
+		};
+
+		const recompute = () => {
+			sim = simulate(c);
+			out('accesses').textContent = String(c.accesses);
+			code = showVariant(frame, c.pattern);
+			// Back to step 0 so the reader can predict before stepping.
+			stepper.setLast(c.accesses);
+			draw();
+		};
+
+		const fromInputs = (event?: Event) => {
+			const pattern = field<HTMLSelectElement>('pattern').value as Pattern;
+			const changed = pattern !== c.pattern;
+			c.pattern = pattern;
+			syncParam(changed && (event?.target as HTMLElement | undefined)?.getAttribute('name') === 'pattern');
+			c.param = Number(param.value);
+			c.accesses = Number(field<HTMLInputElement>('accesses').value);
+			c.l1Lines = Number(field<HTMLSelectElement>('l1Lines').value);
+			c.l2Lines = Number(field<HTMLSelectElement>('l2Lines').value);
+			recompute();
+		};
+		frame.querySelector('.sim-params')!.addEventListener('input', fromInputs);
+
+		frame.querySelectorAll<HTMLButtonElement>('[data-preset]').forEach((b) =>
+			b.addEventListener('click', () => {
+				const p = JSON.parse(b.dataset.preset!);
+				field<HTMLSelectElement>('pattern').value = p.pattern;
+				c.pattern = p.pattern;
+				syncParam(false);
+				param.value = String(p.param);
+				field<HTMLInputElement>('accesses').value = String(p.accesses);
+				fromInputs();
+			}),
+		);
+
+		bindControls(frame, stepper, (step) => describe(c, sim, step));
+		stepper.onChange(draw);
+		new ResizeObserver(draw).observe(canvas);
+		syncParam(false);
+		draw();
+	}
+
+	document.querySelectorAll<HTMLElement>('[data-sim="cache-sim"]').forEach(mount);
+</script>
