@@ -1,0 +1,427 @@
+---
+title: 14. Scan (prefix sum)
+description: How a running total, which looks sequential, runs in parallel. Hillis-Steele against Blelloch, work against step count, scanning many blocks, and the single-pass decoupled look-back that libraries use.
+sidebar:
+  order: 14
+banner:
+  content: Draft chapter. If something is wrong or unclear, use the edit link at the bottom of the page.
+---
+
+import Scan from '@sims/scan/Scan.astro';
+import CodeTabs from '@components/CodeTabs.astro';
+import { countsAt, depth, fmt, lastStep, phases, reference, work } from '@sims/scan/model';
+import cuda from '@kernels/ch14-scan/cuda/scan_kernels.cuh?raw';
+import numba from '@kernels/ch14-scan/numba/scan.py?raw';
+import triton from '@kernels/ch14-scan/triton/scan.py?raw';
+
+export const c8 = { n: 8, mode: 'exclusive', input: 'mixed' };
+export const end8 = (a) => countsAt(c8, a, lastStep(c8));
+export const sizes = [8, 32, 1024, 1048576];
+export const alloc = [8, 6, 7, 5, 3, 0, 9];
+export const allocScan = alloc.map((_, i) => alloc.slice(0, i).reduce((s, x) => s + x, 0));
+export const up8 = phases(c8, 'blelloch')[2].values;
+
+Here is a loop that every programmer has written:
+
+```cpp
+int sum = 0;
+for (int i = 0; i < n; ++i) {
+    out[i] = sum;
+    sum += in[i];
+}
+```
+
+`out[i]` is the sum of everything before `in[i]`. That is a **prefix sum**,
+also called a **scan**. It looks like the least parallel loop there is: each
+iteration needs the `sum` the previous one left behind. Yet a well-tuned GPU
+scan runs close to the speed of copying the array, by the account of the
+NVIDIA report described at the end of this chapter, and much of the rest of
+this course depends on it. When
+each of 1,000,000 threads wants to write a variable number of results into
+one output array, an exclusive scan of the counts gives each thread its
+starting offset. Merrill and Garland's example: threads that need
+{alloc.join(', ')} slots get offsets {allocScan.join(', ')}. Stream
+compaction, radix sort (chapter 17) and the row pointers of a sparse matrix
+(chapter 18) are all built this way.
+
+This chapter shows two ways to break the chain of dependences, counts what
+each one costs, and then scales the result from one block to a whole array.
+
+## Inclusive and exclusive
+
+For an input `x0, x1, ..., x(n-1)`:
+
+- The **inclusive** scan has `x0 + ... + xi` at position `i`. The last element
+  is the total.
+- The **exclusive** scan has `x0 + ... + x(i-1)` at position `i`, and 0 at
+  position 0. The loop above is exclusive. Offsets are exclusive scans.
+
+Either one is the other shifted by one place. For the input 3, 1, 7, 0, 4, 1,
+6, 3 the inclusive scan is {reference({ ...c8, mode: 'inclusive' }).join(', ')}
+and the exclusive scan is {reference(c8).join(', ')}.
+
+Addition is not required. Any operator works if it is **associative**:
+`(a + b) + c` equals `a + (b + c)`. Every parallel scan regroups the sums, and
+associativity is what makes the regrouped answer equal to the sequential one.
+Maximum, minimum and bitwise OR qualify. Floating-point addition is only
+nearly associative, so a parallel float scan can differ from the loop in the last
+bits. This chapter uses integers, so every result can be checked exactly.
+
+## Two costs: work and steps
+
+A parallel algorithm has two separate costs:
+
+- **Work**: the total number of operations, here additions, summed over all
+  threads.
+- **Steps** (also called **depth**): the number of rounds the algorithm
+  needs if every thread runs at once, with a barrier between rounds.
+
+The loop does {work.sequential(8)} additions for 8 elements, in
+{depth.sequential(8)} steps, because each addition waits for the one before.
+An algorithm is **work-efficient** if its work grows no faster than the
+sequential loop's, that is, in proportion to `n`. The two algorithms below
+each win on one of the two costs.
+
+## Hillis-Steele: add your neighbour, double the distance
+
+Hillis and Steele described this one in 1986. In step 1, every element adds
+the element 1 place to its left. In step 2, it adds the element 2 places to
+its left; in step 3, 4 places; and so on, doubling. After step `k`, element
+`i` holds the sum of the `2^k` elements ending at `i` (or all of them, if
+there are fewer). After `log2(n)` steps that is everything up to `i`: the
+inclusive scan.
+
+```cpp
+for (int offset = 1; offset < BLOCK; offset *= 2) {
+    int left = tid >= offset ? s[tid - offset] : 0;
+    __syncthreads();
+    if (tid >= offset) s[tid] += left;
+    __syncthreads();
+}
+```
+
+Each thread owns one element in shared memory (chapter 7). The first barrier
+is the one people forget: every thread must read its left neighbour before
+any thread overwrites it in the same step. GPU Gems 3 uses a second buffer
+for the same reason.
+
+The step count is as small as it can be, `log2(n)`. The work is not. Step `k`
+does `n - 2^(k-1)` additions, so the total is `n log2(n) - (n - 1)`: for 8
+elements, {end8('hs').adds} additions where the loop needed {work.sequential(8)}.
+In the circuit literature the same network is called Kogge-Stone.
+
+## Blelloch: up the tree and back down
+
+Blelloch's algorithm (1990) does the work of two passes over a balanced
+binary tree, stored in place in the array.
+
+1. **Up-sweep.** In level 1, every second element adds its left neighbour. In
+   level 2, every fourth element adds the element 2 places to its left, and
+   so on. This is a tree reduction, the subject of chapter 13. For 3, 1, 7, 0,
+   4, 1, 6, 3 the array ends as {up8.join(', ')}: the last element is the
+   total, and the others hold partial sums of subtrees.
+2. **Clear.** Save the total and set the last element to 0.
+3. **Down-sweep.** Walk back down the tree. At each node, the left child
+   takes the node's value, and the right child gets the node's value plus the
+   old left child. The value passed down to a node is the sum of everything
+   to the left of its subtree, so at the leaves it is the exclusive scan.
+
+```cpp
+// up-sweep, offset = 1, 2, 4, ...
+if (tid < d) s[b] += s[a];
+// down-sweep, offset = ..., 4, 2, 1
+if (tid < d) { int t = s[a]; s[a] = s[b]; s[b] += t; }
+```
+
+with `a = offset * (2 * tid + 1) - 1` and `b = a + offset`. The up-sweep does
+`n/2 + n/4 + ... + 1 = n - 1` additions and the down-sweep the same, so the
+work is `2(n - 1)`: {end8('blelloch').adds} for 8 elements. That is work-efficient. The price is the
+step count: `2 log2(n)` levels instead of `log2(n)`, and fewer threads have
+anything to do near the top of the tree.
+
+The kernels in this chapter make the other result type with a shift and no
+additions: Hillis-Steele's inclusive result shifted right gives the exclusive
+one, and Blelloch's exclusive result shifted left, with the saved total
+appended, gives the inclusive one.
+
+## Both algorithms, step by step
+
+The simulation runs both algorithms on the same 8 or 16 integers. Each row is
+the array after one step, and the lines show which value each write read.
+Before you step, guess the final addition count of each algorithm. The
+counters under the picture keep the running totals.
+
+<Scan />
+
+Things to try:
+
+- **All ones.** After step `k` of Hillis-Steele, element `i` is
+  `min(i + 1, 2^k)`: the window doubles each step.
+- **16 elements.** Hillis-Steele grows to {work.hs(16)} additions, Blelloch to
+  {work.blelloch(16)}. Hillis-Steele still finishes in {depth.hs(16)} levels,
+  Blelloch takes {depth.blelloch(16)}.
+- **Inclusive and exclusive.** The work does not change, only which algorithm
+  needs the extra shift row.
+
+## Which one to use
+
+The counts grow very differently with `n`. Each parallel cell is additions, then levels; the sequential loop needs one step per addition:
+
+<table>
+	<thead>
+		<tr>
+			<th style="text-align: right">Elements</th>
+			<th style="text-align: right">Sequential</th>
+			<th style="text-align: right">Hillis-Steele</th>
+			<th style="text-align: right">Blelloch</th>
+		</tr>
+	</thead>
+	<tbody>
+		{sizes.map((n) => (
+			<tr>
+				<td style="text-align: right">{fmt(n)}</td>
+				<td style="text-align: right">{fmt(work.sequential(n))}</td>
+				<td style="text-align: right">{fmt(work.hs(n))}, {depth.hs(n)}</td>
+				<td style="text-align: right">{fmt(work.blelloch(n))}, {depth.blelloch(n)}</td>
+			</tr>
+		))}
+	</tbody>
+</table>
+
+The table is generated from the model, so it follows the formulas above.
+Which column matters depends on how many threads are really running at once:
+
+- **Inside a warp, Hillis-Steele.** The 32 lanes of a warp execute together
+  (chapter 4). A lane that skips an addition does not free up anything for
+  other work, so extra additions on idle lanes cost nothing and the 5 steps
+  are what count. Merrill and Garland note that warp-level scans on GPUs are
+  typically this construction, and with warp shuffles it needs no shared
+  memory at all.
+- **More elements than threads, Blelloch or something like it.** When a
+  block of 256 threads scans 4,096 elements, or a grid scans millions, a
+  level has more additions than there are threads to do them at once. The
+  runtime then follows the work, not the step count, and at a million
+  elements Hillis-Steele does {(work.hs(1048576) / work.blelloch(1048576)).toFixed(1)} times the additions of Blelloch.
+
+Fast block scans mix the two. One that Merrill and Garland describe, and
+that CUB offers, gives each thread a few consecutive elements to add up
+sequentially, has one warp scan the per-thread totals with Hillis-Steele, and
+needs only two block-wide barriers.
+
+The Blelloch kernel here has one more problem. Its index `a` jumps by
+`2 * offset` words from thread to thread, so as `offset` grows, more threads of
+a warp land in the same bank of shared memory (chapter 8). GPU Gems 3 fixes it
+by padding the index; exercise 4 counts the conflict.
+
+## More than one block: scan-then-add
+
+A block can only scan what fits in its shared memory. For a longer array the
+kernels here use three phases:
+
+1. Each block scans its own tile (256 elements for Hillis-Steele, 512 for
+   Blelloch) and writes the tile's total to a small array of block sums.
+2. Scan the block sums, exclusive. Entry `b` is now the sum of every tile
+   before tile `b`. If there are more block sums than one block can scan, this
+   is the same three-phase scan again, recursively.
+3. A third kernel adds entry `b` to every element of tile `b`.
+
+Phase 1 reads the input and writes the output, and phase 3 reads and writes
+the output again: about `4n` elements of memory traffic for an `n`-element
+scan, in Merrill and Garland's accounting. A sequential scan needs `2n`: read
+each input once, write each output once. Since a large scan does little
+arithmetic per byte, memory traffic sets its speed, and those extra `2n`
+matter more than any addition count above. A reduce-then-scan variant
+(phase 1 only sums each tile, phase 3 rescans it from the input with the
+offset) gets this down to about `3n`.
+
+## One pass: decoupled look-back
+
+Merrill and Garland's 2016 NVIDIA technical report describes how to scan in
+a single pass, with about `2n` traffic. It is the algorithm behind CUB's
+`DeviceScan`, which, by the report's account, runs close to the speed of a copy.
+
+The starting point is the **chained scan**: block `b` scans its tile, waits
+until block `b - 1` has published its inclusive prefix (the sum of every
+element up to the end of tile `b - 1`), adds its own total and publishes its
+own. One pass, but the blocks form a chain, and each link costs a round trip
+through global memory. The report works an example: with a 600-cycle signal
+latency on a Tesla C2050 and 256 elements per block, the chain alone limits
+the scan to about 490 million elements per second, far below what the
+memory could deliver.
+
+**Decoupled look-back** breaks the chain. Each tile has a small descriptor in
+global memory with a status flag, an aggregate and an inclusive prefix. The
+flag is one of:
+
+- **X**: nothing published yet.
+- **A**: the tile's **aggregate**, the sum of this tile alone, is available.
+- **P**: the tile's inclusive **prefix**, the sum of everything up to and
+  including this tile, is available.
+
+Each block then:
+
+1. Reduces its tile and publishes the aggregate with flag A. Block 0 publishes
+   its aggregate as its prefix too, with flag P.
+2. Looks back at the descriptors of the tiles before it, nearest first. On A
+   it adds that tile's aggregate to a running sum and keeps going. On P it adds
+   that tile's prefix and stops. On X it waits for that tile.
+3. Publishes its own prefix with flag P, then scans its tile with the running
+   sum as the starting value and writes the output.
+
+Blocks no longer wait for the whole chain in front of them: aggregates appear
+in parallel, so a block usually finds what it needs a few tiles back. A
+warp can also inspect 32 predecessors at once, one per lane. The
+extra additions of the look-back are the "bounded redundant computation" the
+report trades for latency. Three details make it correct on a GPU:
+
+- **Ordering.** A block's descriptor fields must be visible before its flag
+  is. The report uses a memory fence between the two writes, or packs flag and
+  value into one word that is written at once.
+- **Forward progress.** A block may only wait on tiles whose blocks have
+  already started. CUDA does not promise to run blocks in index order, so the report
+  hands out tile numbers from an atomically incremented global counter
+  (chapter 15) instead of using `blockIdx.x`.
+- **Determinism.** How far a block looks back depends on timing, so the
+  grouping of the additions can change from run to run. For integers that
+  does not matter; for floats the last bits can differ between runs.
+
+This chapter's kernels stop at scan-then-add on purpose: it is short enough
+to read in full and shows where the extra traffic comes from. For a
+production scan, call a library such as CUB.
+
+## The code
+
+All three languages implement the block scans and the scan-then-add driver.
+The CUDA and Numba versions have both algorithms, inclusive and exclusive.
+
+<CodeTabs
+	cuda={cuda}
+	numba={numba}
+	triton={triton}
+	titles={{ cuda: 'cuda/scan_kernels.cuh', numba: 'numba/scan.py', triton: 'triton/scan.py' }}
+>
+	<div slot="triton-note">
+		Triton scans a whole block of values in one call. `tl.associative_scan(x, 0, add)` returns the inclusive scan of
+		the tensor `x` along axis 0 with any associative function marked `@triton.jit`; `tl.cumsum(x, 0)` is the same
+		with addition. There is no shared memory to manage and no barrier to place: how the threads of the program
+		combine their partial sums is the compiler's choice. The scan-then-add driver is the same as in the other two
+		languages, with 1,024 elements per program. The exclusive result is `inclusive - x`, which works for integer
+		addition but not for an operator such as maximum that has no inverse.
+	</div>
+</CodeTabs>
+
+The CUDA kernels are in a header with no host code, so the tests can compile
+them with NVRTC on a machine without `nvcc`. `cuda/scan.cu` holds the
+recursive driver: it times all four variants and checks them against a CPU
+loop. In Numba, `cuda.shared.array` needs its size at compile time, so the
+block sizes are module constants.
+
+## Measure it yourself
+
+On a GPU, from `kernels/ch14-scan`:
+
+```sh
+make -C cuda run
+python numba/scan.py
+python triton/scan.py
+nsys profile --stats=true ./cuda/scan
+```
+
+Each program scans 2<sup>24</sup> integers and prints the time and effective
+bandwidth of each variant, counting `2n` elements of traffic, the minimum. Things to look for:
+
+- How the effective bandwidth compares with your GPU's memory bandwidth. A
+  scan-then-add moves about twice the minimum traffic, so if it is limited by
+  memory, expect it to reach about half. That is an estimate from the traffic
+  count, not a measurement.
+- Hillis-Steele against Blelloch. Blelloch does far fewer additions, but its
+  tiles have bank conflicts and twice the barriers, and both kernels may be
+  waiting on memory anyway.
+- In the `nsys` kernel summary, how many kernels one scan launches and which
+  one takes the time.
+- In Nsight Compute, the shared memory bank conflicts of `scan_blelloch`:
+  `l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum`.
+
+## Exercises
+
+**1. Count the work.** A warp scans 32 elements. How many additions and
+steps do Hillis-Steele and Blelloch need?
+
+<details>
+<summary>Answer</summary>
+
+Hillis-Steele: 32 x 5 - 31 = {work.hs(32)} additions in {depth.hs(32)} steps.
+Blelloch: 2 x 31 = {work.blelloch(32)} additions in {depth.blelloch(32)}
+levels. The sequential loop needs {work.sequential(32)} additions in
+{depth.sequential(32)} steps.
+
+</details>
+
+**2. Predict the output.** What are the exclusive and inclusive scans of
+{alloc.join(', ')}?
+
+<details>
+<summary>Answer</summary>
+
+Exclusive: {allocScan.join(', ')}. Inclusive: each of those plus its own
+input, {alloc.map((x, i) => allocScan[i] + x).join(', ')}. The exclusive entry is where each
+thread starts writing; the inclusive one is where it stops.
+
+</details>
+
+**3. Fix the bug.** Someone removes the first `__syncthreads()` from the
+Hillis-Steele loop, the one between reading `left` and adding it. The test
+passes on their GPU for 32 elements and fails for 256. Why?
+
+<details>
+<summary>Answer</summary>
+
+Without that barrier, a thread can add to `s[tid]` before another thread
+has read it as its `left` value for the same step. The reader then gets a
+value from the next step and counts some elements twice. With 32 elements
+the block is one warp, whose lanes often happen to run the read and the
+write together, so the test passes by luck. Since Volta, lanes of a warp are
+not guaranteed to stay in step, so even that is not safe. With 256 threads
+the reader and writer are often in different warps, and the race shows up.
+`compute-sanitizer --tool racecheck` reports it.
+
+</details>
+
+**4. Bank conflicts in the up-sweep.** In `scan_blelloch` (512 elements,
+256 threads), at the up-sweep level with `offset = 8`, how many threads are
+active, and what is the conflict degree of warp 0's read of `s[a]`?
+
+<details>
+<summary>Answer</summary>
+
+`d = 512 / 16 = 32` threads are active, all of warp 0. Thread `t` reads
+`a = 8 * (2t + 1) - 1 = 16t + 7`, so consecutive lanes are 16 words apart.
+Bank `(16t + 7) % 32` takes only the two values 7 and 23, each for 16 lanes:
+a 16-way conflict. At `offset = 1` it is 2-way, and it doubles with each level
+until fewer than 32 threads are left. Padding the index, `a + a / 32`, spreads
+the lanes over the banks, which is the GPU Gems 3 fix.
+
+</details>
+
+**5. Launches.** For 2<sup>24</sup> elements, how many kernels does one
+Blelloch scan-then-add launch?
+
+<details>
+<summary>Answer</summary>
+
+2<sup>24</sup> / 512 = 32,768 tiles, whose sums are 32,768 / 512 = 64 tiles,
+whose sums fit in one tile. That is three scan kernels (32,768 blocks, 64
+blocks, 1 block) and two add kernels, five in all. Hillis-Steele has 256 per
+tile: 65,536 tiles, then 256, then 1, also five. The level counts are small
+because each level divides by the tile size.
+
+</details>
+
+## Further reading
+
+- [Mark Harris, Shubhabrata Sengupta and John D. Owens, Parallel Prefix Sum (Scan) with CUDA](https://developer.nvidia.com/gpugems/gpugems3/part-vi-gpu-computing/chapter-39-parallel-prefix-sum-scan-cuda), GPU Gems 3, chapter 39 (2007). Both block algorithms, the bank conflict padding and the multi-block scan; written for GPUs with 16 banks.
+- [Duane Merrill and Michael Garland, Single-pass Parallel Prefix Scan with Decoupled Look-back](https://research.nvidia.com/publication/2016-03_single-pass-parallel-prefix-scan-decoupled-look-back), NVIDIA Technical Report NVR-2016-002 (2016), [PDF](https://research.nvidia.com/sites/default/files/pubs/2016-03_Single-pass-Parallel-Prefix/nvr-2016-002.pdf). Scan networks, the data movement of each multi-block strategy, and the look-back.
+- [Guy E. Blelloch, Prefix Sums and Their Applications](https://www.cs.cmu.edu/~scandal/papers/CMU-CS-90-190.html), Carnegie Mellon technical report CMU-CS-90-190 (1990), the up-sweep and down-sweep and many uses of scan. A later version is a chapter of Synthesis of Parallel Algorithms (1993), [PDF](https://www.cs.cmu.edu/~guyb/papers/Ble93.pdf).
+- W. Daniel Hillis and Guy L. Steele Jr., Data Parallel Algorithms, Communications of the ACM 29(12), 1986, the doubling scan.
+- [CUB DeviceScan](https://nvidia.github.io/cccl/unstable/cub/api/structcub_1_1DeviceScan.html), the library scan that implements decoupled look-back.
+- [Triton: tl.associative_scan](https://triton-lang.org/main/python-api/generated/triton.language.associative_scan.html) and [tl.cumsum](https://triton-lang.org/main/python-api/generated/triton.language.cumsum.html).

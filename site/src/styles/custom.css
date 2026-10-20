@@ -2039,3 +2039,90 @@
 	width: 44px;
 	height: 44px;
 }
+
+/* Scan sim (chapter 14) */
+[data-sim='scan'] select {
+	width: 100%;
+	max-width: 100%;
+}
+[data-sim='scan'] .expressive-code .copy button {
+	width: 44px;
+	height: 44px;
+}
+.sc-cell {
+	fill: var(--sim-panel);
+	stroke: var(--sim-muted);
+}
+.sc-cell.is-now {
+	fill: var(--sim-block-a);
+	stroke: var(--sim-active);
+	stroke-width: 2;
+}
+.sc-cell.is-future {
+	fill: none;
+	stroke: var(--sim-line);
+	stroke-dasharray: 3 3;
+}
+.sc-val {
+	font: 500 11px var(--sl-font-mono);
+	fill: var(--sim-text);
+}
+.sc-val.is-tight {
+	font-size: 9px;
+}
+.sc-now {
+	fill: var(--sim-active);
+}
+.sc-edge {
+	stroke: var(--sim-line);
+}
+.sc-edge.is-now {
+	stroke: var(--sim-active);
+	stroke-width: 1.5;
+}
+.sc-legend,
+.sc-totals {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.25rem 1.25rem;
+	margin: 0.5rem 0 0;
+	padding: 0;
+	list-style: none;
+	font-size: var(--sl-text-xs);
+}
+.sc-legend li {
+	display: flex;
+	align-items: center;
+	gap: 0.4rem;
+}
+.sc-swatch {
+	flex-shrink: 0;
+	width: 1.25rem;
+	height: 0.75rem;
+	border: 1px solid var(--sim-muted);
+	border-radius: 2px;
+}
+.sc-swatch.is-now {
+	background: var(--sim-block-a);
+	border: 2px solid var(--sim-active);
+}
+.sc-swatch.is-edge {
+	height: 0;
+	border: 0;
+	border-top: 2px solid var(--sim-active);
+}
+.sc-swatch.is-future {
+	border: 1px dashed var(--sim-line);
+}
+.sc-totals {
+	display: grid;
+	gap: 0.35rem;
+	font-size: var(--sl-text-sm);
+}
+.sc-totals li {
+	padding-inline-start: 0.6rem;
+	border-inline-start: 3px solid var(--sim-line);
+}
+[data-sim='scan'] input[type='range'] {
+	min-height: 44px;
+}
