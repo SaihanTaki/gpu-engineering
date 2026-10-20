@@ -1,0 +1,105 @@
+---
+import SimFrame from '@components/SimFrame.astro';
+import { BLOCK_SIZES, CODE, MODE_IDS, MODE_NAMES, type Mode } from './model';
+
+interface Props {
+	mode?: Mode;
+	block?: (typeof BLOCK_SIZES)[number];
+}
+
+const { mode = 'interleaved', block = 64 } = Astro.props;
+const code = MODE_IDS.map((id) => ({ name: id, code: CODE[id], lang: 'cpp' }));
+// SimFrame shows the first variant until the script runs, so put the starting one first.
+code.sort((a, b) => Number(b.name === mode) - Number(a.name === mode));
+---
+
+<SimFrame title="Reduction tree: one block, level by level" sim="reduction-tree" code={code} config={{ mode, block }}>
+	<Fragment slot="params">
+		<label class="sim-field">
+			<span>Kernel</span>
+			<select name="mode">
+				{MODE_IDS.map((id) => <option value={id} selected={id === mode}>{MODE_NAMES[id]}</option>)}
+			</select>
+		</label>
+		<label class="sim-field">
+			<span>Threads per block</span>
+			<select name="block">
+				{BLOCK_SIZES.map((n) => <option value={n} selected={n === block}>{n} threads, {n / 32} warps</option>)}
+			</select>
+		</label>
+	</Fragment>
+
+	<div class="sim-canvas" data-canvas>
+		<svg role="img" aria-label="The block's shared memory slots, one per thread, grouped by warp, with arrows from each value read to the slot it is added into"></svg>
+	</div>
+	<ul class="rd-legend" aria-label="Legend">
+		<li><span class="rd-swatch is-dest"></span>slot written this level</li>
+		<li><span class="rd-swatch is-src"></span>value read and used up</li>
+		<li><span class="rd-swatch is-live"></span>partial sum still needed</li>
+		<li><span class="rd-swatch is-lane-on"></span>bar under a slot: that thread works</li>
+		<li><span class="rd-swatch is-lane-wasted"></span>thread runs, result unused</li>
+	</ul>
+	<ul class="rd-totals" data-totals aria-label="Totals for each kernel"></ul>
+
+	<Fragment slot="caption">
+		Model, not a measurement. A warp instruction is counted for every warp with at least one lane on at a level; warps
+		with none skip the add but still run the loop and wait at the barrier. Shared memory requests count the two loads
+		and one store of each warp's add. Values are small whole numbers so every partial sum can be read. The model
+		leaves out the global loads, latency, bank conflicts and the cost of each instruction.
+	</Fragment>
+</SimFrame>
+
+<script>
+	import { Stepper } from '@sim-core/stepper';
+	import { bindControls } from '@sim-core/controls';
+	import { highlightLines, showVariant } from '@sim-core/code-sync';
+	import { describe, efficiency, lastStep, MODE_IDS, MODE_NAMES, stepAt, totalsAt, type Config } from './model';
+	import { render } from './view';
+
+	function mount(frame: HTMLElement) {
+		const config: Config = JSON.parse(frame.dataset.config!);
+		const stepper = new Stepper(lastStep(config), 1100);
+		const canvas = frame.querySelector<HTMLElement>('[data-canvas]')!;
+		const svgEl = canvas.querySelector('svg')!;
+		const totalsEl = frame.querySelector<HTMLElement>('[data-totals]')!;
+		const field = (name: string) => frame.querySelector<HTMLSelectElement>(`select[name="${name}"]`)!;
+		let code = showVariant(frame, config.mode);
+
+		const draw = () => {
+			const step = stepper.step;
+			render(svgEl, config, step, Math.max(240, canvas.clientWidth));
+			highlightLines(code, stepAt(config, step).lines);
+			const done = stepper.atEnd;
+			totalsEl.replaceChildren(
+				...MODE_IDS.map((m) => {
+					const li = document.createElement('li');
+					if (m === config.mode) li.className = 'is-current';
+					const name = document.createElement('strong');
+					name.textContent = `${MODE_NAMES[m]}${m === config.mode ? ' (shown)' : ''}:`;
+					let s: string;
+					if (m === config.mode || done) {
+						const c = { ...config, mode: m };
+						const t = totalsAt(c, m === config.mode ? step : lastStep(c));
+						s = ` ${t.warpIssues} warp instructions for ${t.adds} adds (${(100 * efficiency(t)).toFixed(1)}% of lane slots), ${t.divergentIssues} divergent, ${t.barriers} loop barriers, ${t.sharedRequests} shared memory requests.`;
+					} else s = ' step to the end to compare.';
+					li.append(name, s);
+					return li;
+				}),
+			);
+		};
+
+		frame.querySelector('.sim-params')!.addEventListener('change', () => {
+			config.mode = field('mode').value as Config['mode'];
+			config.block = Number(field('block').value);
+			code = showVariant(frame, config.mode);
+			stepper.setLast(lastStep(config));
+		});
+
+		bindControls(frame, stepper, (step) => describe(config, step));
+		stepper.onChange(draw);
+		new ResizeObserver(draw).observe(canvas);
+		draw();
+	}
+
+	document.querySelectorAll<HTMLElement>('[data-sim="reduction-tree"]').forEach(mount);
+</script>
