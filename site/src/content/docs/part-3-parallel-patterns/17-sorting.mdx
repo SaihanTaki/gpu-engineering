@@ -1,0 +1,360 @@
+---
+title: 17. Sorting
+description: Bitonic sort as a fixed network of compare-swaps that maps one thread to one comparator, radix sort built from histograms and scans, merging with merge path, and why CUB and Thrust are what production code calls.
+sidebar:
+  order: 17
+banner:
+  content: Draft chapter. If something is wrong or unclear, use the edit link at the bottom of the page.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import BitonicNetwork from '@sims/bitonic-network/BitonicNetwork.astro';
+import CodeTabs from '@components/CodeTabs.astro';
+import { comparatorCount, launchCounts, stageCount, stateAt } from '@sims/bitonic-network/model';
+import cuda from '@kernels/ch17-sorting/cuda/bitonic_kernels.cuh?raw';
+import numba from '@kernels/ch17-sorting/numba/bitonic.py?raw';
+import triton from '@kernels/ch17-sorting/triton/block_sort.py?raw';
+
+export const fmt = (x) => x.toLocaleString('en-US');
+export const big = launchCounts(1 << 20, 1024);
+export const hybrid = big.hybridGlobal + big.hybridShared;
+export const sortedSwaps = stateAt({ n: 8, input: 'sorted', seed: 0 }, stageCount(8)).swapsSoFar;
+export const reversedSwaps = stateAt({ n: 8, input: 'reversed', seed: 0 }, stageCount(8)).swapsSoFar;
+
+Quicksort, the sort most CPU libraries start from, decides what to compare
+next from the results of the comparisons it has made so far. That is fine for
+one core. A GPU wants tens of thousands of threads doing the same thing at the
+same time, and a warp whose lanes branch on their own data runs both paths
+(chapter 4). So which sorting algorithms fit a GPU?
+
+Two families do. **Sorting networks** fix the whole sequence of comparisons in
+advance, independent of the data, so every thread knows its work before it
+starts. **Radix sort** does not compare keys at all: it moves them by their
+digits, using the histogram of chapter 15 and the scan of chapter 14. This
+chapter builds a bitonic sorting network in all three languages, then explains
+radix sort and merging, which are what the libraries you should call actually
+use.
+
+## Compare-swap and sorting networks
+
+A **comparator** takes two positions `i < p` and a direction. If the keys are
+out of order for that direction, it swaps them. A **sorting network** is a
+fixed list of comparators that sorts any input. Draw each position as a
+horizontal wire and each comparator as a vertical line between two wires.
+
+Comparators that touch different wires are independent, so a network is run
+in **stages**: in one stage every wire is in at most one comparator, and all of
+them can run at once. On a GPU, one thread runs one comparator, and the end of
+a stage is a barrier.
+
+Since the comparisons do not depend on the keys, the work, the memory
+addresses and the number of stages are the same for sorted, reversed or random
+input. The only data-dependent step is whether a pair swaps, which compiles to
+a select rather than a branch around a large body.
+
+## Bitonic sort
+
+Kenneth Batcher described the network in 1968. A sequence is **bitonic** if it
+first rises and then falls, like 1 4 6 8 7 5 3 2 (or a rotation of such a
+sequence). Batcher's observation: compare-swap every key `i` of a bitonic
+sequence of length `L` with key `i + L/2`, ascending. Afterwards both halves are
+bitonic, and every key in the lower half is at most every key in the upper
+half. Repeat on each half with distance `L/4`, then `L/8`, down to 1, and the
+sequence is sorted. Merging a bitonic sequence of length `L` takes `log2 L`
+stages.
+
+To get bitonic sequences in the first place, sort neighbouring runs in
+opposite directions. Pairs sorted up, down, up, down make bitonic runs of 4;
+merge those, alternating direction, into sorted runs of 4 that make bitonic
+runs of 8; and so on until one run covers all `n = 2^p` keys. In the code, the
+run length being built is `k` and the comparator distance is `j`:
+
+```cpp
+for (int k = 2; k <= n; k *= 2)          // phase: build sorted runs of k keys
+    for (int j = k / 2; j > 0; j /= 2)   // stage: compare i with i + j
+        // for every i with (i & j) == 0, ascending if (i & k) == 0
+```
+
+Phase `k` has `log2 k` stages, so the whole network has
+`1 + 2 + ... + p = p(p + 1) / 2` stages of `n / 2` comparators. For 8 keys that
+is {stageCount(8)} stages and {comparatorCount(8)} comparators; for 16 keys,
+{stageCount(16)} and {comparatorCount(16)}.
+
+## Step through the network
+
+Each step runs one stage. Past stages turn grey, the current one is drawn in the
+accent color, solid where the pair swapped and dashed where it was already in
+order, and the arrowhead marks the wire that receives the larger key. Before you
+start, predict the comparator count for 16 keys and whether an already sorted
+input needs fewer of them.
+
+<BitonicNetwork />
+
+Things to try:
+
+- **Already sorted.** The network still runs every comparator, and it even
+  swaps: {sortedSwaps} swaps for 8 sorted keys, because the early phases sort
+  half the runs downward. Reversed input takes {reversedSwaps}. A sorting
+  network cannot stop early.
+- **The end of each phase.** At the last stage of phase `k`, read the key
+  column in runs of `k`: they alternate ascending and descending.
+- **The last phase.** Every comparator points the same way. This is the plain
+  bitonic merge of the whole array.
+
+## Mapping stages to threads
+
+The stage loop runs on the host, one kernel launch per stage. The launch
+boundary is the barrier: no thread of stage `s + 1` starts before every thread
+of stage `s` has finished. Thread `t` runs comparator `t`. Its lower key skips
+the upper half of every group of `2j`:
+
+```cpp
+int i = (t / j) * 2 * j + t % j;   // lower key; the upper key is i + j
+compare_swap(a[i], a[i + j], (i & k) == 0);
+```
+
+A common alternative launches one thread per key and lets only the threads with
+`(i ^ j) > i` work. That idles half the threads. The formula above uses `n / 2`
+threads, all busy.
+
+For `j >= 32`, the 32 lanes of a warp have 32 consecutive values of `i`, so
+both loads are coalesced (chapter 6). For smaller `j` the two loads interleave,
+`a[2t]` and `a[2t + 1]` when `j = 1`, but together they cover the same sectors.
+
+### Fewer launches with shared memory
+
+A sort of `2^20` keys has {big.perStage} stages, so {big.perStage} launches, and
+every launch reads and writes the whole array. Most of those stages have a
+small `j`: a stage with `j < 1024` only pairs keys inside the same aligned tile
+of 1024. A block can load such a tile into shared memory (chapter 7), run all
+those stages there with `__syncthreads()` between them, and write it back once.
+
+`bitonic_shared` does that. The first launch runs phases `k = 2` to `1024`
+entirely inside each tile. For each later phase, the host launches
+`bitonic_step` for the stages with `j >= 1024`, then `bitonic_shared` once for
+the rest. For `2^20` keys that is {big.hybridGlobal} global stages and
+{big.hybridShared} shared memory launches, {hybrid} passes over the array
+instead of {big.perStage}. That is a count of passes, not a measured speedup.
+
+Inside the tile, for `j < 32`, 32 lanes read lower keys spread over 64
+consecutive words, two per bank: a 2-way bank conflict (chapter 8). For
+`j >= 32` the lanes read 32 consecutive words, conflict free.
+
+### Padding to a power of two
+
+The network needs `n = 2^p`. The kernels copy the input into a buffer of the
+next power of two, at least one tile, and fill the rest with `+inf`, which
+sorts to the end and is dropped afterwards. That can almost double the work: 1025
+keys sort as 2048. NaN keys break the scheme, since every comparison with NaN
+is false. There are bitonic variants for arbitrary `n`; radix sort does not
+need padding at all.
+
+## The code
+
+The CUDA C++ and Numba versions have the same two kernels and the same host
+loops, `sort_global` (one launch per stage) and `sort_shared`. The CUDA file
+below is the device code; `cuda/bitonic.cu` holds the host loops, pads the
+input, checks the result against `std::sort` and times `thrust::sort` on the
+same keys for comparison.
+
+<CodeTabs
+	cuda={cuda}
+	numba={numba}
+	triton={triton}
+	titles={{ cuda: 'cuda/bitonic_kernels.cuh', numba: 'numba/bitonic.py', triton: 'triton/block_sort.py' }}
+>
+	<div slot="triton-note">
+		Triton has `tl.sort(x, dim, descending)`, which sorts a tensor that one program holds. In Triton 3.8 it is
+		written in `triton/language/standard.py` as a bitonic network over the tensor, the same compare-swap stages as
+		above, with the compiler deciding which thread holds which key. There is no barrier across programs, so a
+		Triton kernel can sort each block of keys but cannot run the global stages of a large sort by itself; that
+		would take one launch per stage, as in the CUDA version. The kernel below sorts every run of `BLOCK` keys,
+		padding the last one with `+inf`. For a whole tensor, call `torch.sort`.
+	</div>
+</CodeTabs>
+
+`test_correctness.py` checks both Numba methods and the Triton block sort
+against `np.sort` for sizes 1, 2, 7, 64, 100, 256, 1000 and 1024 (more under a
+GPU), with duplicate and negative keys, plus sorted, reversed and constant
+inputs. It compiles the Numba kernels to PTX and the CUDA kernels with NVRTC for
+`sm_75`, `sm_80` and `sm_90`, which works without a GPU, and runs the CUDA
+program when `nvcc` is present.
+
+## Radix sort
+
+Bitonic sort does `O(n log² n)` comparisons. A comparison sort cannot beat
+`O(n log n)`, but radix sort is not a comparison sort, and for fixed-size keys
+its work is `O(n)` per pass with a fixed number of passes. It is what GPU
+libraries use for integers and floats.
+
+**LSD radix sort** (least significant digit first) splits a 32-bit key into
+digits of `d` bits, for example four 8-bit digits, and does one pass per digit,
+lowest first. Each pass moves every key to its place by that digit alone, and it
+must be **stable**: keys with the same digit keep their order from the previous
+pass. After the last pass the keys are sorted by all digits.
+
+One pass is three of the patterns you have already seen:
+
+1. **Histogram (chapter 15).** Each block counts how many of its keys have each
+   of the `2^d` digit values, 256 bins for 8-bit digits.
+2. **Scan (chapter 14).** Lay the per-block counts out digit by digit, all
+   blocks' counts for digit 0, then for digit 1, and so on, and take an
+   exclusive prefix sum. Entry `(digit, block)` is now where that block's first
+   key with that digit goes in the output.
+3. **Scatter.** Each block writes each key to its offset plus the key's rank
+   among the block's keys with the same digit. Computing ranks in block order
+   keeps the pass stable.
+
+Wider digits mean fewer passes but more bins to count and scan per block. Floats
+sort as unsigned integers after a bit flip: flip only the sign bit of a
+positive float, and all bits of a negative one. Then larger unsigned values are
+larger floats.
+
+Each pass reads the keys twice (histogram, then scatter) and writes them once.
+Adinets and Merrill's **Onesweep** (2022) fuses the scan into the scatter with a
+single-pass prefix sum, which their paper puts at about `2n` global memory
+operations per digit pass instead of about `3n`. `cub::DeviceRadixSort`
+contains a onesweep implementation and selects it through its tuning policies.
+
+## Merge sort and merge path
+
+For keys that only have a comparison, such as structs with a custom order,
+libraries use **merge sort**. Sort small tiles inside blocks first, with a
+bitonic network or a block radix sort in shared memory. Then merge pairs of
+sorted runs, doubling the run length each pass, `log2(n / tile)` passes.
+
+The hard part is splitting one merge of two long runs `A` and `B` across many
+threads with equal work. **Merge path** (Green, McColl and Bader, 2012) does it
+with a binary search. Output position `d` of the merge takes some `x` keys from
+`A` and `d - x` from `B`; a binary search over `x` finds the split where
+`A[x - 1] <= B[d - x]` and `B[d - x - 1] < A[x]`. Give each thread or block an
+equal range of output positions, search its two endpoints, and each one then
+merges its own slices sequentially, with no communication. The splits depend
+on the data, but the work per thread does not.
+
+## What to use in practice
+
+Write a bitonic network when you need a small sort inside a kernel, for example
+the top few candidates per thread block, or when a fixed, data-independent
+sequence matters. For sorting an array, call a library:
+
+- **CUB**: `cub::DeviceRadixSort::SortKeys` and `SortPairs`, plus
+  `cub::DeviceSegmentedRadixSort` for many independent segments. Block-level
+  versions (`cub::BlockRadixSort`) work inside your own kernel.
+- **Thrust**: `thrust::sort` and `thrust::sort_by_key`. On the CUDA backend
+  Thrust picks CUB's radix sort when the key type and comparison allow it, for
+  example arithmetic keys with `less` or `greater`, and a merge sort otherwise.
+- **PyTorch**: `torch.sort` and `torch.argsort` on CUDA tensors.
+
+## Measure it yourself
+
+On a GPU, from `kernels/ch17-sorting`:
+
+```sh
+make -C cuda run                      # 2^24 keys: global, shared, thrust
+./cuda/bitonic 1000000                # a size that needs padding
+python numba/bitonic.py
+python triton/block_sort.py
+nsys profile --stats=true ./cuda/bitonic 1048576
+ncu --kernel-name bitonic_shared --section MemoryWorkloadAnalysis_Tables ./cuda/bitonic 1048576
+```
+
+Each program prints the time of one sort and the keys per second. The numbers
+mean nothing under `NUMBA_ENABLE_CUDASIM=1` or `TRITON_INTERPRET=1`. Things to
+look for:
+
+- In the `nsys` kernel summary, the number of `bitonic_step` and
+  `bitonic_shared` launches: it should match the counts above.
+- The gap between `global` and `shared`, and between both and `thrust`.
+- In Nsight Compute, the shared memory bank conflicts of `bitonic_shared` from
+  the stages with `j < 32`.
+
+## Exercises
+
+**1. Count the comparators.** How many stages and comparators does the bitonic
+network need for 1024 keys? Compare with `n log2 n`.
+
+<details>
+<summary>Answer</summary>
+
+`p = 10`, so 10 x 11 / 2 = {stageCount(1024)} stages of 512 comparators:
+{fmt(comparatorCount(1024))} comparators. `n log2 n = 10,240`, so the network
+does about 2.75 times as many comparisons as an `O(n log n)` sort's leading
+term. It pays that for a fixed schedule with no data-dependent control flow.
+
+</details>
+
+**2. Sorted input.** Set the simulation to 8 keys, already sorted. How many
+swaps happen, and why is it not zero?
+
+<details>
+<summary>Answer</summary>
+
+{sortedSwaps}. Phase `k = 2` sorts pairs (2, 3) and (6, 7) descending, so they
+swap at once, and phase `k = 4` turns the second run of 4 into a descending
+run. The last phase then has to undo that. The comparator count, 24, is the
+same for every input.
+
+</details>
+
+**3. Count the launches.** For `2^20` keys and 1024-key tiles, how many kernel
+launches does `sort_global` make, and how many does `sort_shared` make?
+
+<details>
+<summary>Answer</summary>
+
+`sort_global`: one per stage, 20 x 21 / 2 = {big.perStage}. `sort_shared`:
+one shared launch for phases 2 to 1024, then for each phase `k = 2^11` to
+`2^20`, `log2 k - 10` global stages and one shared launch. That is
+1 + 2 + ... + 10 = {big.hybridGlobal} global stages plus {big.hybridShared}
+shared launches, {hybrid} in total.
+
+</details>
+
+**4. Fix the bug.** Someone moves the `__syncthreads()` in `bitonic_shared` out
+of the `j` loop, to after both loops, to save time. What goes wrong?
+
+<details>
+<summary>Answer</summary>
+
+Stage `j / 2` reads keys that stage `j` wrote, often from another warp. Without
+a barrier between stages, a thread can compare a key before its partner's
+previous swap has landed, and the result is not sorted, or not even a
+permutation of the input: two threads can read the same key and both write it.
+`compute-sanitizer --tool racecheck` reports the hazard.
+
+</details>
+
+**5. Digit width.** A radix sort of 32-bit keys uses 4-bit digits. How many
+passes and how many histogram bins per pass? With 11-bit digits?
+
+<details>
+<summary>Answer</summary>
+
+4-bit digits: 32 / 4 = 8 passes of 16 bins. 11-bit digits: `ceil(32 / 11) = 3`
+passes (11 + 11 + 10 bits) of up to 2048 bins. Fewer passes over memory, but
+each block's histogram and the scan over all blocks are 128 times larger.
+
+</details>
+
+**6. Padding cost.** How many stages does the bitonic network need for 1024
+keys, and for 1025?
+
+<details>
+<summary>Answer</summary>
+
+1024 keys: {stageCount(1024)} stages of 512 comparators. 1025 keys pad to 2048:
+11 x 12 / 2 = {stageCount(2048)} stages of 1024 comparators,
+{fmt(comparatorCount(2048))} comparators instead of
+{fmt(comparatorCount(1024))}, for one extra key.
+
+</details>
+
+## Further reading
+
+- K. E. Batcher, [Sorting networks and their applications](https://doi.org/10.1145/1468075.1468121), AFIPS Spring Joint Computer Conference, 1968. The bitonic and odd-even merge networks.
+- N. Satish, M. Harris and M. Garland, [Designing efficient sorting algorithms for manycore GPUs](https://research.nvidia.com/publication/2009-05_designing-efficient-sorting-algorithms-manycore-gpus), IPDPS 2009. Radix sort and merge sort on GPUs, built from scans.
+- A. Adinets and D. Merrill, [Onesweep: A Faster Least Significant Digit Radix Sort for GPUs](https://arxiv.org/abs/2206.01784), 2022.
+- O. Green, R. McColl and D. A. Bader, [GPU Merge Path: A GPU Merging Algorithm](https://doi.org/10.1145/2304576.2304621), ICS 2012.
+- CUB: [cub::DeviceRadixSort](https://nvidia.github.io/cccl/unstable/cub/api/structcub_1_1DeviceRadixSort.html). Thrust: [thrust::sort](https://nvidia.github.io/cccl/unstable/thrust/api/group__sorting_1ga857dfc9b50a03888c5703699f0fbfcd4.html), and the [CUDA backend's choice between radix and merge sort](https://github.com/NVIDIA/cccl/blob/main/thrust/thrust/system/cuda/detail/sort.h).
+- Triton: [tl.sort](https://triton-lang.org/main/python-api/generated/triton.language.sort.html), and its [bitonic implementation in standard.py](https://github.com/triton-lang/triton/blob/main/python/triton/language/standard.py).
