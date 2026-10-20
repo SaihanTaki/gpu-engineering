@@ -1,0 +1,124 @@
+---
+import SimFrame from '@components/SimFrame.astro';
+import { WARP } from './model';
+
+interface Props {
+	lane?: number;
+}
+
+const { lane = 0 } = Astro.props;
+---
+
+<SimFrame title="Who holds what in mma.m16n8k16" sim="mma-fragment" config={{ lane, pick: null }}>
+	<Fragment slot="params">
+		<label class="sim-field">
+			<span>Lane <output data-out="lane">{lane}</output></span>
+			<input type="range" name="lane" min="0" max={WARP - 1} step="1" value={lane} aria-valuetext={`lane ${lane}`} />
+		</label>
+	</Fragment>
+
+	<p class="mf-lane-text" data-lane-text></p>
+	<div class="sim-canvas" data-canvas>
+		<svg role="img" aria-label="Matrices A, B and C/D of one mma.m16n8k16; each cell shows the lane number that holds it, the selected lane's cells are highlighted"></svg>
+	</div>
+	<ul class="mf-legend" aria-label="Legend">
+		<li><span class="mf-swatch is-lane"></span>selected lane</li>
+		<li><span class="mf-swatch is-a"></span><span class="mf-swatch is-b"></span>other lanes, alternating by groupID</li>
+		<li><span class="mf-swatch is-band"></span>row of A, column of B read for the output</li>
+		<li><span class="mf-swatch is-target"></span>output being computed</li>
+	</ul>
+
+	<fieldset class="sim-inspect">
+		<legend>Inspect an element: click a cell, or type its matrix, row and column</legend>
+		<label>
+			Matrix
+			<select name="pickM">
+				<option value="a">A</option>
+				<option value="b">B</option>
+				<option value="c">C/D</option>
+			</select>
+		</label>
+		<label>row <input type="number" name="pickRow" min="0" max="15" value="0" inputmode="numeric" /></label>
+		<label>col <input type="number" name="pickCol" min="0" max="15" value="0" inputmode="numeric" /></label>
+		<p class="sim-formula" data-pick aria-live="polite"></p>
+	</fieldset>
+
+	<Fragment slot="caption">
+		Layout from the PTX ISA, "Matrix Fragments for mma.m16n8k16 with floating point type", for f16 inputs and f32
+		accumulators. The WMMA API in CUDA C++ uses its own fragment layout, which NVIDIA leaves unspecified, so this map
+		applies to mma.sync in PTX, the instruction Triton emits for the sm_80 GEMM in this chapter. Step through A, B, C and the four outputs of
+		the selected lane with the controls below.
+	</Fragment>
+</SimFrame>
+
+<script>
+	import { Stepper } from '@sim-core/stepper';
+	import { bindControls } from '@sim-core/controls';
+	import { describe, elementsOf, groupId, LAST_STEP, ownerOf, pickText, SHAPE, threadInGroup, type Config, type MatrixId } from './model';
+	import { render } from './view';
+
+	function mount(frame: HTMLElement) {
+		const config: Config = JSON.parse(frame.dataset.config!);
+		const stepper = new Stepper(LAST_STEP, 2600);
+		const canvas = frame.querySelector<HTMLElement>('[data-canvas]')!;
+		const svgEl = canvas.querySelector('svg')!;
+		const laneIn = frame.querySelector<HTMLInputElement>('[name="lane"]')!;
+		const laneOut = frame.querySelector<HTMLElement>('[data-out="lane"]')!;
+		const laneText = frame.querySelector<HTMLElement>('[data-lane-text]')!;
+		const pickM = frame.querySelector<HTMLSelectElement>('[name="pickM"]')!;
+		const pickRow = frame.querySelector<HTMLInputElement>('[name="pickRow"]')!;
+		const pickCol = frame.querySelector<HTMLInputElement>('[name="pickCol"]')!;
+		const pickOut = frame.querySelector<HTMLElement>('[data-pick]')!;
+
+		const setLane = (lane: number) => {
+			config.lane = lane;
+			laneIn.value = String(lane);
+			laneOut.textContent = String(lane);
+			laneIn.setAttribute('aria-valuetext', `lane ${lane}`);
+		};
+
+		const pick = (m: MatrixId, row: number, col: number) => {
+			config.pick = { m, row, col };
+			pickM.value = m;
+			pickRow.value = String(row);
+			pickCol.value = String(col);
+			pickCol.max = String(SHAPE[m].cols - 1);
+			setLane(ownerOf(m, row, col).lane);
+			update();
+		};
+
+		const draw = () => {
+			render(svgEl, config, stepper.step, Math.max(280, canvas.clientWidth), pick);
+			const l = config.lane;
+			const pairs = (m: MatrixId) => elementsOf(m, l).map((e) => `(${e.row},${e.col})`).join(' ');
+			laneText.textContent = `Lane ${l} (groupID ${groupId(l)}, threadID_in_group ${threadInGroup(l)}) holds A ${pairs('a')}; B ${pairs('b')}; C/D ${pairs('c')}.`;
+			pickOut.textContent = config.pick ? pickText(config.pick) : 'No element picked.';
+		};
+
+		const update = () => {
+			draw();
+			sync(stepper.step);
+		};
+
+		laneIn.addEventListener('input', () => {
+			setLane(Number(laneIn.value));
+			config.pick = null;
+			update();
+		});
+		const fromInputs = () => {
+			const m = pickM.value as MatrixId;
+			const clamp = (v: string, hi: number) => Math.min(hi, Math.max(0, Math.round(Number(v) || 0)));
+			pick(m, clamp(pickRow.value, SHAPE[m].rows - 1), clamp(pickCol.value, SHAPE[m].cols - 1));
+		};
+		pickM.addEventListener('change', fromInputs);
+		pickRow.addEventListener('change', fromInputs);
+		pickCol.addEventListener('change', fromInputs);
+
+		const sync = bindControls(frame, stepper, (step) => describe(config, step));
+		stepper.onChange(draw);
+		new ResizeObserver(draw).observe(canvas);
+		draw();
+	}
+
+	document.querySelectorAll<HTMLElement>('[data-sim="mma-fragment"]').forEach(mount);
+</script>

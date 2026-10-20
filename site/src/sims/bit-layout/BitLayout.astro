@@ -1,0 +1,244 @@
+---
+import SimFrame from '@components/SimFrame.astro';
+import { FORMATS, fmtValue, LOG10_MAX, LOG10_MIN, LOG10_STEP, type FormatId } from './model';
+
+interface Props {
+	value?: number;
+	edit?: FormatId;
+}
+
+const { value = 1, edit = 'fp16' } = Astro.props;
+const log10 = Math.log10(Math.abs(value));
+---
+
+<SimFrame title="One number, six formats" sim="bit-layout" config={{ value, edit }}>
+	<Fragment slot="params">
+		<label class="sim-field">
+			<span>Value</span>
+			<input type="text" name="value" value={fmtValue(value)} inputmode="decimal" autocomplete="off" spellcheck="false" aria-describedby="bl-value-hint" />
+		</label>
+		<label class="sim-field">
+			<span>Magnitude <output data-out="log10">10^{log10.toFixed(2)}</output></span>
+			<input type="range" name="log10" min={LOG10_MIN} max={LOG10_MAX} step={LOG10_STEP} value={log10} aria-valuetext={`10 to the ${log10.toFixed(2)}`} />
+		</label>
+		<label class="sim-field">
+			<span>Bits to edit</span>
+			<select name="edit">
+				{FORMATS.map((f) => <option value={f.id} selected={f.id === edit}>{f.name}</option>)}
+			</select>
+		</label>
+		<p class="bl-hint" id="bl-value-hint" data-hint>Decimals, 1e-5, 2^-24, inf or nan.</p>
+	</Fragment>
+
+	<div class="bl-editor">
+		<p class="bl-editor-head" data-edit-head></p>
+		<div class="bl-bits" data-bits role="group" aria-label="Bits, click or press Enter to flip one"></div>
+		<p class="bl-formula" data-formula></p>
+	</div>
+
+	<ul class="bl-cards" data-cards aria-label="The value in each format">
+		{
+			FORMATS.map((f) => (
+				<li data-format={f.id}>
+					<p class="bl-card-name">
+						<strong>{f.name}</strong> <span>{f.note}</span>
+					</p>
+					<p class="bl-card-bits" data-bitstr></p>
+					<dl>
+						<div><dt>stored</dt><dd data-stored></dd></div>
+						<div><dt>abs error</dt><dd data-abs></dd></div>
+						<div><dt>rel error</dt><dd data-rel></dd></div>
+						<div><dt>result</dt><dd data-kind></dd></div>
+					</dl>
+				</li>
+			))
+		}
+	</ul>
+
+	<div class="sim-canvas" data-canvas>
+		<svg role="img" aria-label="Range of each format on a log scale: a light bar for subnormal numbers, a solid bar for normal numbers up to the largest finite value, and a vertical line at the current value"></svg>
+	</div>
+	<ul class="bl-legend" aria-label="Legend">
+		<li><span class="bl-swatch is-sub"></span>subnormal range</li>
+		<li><span class="bl-swatch is-norm"></span>normal range</li>
+		<li><span class="bl-swatch is-marker"></span>|value|</li>
+		<li><span class="bl-swatch is-sign"></span>sign</li>
+		<li><span class="bl-swatch is-exp"></span>exponent</li>
+		<li><span class="bl-swatch is-man"></span>mantissa</li>
+	</ul>
+
+	<Fragment slot="caption">
+		Every conversion rounds to nearest, ties to even, from the double the browser parses. FP8 E4M3 overflow gives
+		NaN, as the non-saturating conversion does. Flipping a bit sets the value to what the edited format now holds, and
+		every other format rounds from it. Step through the edge cases with the controls below.
+	</Fragment>
+</SimFrame>
+
+<script>
+	import { Stepper } from '@sim-core/stepper';
+	import { bindControls } from '@sim-core/controls';
+	import {
+		bitAt,
+		bitString,
+		convert,
+		decode,
+		describe,
+		fieldOf,
+		flipBit,
+		fmtError,
+		fmtValue,
+		formatById,
+		FORMATS,
+		formula,
+		hex,
+		kindText,
+		LAST_STEP,
+		LOG10_MAX,
+		LOG10_MIN,
+		parseValue,
+		totalBits,
+		TOUR,
+		type Config,
+		type FormatId,
+	} from './model';
+	import { renderRange } from './view';
+
+	const FIELD = { sign: 'sign', exp: 'exponent', man: 'mantissa' } as const;
+
+	function mount(frame: HTMLElement) {
+		const config: Config = JSON.parse(frame.dataset.config!);
+		const initial = config.value;
+		const stepper = new Stepper(LAST_STEP, 3200);
+		const canvas = frame.querySelector<HTMLElement>('[data-canvas]')!;
+		const svgEl = canvas.querySelector('svg')!;
+		const bitsEl = frame.querySelector<HTMLElement>('[data-bits]')!;
+		const head = frame.querySelector<HTMLElement>('[data-edit-head]')!;
+		const formulaEl = frame.querySelector<HTMLElement>('[data-formula]')!;
+		const hint = frame.querySelector<HTMLElement>('[data-hint]')!;
+		const valueIn = frame.querySelector<HTMLInputElement>('[name="value"]')!;
+		const slider = frame.querySelector<HTMLInputElement>('[name="log10"]')!;
+		const editSel = frame.querySelector<HTMLSelectElement>('[name="edit"]')!;
+		const log10Out = frame.querySelector<HTMLElement>('[data-out="log10"]')!;
+		let focusBit = -1;
+
+		const syncSlider = () => {
+			const a = Math.abs(config.value);
+			if (!Number.isFinite(a) || a === 0) return;
+			const l = Math.min(LOG10_MAX, Math.max(LOG10_MIN, Math.log10(a)));
+			slider.value = String(l);
+			log10Out.textContent = `10^${l.toFixed(2)}`;
+			slider.setAttribute('aria-valuetext', `10 to the ${l.toFixed(2)}`);
+		};
+
+		const drawBits = () => {
+			const f = formatById(config.edit);
+			const c = convert(f, config.value);
+			head.textContent = `${f.name}: ${totalBits(f)} bits, 1 sign, ${f.expBits} exponent (bias ${f.bias}), ${f.manBits} mantissa. ${hex(f, c)}`;
+			bitsEl.replaceChildren();
+			let group: HTMLElement | null = null;
+			for (let i = 0; i < totalBits(f); i++) {
+				const field = fieldOf(f, i);
+				if (i === 0 || fieldOf(f, i - 1) !== field) {
+					group = document.createElement('div');
+					group.className = `bl-field is-${field}`;
+					const lab = document.createElement('span');
+					lab.className = 'bl-field-label';
+					lab.textContent = FIELD[field];
+					group.append(lab);
+					bitsEl.append(group);
+				}
+				const b = document.createElement('button');
+				b.type = 'button';
+				b.className = `bl-bit is-${field}`;
+				const v = bitAt(f, c, i);
+				b.textContent = String(v);
+				b.setAttribute('aria-pressed', String(v === 1));
+				b.setAttribute('aria-label', `Bit ${totalBits(f) - 1 - i}, ${FIELD[field]}, ${v}`);
+				b.addEventListener('click', () => {
+					const d = decode(f, flipBit(f, c, i));
+					focusBit = i;
+					config.value = d.value;
+					valueIn.value = fmtValue(d.value);
+					valueIn.removeAttribute('aria-invalid');
+					syncSlider();
+					update();
+				});
+				group!.append(b);
+			}
+			formulaEl.textContent = `${fmtValue(c.value)} = ${formula(f, c)}`;
+			if (focusBit >= 0) {
+				bitsEl.querySelectorAll<HTMLButtonElement>('.bl-bit')[focusBit]?.focus();
+				focusBit = -1;
+			}
+		};
+
+		const drawCards = () => {
+			for (const f of FORMATS) {
+				const li = frame.querySelector<HTMLElement>(`[data-format="${f.id}"]`)!;
+				const c = convert(f, config.value);
+				li.classList.toggle('is-editing', f.id === config.edit);
+				li.querySelector('[data-bitstr]')!.textContent = `${bitString(f, c)}  ${hex(f, c)}`;
+				li.querySelector('[data-stored]')!.textContent = fmtValue(c.value);
+				li.querySelector('[data-abs]')!.textContent = fmtError(c.absError);
+				li.querySelector('[data-rel]')!.textContent = fmtError(c.relError);
+				const kind = li.querySelector<HTMLElement>('[data-kind]')!;
+				kind.textContent = kindText(c);
+				kind.classList.toggle('is-warn', c.overflow || c.underflow || c.kind === 'nan');
+			}
+		};
+
+		const draw = () => renderRange(svgEl, config.value, config.edit, Math.max(280, canvas.clientWidth));
+
+		const update = () => {
+			drawBits();
+			drawCards();
+			draw();
+			sync(stepper.step);
+		};
+
+		valueIn.addEventListener('input', () => {
+			const v = parseValue(valueIn.value);
+			if (v === null) {
+				valueIn.setAttribute('aria-invalid', 'true');
+				hint.textContent = 'Not a number. Try 0.1, 1e-5, 2^-24, inf or nan.';
+				return;
+			}
+			valueIn.removeAttribute('aria-invalid');
+			hint.textContent = 'Decimals, 1e-5, 2^-24, inf or nan.';
+			config.value = v;
+			syncSlider();
+			update();
+		});
+		slider.addEventListener('input', () => {
+			const l = Number(slider.value);
+			const sign = config.value < 0 || Object.is(config.value, -0) ? -1 : 1;
+			config.value = sign * Number((10 ** l).toPrecision(6));
+			valueIn.value = fmtValue(config.value);
+			valueIn.removeAttribute('aria-invalid');
+			log10Out.textContent = `10^${l.toFixed(2)}`;
+			slider.setAttribute('aria-valuetext', `10 to the ${l.toFixed(2)}`);
+			update();
+		});
+		editSel.addEventListener('change', () => {
+			config.edit = editSel.value as FormatId;
+			update();
+		});
+
+		const sync = bindControls(frame, stepper, (step) => describe(config, step));
+		stepper.onChange((step) => {
+			config.value = step === 0 ? initial : TOUR[step - 1].value;
+			valueIn.value = fmtValue(config.value);
+			valueIn.removeAttribute('aria-invalid');
+			syncSlider();
+			drawBits();
+			drawCards();
+			draw();
+			// bindControls already wrote the status before the value changed.
+			sync(step);
+		});
+		new ResizeObserver(draw).observe(canvas);
+		update();
+	}
+
+	document.querySelectorAll<HTMLElement>('[data-sim="bit-layout"]').forEach(mount);
+</script>

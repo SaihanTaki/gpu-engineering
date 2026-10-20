@@ -2339,3 +2339,267 @@
 	color: var(--sim-text);
 	font-weight: 600;
 }
+
+/* Tensor core sims (chapter 23): bit layout explorer and mma fragment map */
+[data-sim='bit-layout'] input[type='text'] {
+	font: inherit;
+	font-family: var(--sl-font-mono);
+	font-size: var(--sl-text-sm);
+	color: var(--sim-text);
+	background: var(--sl-color-bg);
+	border: 1px solid var(--sim-muted);
+	border-radius: 4px;
+	padding: 0.4rem 0.5rem;
+	min-height: 44px;
+	width: 100%;
+	box-sizing: border-box;
+}
+[data-sim='bit-layout'] input[aria-invalid='true'] {
+	border: 2px solid var(--sim-warn);
+}
+[data-sim='bit-layout'] select,
+[data-sim='mma-fragment'] select {
+	max-width: 100%;
+}
+.bl-hint {
+	margin: 0;
+	align-self: end;
+	font-size: var(--sl-text-xs);
+	color: var(--sim-muted);
+}
+.bl-editor-head,
+.bl-formula,
+.mf-lane-text {
+	margin: 0 0 0.5rem;
+	font-family: var(--sl-font-mono);
+	font-size: var(--sl-text-sm);
+	overflow-wrap: anywhere;
+}
+.bl-formula {
+	margin: 0.5rem 0 0;
+}
+.bl-bits {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.5rem 0.75rem;
+}
+.bl-field {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: flex-end;
+	gap: 2px;
+	min-width: 0;
+}
+.bl-field-label {
+	flex-basis: 100%;
+	font-size: var(--sl-text-xs);
+	color: var(--sim-muted);
+}
+.bl-bit {
+	min-width: 28px;
+	min-height: 44px;
+	padding: 0;
+	font: 500 var(--sl-text-sm) var(--sl-font-mono);
+	color: var(--sim-text);
+	border: 1px solid var(--sim-line);
+	border-radius: 3px;
+	cursor: pointer;
+}
+.bl-bit.is-sign,
+.bl-swatch.is-sign {
+	background: var(--sim-warn-fill);
+}
+.bl-bit.is-exp,
+.bl-swatch.is-exp {
+	background: var(--sim-block-a);
+}
+.bl-bit.is-man,
+.bl-swatch.is-man {
+	background: var(--sim-block-b);
+}
+.bl-bit[aria-pressed='true'] {
+	font-weight: 700;
+	border-color: var(--sim-text);
+}
+.bl-bit:hover {
+	border-color: var(--sim-active);
+}
+.bl-cards {
+	display: grid;
+	grid-template-columns: repeat(auto-fill, minmax(min(100%, 17rem), 1fr));
+	gap: 0.5rem;
+	margin: 1rem 0;
+	padding: 0;
+	list-style: none;
+}
+.bl-cards li {
+	margin: 0;
+	padding: 0.5rem 0.6rem;
+	border: 1px solid var(--sim-line);
+	border-radius: 4px;
+	font-size: var(--sl-text-xs);
+	min-width: 0;
+}
+.bl-cards li.is-editing {
+	border-color: var(--sim-active);
+	box-shadow: inset 3px 0 0 var(--sim-active);
+}
+.bl-cards p {
+	margin: 0;
+}
+.bl-card-name span {
+	color: var(--sim-muted);
+}
+.bl-card-bits {
+	font-family: var(--sl-font-mono);
+	overflow-wrap: anywhere;
+	white-space: pre-wrap;
+}
+.bl-cards dl {
+	display: grid;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+	gap: 0.1rem 0.75rem;
+	margin: 0.35rem 0 0;
+}
+.bl-cards dl div {
+	display: flex;
+	gap: 0.4rem;
+	min-width: 0;
+}
+.bl-cards dt {
+	color: var(--sim-muted);
+	flex-shrink: 0;
+}
+.bl-cards dd {
+	margin: 0;
+	font-family: var(--sl-font-mono);
+	overflow-wrap: anywhere;
+	min-width: 0;
+}
+.bl-cards dd.is-warn {
+	color: var(--sim-warn);
+	font-weight: 600;
+}
+.bl-grid {
+	stroke: var(--sim-line);
+	stroke-width: 0.75;
+}
+.bl-axis,
+.bl-row-label.is-editing {
+	fill: var(--sim-text);
+}
+.bl-sub {
+	fill: var(--sim-block-b);
+	stroke: var(--sim-muted);
+	stroke-dasharray: 3 2;
+}
+.bl-norm {
+	fill: var(--sim-block-a);
+	stroke: var(--sim-muted);
+}
+.bl-norm.is-editing {
+	stroke: var(--sim-active);
+	stroke-width: 2;
+}
+.bl-marker {
+	stroke: var(--sim-warn);
+	stroke-width: 2;
+}
+.bl-legend,
+.mf-legend {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.25rem 1.25rem;
+	margin: 0.5rem 0 0;
+	padding: 0;
+	list-style: none;
+	font-size: var(--sl-text-xs);
+}
+.bl-legend li,
+.mf-legend li {
+	display: flex;
+	align-items: center;
+	gap: 0.4rem;
+}
+.bl-swatch,
+.mf-swatch {
+	flex-shrink: 0;
+	width: 0.9rem;
+	height: 0.9rem;
+	border: 1px solid var(--sim-muted);
+}
+.bl-swatch.is-sub {
+	background: var(--sim-block-b);
+	border-style: dashed;
+}
+.bl-swatch.is-norm {
+	background: var(--sim-block-a);
+}
+.bl-swatch.is-marker {
+	width: 0;
+	border: 0;
+	border-left: 2px solid var(--sim-warn);
+}
+.mf-title {
+	font-size: 12px;
+}
+.mf-row-index {
+	text-anchor: end;
+}
+.mf-hit {
+	cursor: pointer;
+}
+.mf-cell {
+	stroke: var(--sim-line);
+}
+.mf-cell.is-a,
+.mf-swatch.is-a {
+	fill: var(--sim-block-a);
+	background: var(--sim-block-a);
+}
+.mf-cell.is-b,
+.mf-swatch.is-b {
+	fill: var(--sim-block-b);
+	background: var(--sim-block-b);
+}
+.mf-cell.is-dim {
+	fill: transparent;
+}
+.mf-cell.is-lane,
+.mf-swatch.is-lane {
+	fill: var(--sim-active);
+	background: var(--sim-active);
+}
+.mf-cell.is-picked {
+	stroke: var(--sim-text);
+	stroke-width: 2.5;
+}
+.mf-cell.is-target,
+.mf-swatch.is-target {
+	stroke: var(--sim-warn);
+	stroke-width: 3;
+	border: 2px solid var(--sim-warn);
+}
+.mf-band,
+.mf-swatch.is-band {
+	fill: none;
+	stroke: var(--sim-warn);
+	stroke-width: 2;
+	stroke-dasharray: 5 3;
+	border: 2px dashed var(--sim-warn);
+}
+.mf-lane {
+	font: 10px var(--sl-font-mono);
+	fill: var(--sim-text);
+	pointer-events: none;
+}
+.mf-lane.is-dim {
+	fill: var(--sim-muted);
+}
+.mf-lane.is-small {
+	font-size: 8.5px;
+}
+.mf-lane.is-lane {
+	fill: var(--sim-panel);
+	font-weight: 600;
+}
