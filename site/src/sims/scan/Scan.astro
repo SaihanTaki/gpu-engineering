@@ -1,0 +1,120 @@
+---
+import SimFrame from '@components/SimFrame.astro';
+import { ALGO_IDS, ALGO_NAMES, CODE, INPUT_NAMES, INPUTS, MODES, SIZES, type AlgoId, type Config } from './model';
+
+interface Props {
+	n?: Config['n'];
+	mode?: Config['mode'];
+	input?: Config['input'];
+	code?: AlgoId;
+}
+
+const { n = 8, mode = 'exclusive', input = 'mixed', code = 'blelloch' } = Astro.props;
+const variants = ALGO_IDS.map((id) => ({ name: id, code: CODE[id], lang: 'cpp' }));
+// SimFrame shows the first variant until the script runs, so put the starting one first.
+variants.sort((a, b) => Number(b.name === code) - Number(a.name === code));
+---
+
+<SimFrame title="Scan: Hillis-Steele and Blelloch side by side" sim="scan" code={variants} config={{ n, mode, input, code }}>
+	<Fragment slot="params">
+		<label class="sim-field">
+			<span>Elements</span>
+			<select name="n">
+				{SIZES.map((s) => <option value={s} selected={s === n}>{s}</option>)}
+			</select>
+		</label>
+		<label class="sim-field">
+			<span>Result</span>
+			<select name="mode">
+				{MODES.map((m) => <option value={m} selected={m === mode}>{m === 'inclusive' ? 'Inclusive: element i counted' : 'Exclusive: elements before i'}</option>)}
+			</select>
+		</label>
+		<label class="sim-field">
+			<span>Input</span>
+			<select name="input">
+				{(Object.keys(INPUTS) as Config['input'][]).map((k) => <option value={k} selected={k === input}>{INPUT_NAMES[k]}</option>)}
+			</select>
+		</label>
+		<label class="sim-field">
+			<span>Code panel</span>
+			<select name="code">
+				{ALGO_IDS.map((id) => <option value={id} selected={id === code}>{ALGO_NAMES[id]}</option>)}
+			</select>
+		</label>
+	</Fragment>
+
+	<div class="sim-canvas" data-canvas>
+		<svg role="img" aria-label="Each algorithm's array, one row per parallel step, with lines from the elements read to the elements written"></svg>
+	</div>
+	<ul class="sc-legend" aria-label="Legend">
+		<li><span class="sc-swatch is-now"></span>written in the current step</li>
+		<li><span class="sc-swatch is-edge"></span>line: the value read by that write</li>
+		<li><span class="sc-swatch is-future"></span>step not reached yet</li>
+	</ul>
+	<ul class="sc-totals" data-totals aria-label="Running counts"></ul>
+
+	<Fragment slot="caption">
+		One block, one value per cell, every addition counted. A level is one parallel step between two barriers. The
+		clear and shift rows move values without adding and are not counted as levels. Real kernels scan 256 or more
+		elements per block, and a thread that skips an addition still holds its lane of the warp, so the counts describe
+		the algorithms, not a timing.
+	</Fragment>
+</SimFrame>
+
+<script>
+	import { Stepper } from '@sim-core/stepper';
+	import { bindControls } from '@sim-core/controls';
+	import { highlightLines, showVariant } from '@sim-core/code-sync';
+	import { ALGO_IDS, ALGO_NAMES, countsAt, depth, describe, lastStep, linesAt, phases, work, type AlgoId, type Config } from './model';
+	import { render } from './view';
+
+	function mount(frame: HTMLElement) {
+		const config: Config & { code: AlgoId } = JSON.parse(frame.dataset.config!);
+		const stepper = new Stepper(lastStep(config), 1100);
+		const canvas = frame.querySelector<HTMLElement>('[data-canvas]')!;
+		const svgEl = canvas.querySelector('svg')!;
+		const totalsEl = frame.querySelector<HTMLElement>('[data-totals]')!;
+		const field = (name: string) => frame.querySelector<HTMLSelectElement>(`[name="${name}"]`)!;
+		let code = showVariant(frame, config.code);
+
+		const draw = () => {
+			const step = stepper.step;
+			render(svgEl, config, step, Math.max(260, canvas.clientWidth));
+			highlightLines(code, linesAt(config, config.code, step));
+			const items = ALGO_IDS.map((a) => {
+				const k = countsAt(config, a, step);
+				const li = document.createElement('li');
+				const name = document.createElement('strong');
+				name.textContent = `${ALGO_NAMES[a]}:`;
+				const of = `${phases(config, a).length} steps`;
+				li.append(name, ` ${k.adds} of ${work[a](config.n)} additions, ${k.addLevels} of ${depth[a](config.n)} addition levels (${k.phases} of ${of} done).`);
+				return li;
+			});
+			const seq = document.createElement('li');
+			const seqName = document.createElement('strong');
+			seqName.textContent = 'Sequential loop:';
+			seq.append(seqName, ` ${work.sequential(config.n)} additions, each waiting for the one before.`);
+			totalsEl.replaceChildren(...items, seq);
+		};
+
+		frame.querySelector('.sim-params')!.addEventListener('input', (event) => {
+			const name = (event.target as HTMLSelectElement).name;
+			config.n = Number(field('n').value) as Config['n'];
+			config.mode = field('mode').value as Config['mode'];
+			config.input = field('input').value as Config['input'];
+			config.code = field('code').value as AlgoId;
+			code = showVariant(frame, config.code);
+			// Size and result type change the number of steps; input and code only redraw.
+			if (name === 'n' || name === 'mode') stepper.setLast(lastStep(config));
+			else sync(stepper.step);
+			draw();
+		});
+
+		const sync = bindControls(frame, stepper, (step) => describe(config, step));
+		stepper.onChange(draw);
+		new ResizeObserver(draw).observe(canvas);
+		draw();
+	}
+
+	document.querySelectorAll<HTMLElement>('[data-sim="scan"]').forEach(mount);
+</script>
