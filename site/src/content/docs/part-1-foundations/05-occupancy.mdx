@@ -1,0 +1,386 @@
+---
+title: 5. Occupancy
+description: How registers per thread, shared memory per block and block size decide how many warps an SM can keep resident, and how that theoretical occupancy differs from what a profiler measures.
+sidebar:
+  order: 5
+banner:
+  content: Draft chapter. If something is wrong or unclear, use the edit link at the bottom of the page.
+---
+
+import { Aside, Code } from '@astrojs/starlight/components';
+import Occupancy from '@sims/occupancy/Occupancy.astro';
+import CodeTabs from '@components/CodeTabs.astro';
+import { GPUS, gpuById } from '@sim-core/gpu-specs';
+import { occupancy, pct, fmt, kb } from '@sims/occupancy/model';
+import cuda from '@kernels/ch05-occupancy/cuda/occupancy.cu?raw';
+import numba from '@kernels/ch05-occupancy/numba/occupancy.py?raw';
+import triton from '@kernels/ch05-occupancy/triton/occupancy.py?raw';
+import calc from '@kernels/ch05-occupancy/occupancy_calc.py?raw';
+
+export const a100 = gpuById('a100');
+export const t4 = gpuById('t4');
+export const h100 = gpuById('h100');
+export const KB = 1024;
+export const occ = (g, regsPerThread, smemPerBlock, blockSize) => occupancy(g, { regsPerThread, smemPerBlock, blockSize });
+export const r32 = occ(a100, 32, 0, 256);
+export const r33 = occ(a100, 33, 0, 256);
+export const s48 = occ(a100, 32, 48 * KB, 128);
+export const b32 = occ(a100, 32, 0, 32);
+export const e1a = occ(a100, 40, 0, 256);
+export const e1b = occ(a100, 41, 0, 256);
+export const e2a = occ(t4, 32, 20 * KB, 128);
+export const e2b = occ(t4, 32, 16 * KB, 128);
+export const e5a = occ(a100, 40, 0, 256);
+export const e5b = occ(a100, 41, 0, 256);
+
+Two builds of the same kernel differ by one register: one uses 32 per thread,
+the other 33. Both launch blocks of 256 threads on an {a100.name}. The first
+keeps {r32.activeWarps} warps resident on every SM. The second keeps
+{r33.activeWarps}, a quarter fewer, because registers are handed out in
+chunks and the 33rd register costs a whole chunk per warp.
+
+The fraction of an SM's warp slots that a kernel can fill is its
+**occupancy**. This chapter works out what limits it, shows how to compute it
+for any kernel, and explains why the number a profiler measures is often lower.
+
+## Why resident warps matter
+
+Chapter 4 showed how an SM hides latency: when one warp waits for memory, its
+partition's scheduler issues an instruction from another warp that is ready.
+That only works if other warps are there. A warp is **resident** on an SM from
+the moment its block is placed there until the block finishes, and it keeps its
+registers and its block's shared memory the whole time.
+
+Occupancy is defined as
+
+> active warps per SM / maximum warps per SM
+
+The maximum is {a100.maxWarpsPerSm} on the A100 and H100 and {t4.maxWarpsPerSm}
+on the T4. Blocks are placed whole, so the question is how many blocks of your
+kernel fit on one SM at the same time.
+
+## Four limits
+
+A block can only be placed on an SM that has enough of each of four resources
+free. Whichever runs out first sets the number of resident blocks.
+
+1. **Warp slots.** A block of `n` threads takes `ceil(n / 32)` warp slots. A
+   block of 100 threads takes 4, the same as one of 128.
+2. **Block slots.** An SM holds at most {a100.maxBlocksPerSm} blocks on the
+   A100 and H100 and {t4.maxBlocksPerSm} on the T4, however small they are.
+3. **Registers.** Every SM has 65,536 32-bit registers, split evenly over its
+   four partitions, so 16,384 each. Registers are given to whole warps: a warp
+   gets `regs per thread * 32`, rounded up to a multiple of 256. The number of
+   warps whose registers fit in one partition, times four, is how many warps
+   registers allow. A block also cannot use more than 65,536 registers, or
+   the launch fails.
+4. **Shared memory.** A block takes the shared memory it asks for, plus 1 KB
+   the driver reserves for every block on compute capability 8.0 and later,
+   rounded up to a multiple of 128 bytes (256 bytes on the T4).
+
+These rules are the ones NVIDIA's own occupancy calculator uses. The
+calculator ships with the CUDA Toolkit as the header `cuda_occupancy.h`, and
+the simulation follows it line by line for these three GPUs.
+
+<table>
+	<thead>
+		<tr>
+			<th></th>
+			{GPUS.map((g) => <th scope="col">{g.name}</th>)}
+		</tr>
+	</thead>
+	<tbody>
+		<tr><th scope="row">Compute capability</th>{GPUS.map((g) => <td>{g.computeCapability}</td>)}</tr>
+		<tr><th scope="row">Warp slots per SM</th>{GPUS.map((g) => <td>{g.maxWarpsPerSm} ({fmt(g.maxWarpsPerSm * 32)} threads)</td>)}</tr>
+		<tr><th scope="row">Block slots per SM</th>{GPUS.map((g) => <td>{g.maxBlocksPerSm}</td>)}</tr>
+		<tr><th scope="row">Registers per SM</th>{GPUS.map((g) => <td>{fmt(g.registerFileKbPerSm * 256)} in {g.partitionsPerSm} partitions</td>)}</tr>
+		<tr><th scope="row">Register unit</th>{GPUS.map((g) => <td>{g.regAllocUnit} per warp</td>)}</tr>
+		<tr><th scope="row">Max registers per thread</th>{GPUS.map((g) => <td>{g.maxRegsPerThread}</td>)}</tr>
+		<tr><th scope="row">Shared memory per SM</th>{GPUS.map((g) => <td>{g.maxSharedKbPerSm} KB</td>)}</tr>
+		<tr><th scope="row">Shared memory per block</th>{GPUS.map((g) => <td>{g.maxSharedKbPerBlock} KB</td>)}</tr>
+		<tr><th scope="row">Shared memory unit</th>{GPUS.map((g) => <td>{g.smemAllocUnit} bytes</td>)}</tr>
+		<tr><th scope="row">Reserved per block</th>{GPUS.map((g) => <td>{g.reservedSmemPerBlock ? `${g.reservedSmemPerBlock / 1024} KB` : 'none'}</td>)}</tr>
+	</tbody>
+</table>
+
+The 1 KB reservation is why the A100 can give one block only 163 of its 164 KB.
+A block that wants more than 48 KB of dynamic shared memory must also opt in,
+with `cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes)`.
+
+## The calculator
+
+Set the registers per thread, the shared memory per block and the block size,
+and the simulation fills one SM block by block until the next one does not fit.
+Each resource is drawn as slots or a bar; the newest block is highlighted, and
+the resource that stops the next block is marked full. Before you press Play,
+guess how many blocks of the default kernel fit. Then try the presets.
+
+<Occupancy />
+
+## Reading the result
+
+**33 registers.** At 32 registers a warp needs 32 x 32 = 1,024 registers, and
+16 warps fit in each partition's 16,384, so registers allow all 64 warp slots.
+At 33 a warp needs 1,056, which rounds up to {fmt(r33.regsPerWarp)}. Only
+{r33.warpsPerPartition} of those fit in a partition, {r33.warpsPerPartition * 4}
+warps per SM, which is {r33.blocks} blocks of 8 warps: {pct(r33.occupancy)}.
+Any count from 33 to 40 gives the same result, because they all round up to
+1,280.
+
+**Small blocks.** Blocks of 32 threads run out of block slots first. On the
+A100, {b32.blocks} blocks of one warp each fill only {pct(b32.occupancy)} of
+the warp slots. To reach full occupancy, a block needs at least
+2,048 / 32 = 64 threads on the A100 and H100, and 1,024 / 16 = 64 on the T4.
+
+**Shared memory.** With 48 KB per block of 128 threads, each block takes
+48 KB + 1 KB = {kb(s48.smemPerBlock)}, and {a100.maxSharedKbPerSm} KB holds
+{s48.blocks} of them: {s48.activeWarps} warps, {pct(s48.occupancy)}. Shared
+memory is per block, so larger blocks with the same shared memory per block
+raise occupancy; registers are per thread, so larger blocks do not help there.
+
+**Launch failures.** 1,024 threads at 65 registers would need
+32 x 2,304 = 73,728 registers in one block, more than 65,536, so the launch
+fails with `too many resources requested for launch`. The check rounds a
+block's warps up to a multiple of four first, as if every partition held the
+same number of the block's warps, so a block can fail with fewer than 65,536
+registers. Exercise 4 has a case.
+
+The CUDA C++ Best Practices Guide works through the same kind of example on
+compute capability 7.0, whose register rules match the A100's: 128-thread
+blocks at 37 registers per thread reach 75%, and 320-thread blocks at 37
+registers reach 63%. The simulation's model gives the same numbers, and its
+unit tests check them.
+
+## Asking the compiler for fewer registers
+
+You do not choose a kernel's register count directly; the compiler does. You
+can see it at build time with `nvcc --resource-usage`, and at run time with
+`cudaFuncGetAttributes`. You can also limit it:
+
+- `__launch_bounds__(maxThreads, minBlocks)` on a CUDA kernel promises it will
+  never be launched with more than `maxThreads` threads per block and asks the
+  compiler to fit at least `minBlocks` such blocks on an SM. For
+  `__launch_bounds__(256, 8)` on an SM with 65,536 registers, that is at most
+  65,536 / (8 x 256) = 32 registers per thread.
+- `nvcc -maxrregcount=N` caps every kernel in the file at `N` registers.
+- In Numba, `@cuda.jit(max_registers=N)` and `@cuda.jit(launch_bounds=(256, 8))`
+  do the same, and `kernel.get_regs_per_thread()` reports the result.
+- In Triton, `triton.Config(..., maxnreg=N)` sets the PTX `.maxnreg` limit,
+  and the compiled kernel reports `n_regs`.
+
+A limit is a trade, not a free win. If the kernel needs more registers than
+the cap allows, the compiler moves values to local memory, which lives in
+device memory, and reloads them as needed. These **spills** cost memory
+traffic. Chapter 9 looks at them in detail.
+
+## The occupancy API
+
+CUDA can do this calculation for you, for the GPU the program runs on and the
+kernel as compiled:
+
+- `cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocks, kernel, blockSize, dynamicSmem)`
+  returns how many blocks of `kernel` fit on one SM. Multiply by the warps per
+  block and divide by the warp slots per SM to get the theoretical occupancy.
+- `cudaOccupancyMaxPotentialBlockSize(&minGrid, &blockSize, kernel, dynamicSmem, blockSizeLimit)`
+  returns the block size with the highest occupancy, and the smallest grid
+  that reaches it on every SM.
+
+The CUDA program below prints both for a SAXPY kernel (`y = a * x + y`) and
+for the same kernel with `__launch_bounds__(256, 8)`, then launches one full
+wave: blocks per SM times the number of SMs. A grid-stride loop lets that grid
+cover any array size. The Numba version prints its kernel's register counts and
+runs them through `occupancy_calc.py`, the same rules as the simulation in
+Python. The Triton version shows what `num_warps` changes.
+
+<CodeTabs
+	cuda={cuda}
+	numba={numba}
+	triton={triton}
+	titles={{ cuda: 'cuda/occupancy.cu', numba: 'numba/occupancy.py', triton: 'triton/occupancy.py' }}
+>
+	<div slot="triton">
+		Triton has no block size or registers in its kernel code. You set two launch options, and the compiler picks the
+		rest:
+
+		- **`num_warps`** is the number of warps one program runs on, so each program is one block of
+		  `32 * num_warps` threads. The block of data a program handles (`BLOCK` here) is split across those
+		  threads. More warps per program means fewer registers per thread for the same `BLOCK`, but also bigger
+		  blocks for the occupancy rules.
+		- **`num_stages`** is how many iterations of a loop the compiler keeps in flight when it software-pipelines
+		  the loop's loads. The Triton docs call it "mostly useful for matrix multiplication workloads on SM80+
+		  GPUs". Each stage buffers its tiles in shared memory, so more stages raise shared memory per block and can
+		  lower occupancy. SAXPY has no loop, so `num_stages` changes nothing here; chapter 20 uses it.
+
+		After a launch on a GPU, the returned kernel reports `n_regs`, `n_spills` and `metadata.shared`, which is
+		everything the occupancy calculation needs. The script prints them for each `num_warps`.
+	</div>
+</CodeTabs>
+
+The calculator the Python versions share:
+
+<Code code={calc} lang="python" title="occupancy_calc.py" />
+
+`test_correctness.py` checks it against the same hand-computed cases as the
+simulation's tests, checks the Numba and Triton kernels against NumPy, and, on
+a machine with `nvcc` and a GPU, checks that the CUDA occupancy API returns
+the same block counts as the calculator.
+
+## Theoretical and achieved occupancy
+
+Everything so far is **theoretical occupancy**: the upper limit set by the
+kernel's resources and the GPU's limits, computed before the kernel runs.
+**Achieved occupancy** is what a profiler measures while it runs: the average
+number of active warps per SM over the cycles the SM was active, as a fraction
+of the maximum. Nsight Compute shows both in its Occupancy section, and its
+documentation notes that a large gap between them "typically indicates highly
+imbalanced workloads."
+
+Achieved occupancy is lower than theoretical whenever warps are not there to
+be counted:
+
+- **Too few blocks.** A grid smaller than one full wave never fills the SMs.
+  On an A100 where 8 blocks fit per SM, a grid of 108 blocks puts one block
+  on each SM, at most one eighth of the theoretical occupancy.
+- **The tail.** The last blocks of a grid run while other SMs have already gone
+  idle, so the average over the run drops.
+- **Uneven blocks.** If some warps finish early, for example because they skip
+  most of a loop, their slots stay empty until the whole block finishes and a
+  new one takes its place.
+
+The simulation cannot show achieved occupancy, because it depends on how long
+each warp runs. Measure it.
+
+## Is higher occupancy faster?
+
+Not always. Occupancy is a means to hide latency, and once enough warps are
+resident to hide it, more do not help. The Best Practices Guide says that
+"higher occupancy does not always equate to higher performance" and that low
+occupancy "always interferes with the ability to hide memory latency." A
+kernel that uses more registers per thread can keep more data in registers,
+do more independent work per thread and need fewer warps to hide the same
+latency. Vasily Volkov's GTC 2010 talk, linked below, shows kernels that run
+faster at lower occupancy for exactly this reason.
+
+So treat occupancy as a diagnostic. If a kernel is slow and its occupancy is
+low, find the limiting resource with the calculator and decide whether freeing
+it is worth what it costs.
+
+## Measure it yourself
+
+On a GPU, run the three programs and the profiler:
+
+```sh
+cd kernels/ch05-occupancy
+make -C cuda run
+python numba/occupancy.py
+python triton/occupancy.py
+ncu --section LaunchStats --section Occupancy ./cuda/occupancy
+```
+
+Things to look for:
+
+- The register counts the compiler chose for each kernel, and whether
+  `saxpy_bounded` differs from `saxpy`.
+- The block counts from `cudaOccupancyMaxActiveBlocksPerMultiprocessor`. Put
+  the same numbers into the simulation and compare.
+- In Nsight Compute's Occupancy section, the theoretical against the achieved
+  occupancy of each launch, and the per-resource block limits it reports.
+
+## What the model leaves out
+
+The simulation and `occupancy_calc.py` cover the four limits above. They
+assume the kernel uses the largest shared memory carveout and has opted in to
+more than 48 KB. They leave out: a smaller carveout chosen with
+`cudaFuncAttributePreferredSharedMemoryCarveout`, the hardware barrier limit
+`cuda_occupancy.h` applies on Hopper for kernels that use extra barriers,
+thread block clusters, partitioned global caching, and anything about how long
+warps run. The simulation deals each block's warps to the four partitions in
+turn; NVIDIA does not document the hardware's placement, and the block counts
+do not depend on it.
+
+## Exercises
+
+**1. Where is the cliff?** On an {a100.name} with 256-thread blocks and no
+shared memory, a kernel uses 40 registers per thread. What is its theoretical
+occupancy? What happens at 41?
+
+<details>
+<summary>Answer</summary>
+
+40 x 32 = 1,280 per warp, already a multiple of 256. {e1a.warpsPerPartition}
+warps fit in 16,384 registers, so {e1a.warpsPerPartition * 4} warps per SM,
+{e1a.blocks} blocks of 8: {pct(e1a.occupancy)}, the same as 33 registers.
+At 41, 1,312 rounds up to {fmt(e1b.regsPerWarp)}, {e1b.warpsPerPartition}
+warps per partition, {e1b.warpsPerPartition * 4} per SM, {e1b.blocks} blocks:
+{pct(e1b.occupancy)}.
+
+</details>
+
+**2. Shared memory on a T4.** A kernel with 128-thread blocks and 32 registers
+uses 20 KB of shared memory per block on a {t4.name}. What is its theoretical
+occupancy, and what changes if you cut the shared memory to 16 KB?
+
+<details>
+<summary>Answer</summary>
+
+20 KB is 20,480 bytes, already a multiple of 256, and the T4 reserves nothing.
+65,536 / 20,480 = 3.2, so {e2a.blocks} blocks: {e2a.activeWarps} of 32 warps,
+{pct(e2a.occupancy)}. At 16 KB, 65,536 / 16,384 = {e2b.blocks} blocks,
+{pct(e2b.occupancy)}. Warps alone would allow 8 blocks and registers 16, so
+shared memory is the limit in both cases.
+
+</details>
+
+**3. Achieved occupancy.** A kernel has 100% theoretical occupancy on an
+{a100.name} with 256-thread blocks. You launch it with 108 blocks. What is the
+highest achieved occupancy it can reach?
+
+<details>
+<summary>Answer</summary>
+
+The A100 has 108 SMs, so at best each SM gets one block: 8 of 64 warps, 12.5%.
+The occupancy limit allows 8 blocks per SM, which needs 864 blocks for one
+full wave. Theoretical occupancy says what could fit, not what the grid
+supplies.
+
+</details>
+
+**4. The rounding in the launch check.** On an {a100.name}, a block of 800
+threads uses 80 registers per thread. 25 warps x 2,560 registers is 64,000,
+less than 65,536. Does it launch?
+
+<details>
+<summary>Answer</summary>
+
+No. The check rounds 25 warps up to 28, a multiple of the four partitions, and
+28 x 2,560 = 71,680 is more than 65,536. Per partition, 16,384 / 2,560 = 6
+warps fit, 24 per SM, fewer than the block's 25. 800 is not a slider step in
+the simulation; try 768 threads (24 warps, which fit exactly) and 832 (26
+warps, which fail).
+
+</details>
+
+**5. Launch bounds.** On an {a100.name}, what is the largest register count
+per thread that still lets 6 blocks of 256 threads fit on an SM? Compare it
+with the naive 65,536 / (6 x 256).
+
+<details>
+<summary>Answer</summary>
+
+6 blocks of 8 warps is 48 warps, 12 per partition, so each warp may take at
+most 16,384 / 12 = 1,365 registers, which rounds down to a multiple of 256 as
+1,280: 40 per thread. At 40 the calculator gives {e5a.blocks} blocks; at 41 it
+gives {e5b.blocks}. The naive 65,536 / 1,536 = 42.7 ignores the allocation
+unit and would suggest 42.
+
+</details>
+
+## Further reading
+
+- [CUDA C++ Best Practices Guide: occupancy](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#occupancy) and [calculating occupancy](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#calculating-occupancy), including the 37-register example.
+- [CUDA Runtime API: occupancy](https://docs.nvidia.com/cuda/cuda-runtime-api/cuda_runtime_api/group__CUDART__OCCUPANCY.html), the reference for the functions used here.
+- [CUDA Programming Guide: compute capabilities](https://docs.nvidia.com/cuda/cuda-programming-guide/05-appendices/compute-capabilities.html), the per-SM limits for every GPU generation. The [12.4 guide](https://docs.nvidia.com/cuda/archive/12.4.0/cuda-c-programming-guide/index.html#shared-memory-8-x) states the 1 KB reserved per block.
+- [Nsight Compute Profiling Guide: sections](https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#sections-and-rules), for the Launch Statistics and Occupancy sections, and [occupancy metrics](https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#occupancy-metrics).
+- [CUDA Pro Tip: Occupancy API Simplifies Launch Configuration](https://developer.nvidia.com/blog/cuda-pro-tip-occupancy-api-simplifies-launch-configuration/), NVIDIA's walkthrough of the same API calls.
+- [Vasily Volkov, Better Performance at Lower Occupancy (GTC 2010)](https://www.nvidia.com/content/GTC-2010/pdfs/2238_GTC2010.pdf).
+- [Numba CUDA: kernel reference](https://nvidia.github.io/numba-cuda/reference/kernel.html) and [triton.Config](https://triton-lang.org/main/python-api/generated/triton.Config.html), for `max_registers`, `launch_bounds`, `num_warps`, `num_stages` and `maxnreg`.

@@ -822,3 +822,92 @@
 :is([data-sim='warp-scheduler'], [data-sim='warp-divergence']) input[type='range'] {
 	min-height: 44px;
 }
+
+/* Occupancy sim */
+[data-sim='occupancy'] select {
+	width: 100%;
+	max-width: 100%;
+}
+[data-sim='occupancy'] input[type='range'] {
+	min-height: 44px;
+}
+.occ-presets {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.5rem;
+	margin-bottom: 0.75rem;
+}
+.occ-presets button {
+	font: inherit;
+	font-size: var(--sl-text-sm);
+	min-height: 44px;
+	padding: 0 0.8rem;
+	color: var(--sim-text);
+	background: transparent;
+	border: 1px solid var(--sim-muted);
+	border-radius: 4px;
+	cursor: pointer;
+}
+.occ-presets button:hover {
+	border-color: var(--sim-active);
+}
+.occ-result {
+	margin: 0 0 0.5rem;
+	font-family: var(--sl-font-mono);
+	font-size: var(--sl-text-sm);
+	overflow-wrap: anywhere;
+}
+.occ-result.is-warning {
+	color: var(--sim-warn);
+}
+.occ-free {
+	fill: transparent;
+	stroke: var(--sim-line);
+}
+.occ-used {
+	stroke: var(--sim-muted);
+}
+.occ-used.is-a {
+	fill: var(--sim-block-a);
+}
+.occ-used.is-b {
+	fill: var(--sim-block-b);
+}
+.occ-used.is-new {
+	fill: var(--sim-active);
+	stroke: var(--sim-active);
+}
+.occ-reserved {
+	fill: var(--sim-muted);
+	stroke: none;
+}
+.occ-full {
+	fill: none;
+	stroke: var(--sim-warn);
+	stroke-width: 2;
+	stroke-dasharray: 5 3;
+}
+.occ-full-text {
+	fill: var(--sim-warn);
+}
+.occ-used.is-new + .sim-cell-text {
+	fill: var(--sl-color-black);
+}
+.occ-limits {
+	display: grid;
+	gap: 0.35rem;
+	margin: 0.5rem 0 0;
+	padding: 0;
+	list-style: none;
+	font-size: var(--sl-text-sm);
+}
+.occ-limits li {
+	padding-inline-start: 0.6rem;
+	border-inline-start: 3px solid var(--sim-line);
+}
+.occ-limits li.is-limit {
+	border-inline-start-color: var(--sim-warn);
+}
+.occ-limits strong {
+	font-weight: 600;
+}
