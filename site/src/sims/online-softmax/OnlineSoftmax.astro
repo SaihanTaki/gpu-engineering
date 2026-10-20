@@ -1,0 +1,130 @@
+---
+import SimFrame from '@components/SimFrame.astro';
+import { CHUNKS, CODE, FORMAT_IDS, FORMAT_NAMES, MODE_IDS, MODE_NAMES, PRESET_IDS, PRESET_NAMES, type Config } from './model';
+
+type Props = Partial<Config>;
+
+const { mode = 'online', preset = 'increasing', chunk = 4, format = 'fp32' } = Astro.props;
+const code = MODE_IDS.map((id) => ({ name: id, code: CODE[id], lang: 'cpp' }));
+// SimFrame shows the first variant until the script runs, so put the starting one first.
+code.sort((a, b) => Number(b.name === mode) - Number(a.name === mode));
+---
+
+<SimFrame title="Online softmax: one row, chunk by chunk" sim="online-softmax" code={code} config={{ mode, preset, chunk, format }}>
+	<Fragment slot="params">
+		<label class="sim-field">
+			<span>Method</span>
+			<select name="mode">
+				{MODE_IDS.map((id) => <option value={id} selected={id === mode}>{MODE_NAMES[id]}</option>)}
+			</select>
+		</label>
+		<label class="sim-field">
+			<span>Input row</span>
+			<select name="preset">
+				{PRESET_IDS.map((id) => <option value={id} selected={id === preset}>{PRESET_NAMES[id]}</option>)}
+			</select>
+		</label>
+		<label class="sim-field">
+			<span>Chunk size</span>
+			<select name="chunk">
+				{CHUNKS.map((n) => <option value={n} selected={n === chunk}>{n} {n === 1 ? 'element' : 'elements'}</option>)}
+			</select>
+		</label>
+		<label class="sim-field">
+			<span>Number format</span>
+			<select name="format">
+				{FORMAT_IDS.map((id) => <option value={id} selected={id === format}>{FORMAT_NAMES[id]}</option>)}
+			</select>
+		</label>
+	</Fragment>
+
+	<div class="sim-canvas" data-canvas>
+		<svg role="img" aria-label="The input row in chunks, with a dot under each element for every time it has been read, and a bar for each probability written"></svg>
+	</div>
+	<dl class="os-state" data-state aria-label="Running state"></dl>
+	<ul class="os-totals" data-totals aria-label="Totals for each method"></ul>
+
+	<Fragment slot="caption">
+		Model, not a measurement. Arithmetic is done in double precision; only the range of the chosen format is modeled: an
+		exp() or sum above its largest finite value becomes inf, and a result below its smallest subnormal becomes 0. A chunk
+		stands for what one block loads at once. Memory counts are element reads and writes of the row; the model leaves out
+		caches, which on a GPU may serve the second and third reads of a short row.
+	</Fragment>
+</SimFrame>
+
+<script>
+	import { Stepper } from '@sim-core/stepper';
+	import { bindControls } from '@sim-core/controls';
+	import { highlightLines, showVariant } from '@sim-core/code-sync';
+	import { describe, fmt, lastStep, maxError, MODE_IDS, MODE_NAMES, N, PASSES, stepAt, type Config } from './model';
+	import { render } from './view';
+
+	function mount(frame: HTMLElement) {
+		const config: Config = JSON.parse(frame.dataset.config!);
+		const stepper = new Stepper(lastStep(config), 1100);
+		const canvas = frame.querySelector<HTMLElement>('[data-canvas]')!;
+		const svgEl = canvas.querySelector('svg')!;
+		const stateEl = frame.querySelector<HTMLElement>('[data-state]')!;
+		const totalsEl = frame.querySelector<HTMLElement>('[data-totals]')!;
+		const field = (name: string) => frame.querySelector<HTMLSelectElement>(`select[name="${name}"]`)!;
+		let code = showVariant(frame, config.mode);
+
+		const pair = (term: string, value: string) => {
+			const div = document.createElement('div');
+			const dt = document.createElement('dt');
+			const dd = document.createElement('dd');
+			dt.textContent = term;
+			dd.textContent = value;
+			div.append(dt, dd);
+			return div;
+		};
+
+		const draw = () => {
+			const step = stepper.step;
+			const s = stepAt(config, step);
+			render(svgEl, config, step, Math.max(240, canvas.clientWidth));
+			highlightLines(code, s.lines);
+			const items = [];
+			if (config.mode !== 'naive') items.push(pair('running max m', fmt(s.m)));
+			items.push(pair('running sum d', fmt(s.d)));
+			if (config.mode === 'online') items.push(pair('rescale exp(m_old - m_new)', s.rescale === null ? 'none this step' : fmt(s.rescale)));
+			items.push(pair('memory so far', `${s.reads} reads, ${s.writes} writes`));
+			stateEl.replaceChildren(...items);
+
+			const done = stepper.atEnd;
+			totalsEl.replaceChildren(
+				...MODE_IDS.map((m) => {
+					const li = document.createElement('li');
+					if (m === config.mode) li.className = 'is-current';
+					const name = document.createElement('strong');
+					name.textContent = `${MODE_NAMES[m]}${m === config.mode ? ' (shown)' : ''}:`;
+					let t: string;
+					if (done) {
+						const passes = PASSES[m].length;
+						const err = maxError({ ...config, mode: m });
+						const result = Number.isNaN(err) ? 'NaN in the output' : 'matches the exact softmax';
+						t = ` ${passes} reads and 1 write per element, ${(passes + 1) * N} accesses for the row; ${result}.`;
+					} else t = ' step to the end to compare.';
+					li.append(name, t);
+					return li;
+				}),
+			);
+		};
+
+		frame.querySelector('.sim-params')!.addEventListener('change', () => {
+			config.mode = field('mode').value as Config['mode'];
+			config.preset = field('preset').value as Config['preset'];
+			config.chunk = Number(field('chunk').value);
+			config.format = field('format').value as Config['format'];
+			code = showVariant(frame, config.mode);
+			stepper.setLast(lastStep(config));
+		});
+
+		bindControls(frame, stepper, (step) => describe(config, step));
+		stepper.onChange(draw);
+		new ResizeObserver(draw).observe(canvas);
+		draw();
+	}
+
+	document.querySelectorAll<HTMLElement>('[data-sim="online-softmax"]').forEach(mount);
+</script>
