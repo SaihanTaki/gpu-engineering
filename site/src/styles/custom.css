@@ -602,3 +602,99 @@
 	width: 44px;
 	height: 44px;
 }
+
+/* Data journey sim */
+[data-sim='data-journey'] select {
+	width: 100%;
+	max-width: 100%;
+}
+.dj-buf {
+	fill: transparent;
+	stroke: var(--sim-muted);
+}
+.dj-buf.is-none {
+	stroke: var(--sim-line);
+	stroke-dasharray: 4 3;
+}
+.dj-buf.is-full {
+	fill: var(--sim-block-a);
+	stroke: var(--sim-active);
+}
+.dj-buf.is-moving {
+	stroke: var(--sim-active);
+	stroke-width: 2.5;
+}
+.dj-link {
+	fill: var(--sim-block-b);
+	stroke: var(--sim-muted);
+}
+.dj-link.is-busy {
+	stroke: var(--sim-active);
+}
+.dj-arrow {
+	stroke: var(--sim-active);
+	stroke-width: 2.5;
+}
+.dj-arrowhead {
+	fill: var(--sim-active);
+}
+.dj-sm {
+	fill: var(--sim-block-b);
+	stroke: var(--sim-line);
+}
+.dj-sm.is-busy {
+	fill: var(--sim-active);
+	stroke: var(--sim-active);
+}
+.dj-stripe-bg {
+	fill: var(--sim-block-b);
+}
+.dj-stripe {
+	stroke: var(--sim-muted);
+	stroke-width: 3;
+}
+.dj-seg-track {
+	fill: transparent;
+	stroke: var(--sim-line);
+}
+.dj-seg-copy {
+	fill: url(#dj-stripes);
+}
+.dj-seg-kernel {
+	fill: var(--sim-active);
+}
+.dj-seg-frame {
+	fill: none;
+	stroke: var(--sim-muted);
+}
+.dj-times {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.25rem 1.25rem;
+	margin: 0.5rem 0 0;
+	padding: 0;
+	list-style: none;
+	font-family: var(--sl-font-mono);
+	font-size: var(--sl-text-xs);
+}
+.dj-times li {
+	display: flex;
+	align-items: center;
+	gap: 0.4rem;
+}
+.dj-times .sim-swatch {
+	flex-shrink: 0;
+}
+.sim-swatch.is-copy {
+	background: repeating-linear-gradient(45deg, var(--sim-muted) 0 2px, var(--sim-block-b) 2px 4px);
+}
+.sim-swatch.is-kernel {
+	background: var(--sim-active);
+}
+[data-sim='data-journey'] input[type='range'] {
+	min-height: 44px;
+}
+[data-sim='data-journey'] .expressive-code .copy button {
+	width: 44px;
+	height: 44px;
+}
