@@ -6,8 +6,10 @@ const GAP = 3;
 const DOT_H = 10;
 const ROW_GAP = 10;
 const BAR_H = 34;
-// Approximate advance of the 10px mono font used for cell values.
+// Approximate advance of the 10px mono font used for cell values, and of the 9px one in narrow cells.
 const VALUE_CHAR = 6.1;
+const TIGHT_CHAR = 5.5;
+const TIGHT = 32;
 
 const PASS_LABEL = { max: 'max', sum: 'sum', stats: 'max and sum', normalize: 'normalize' } as const;
 
@@ -40,7 +42,8 @@ export function render(root: SVGSVGElement, c: Config, step: number, width: numb
 	nodes.push(text(PAD, 14, head, 'sim-label'));
 	let y = 26;
 
-	const fits = (str: string) => str.length * VALUE_CHAR + 4 <= size;
+	const tight = size < TIGHT ? ' is-tight' : '';
+	const fits = (str: string) => str.length * (tight ? TIGHT_CHAR : VALUE_CHAR) + 3 <= size;
 	const cellX = (i: number) => PAD + (i % perRow) * (size + GAP);
 	const overflow = new Set(s.overflow);
 	const reading = (i: number) => s.kind !== 'start' && s.kind !== 'done' && i >= s.lo && i < s.hi;
@@ -56,7 +59,7 @@ export function render(root: SVGSVGElement, c: Config, step: number, width: numb
 			const state = overflow.has(i) ? 'is-overflow' : reading(i) ? 'is-reading' : '';
 			nodes.push(svg('rect', { x: cellX(i), y: top, width: size, height: size, rx: 2, class: `os-cell ${tint} ${state}` }));
 			const v = fmt(x[i]);
-			if (fits(v)) nodes.push(text(cellX(i) + size / 2, top + size / 2 + 3.5, v, `os-value ${state}`, 'middle'));
+			if (fits(v)) nodes.push(text(cellX(i) + size / 2, top + size / 2 + 3.5, v, `os-value ${state}${tight}`, 'middle'));
 			const reads = readCount(c, step, i);
 			for (let d = 0; d < reads; d++) {
 				nodes.push(svg('circle', { cx: cellX(i) + 4 + d * 6, cy: top + size + 5, r: 2, class: 'os-dot' }));
@@ -81,7 +84,7 @@ export function render(root: SVGSVGElement, c: Config, step: number, width: numb
 			}
 			if (v !== null) {
 				const label = nan ? 'NaN' : v.toFixed(2);
-				if (fits(label)) nodes.push(text(cellX(i) + size / 2, top + BAR_H + 11, label, `os-yvalue ${nan ? 'is-nan' : ''}`, 'middle'));
+				if (fits(label)) nodes.push(text(cellX(i) + size / 2, top + BAR_H + 11, label, `os-yvalue ${nan ? 'is-nan' : ''}${tight}`, 'middle'));
 			}
 		}
 	}

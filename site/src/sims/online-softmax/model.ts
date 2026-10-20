@@ -18,9 +18,9 @@ export const CHUNKS = [1, 2, 4, 8, 16] as const;
 export const MODE_IDS = ['naive', 'safe', 'online'] as const;
 export type Mode = (typeof MODE_IDS)[number];
 export const MODE_NAMES: Record<Mode, string> = {
-	naive: 'Naive: sum, then normalize',
-	safe: 'Safe 3-pass: max, sum, normalize',
-	online: 'Online: max and sum together, then normalize',
+	naive: 'Naive, no max',
+	safe: 'Safe, 3 passes',
+	online: 'Online, 2 passes',
 };
 
 export const PRESET_IDS = ['random', 'increasing', 'huge'] as const;

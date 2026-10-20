@@ -41,6 +41,12 @@ code.sort((a, b) => Number(b.name === mode) - Number(a.name === mode));
 	<div class="sim-canvas" data-canvas>
 		<svg role="img" aria-label="The input row in chunks, with a dot under each element for every time it has been read, and a bar for each probability written"></svg>
 	</div>
+	<ul class="os-legend" aria-label="Legend">
+		<li><span class="os-swatch is-reading"></span>chunk being read</li>
+		<li><span class="os-swatch is-dot"></span>one read of the element</li>
+		<li><span class="os-swatch is-overflow"></span>exp overflowed, or NaN</li>
+		<li><span class="os-swatch is-bar"></span>probability written</li>
+	</ul>
 	<dl class="os-state" data-state aria-label="Running state"></dl>
 	<ul class="os-totals" data-totals aria-label="Totals for each method"></ul>
 

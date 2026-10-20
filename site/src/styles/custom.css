@@ -2367,6 +2367,10 @@
 	fill: var(--sim-text);
 	pointer-events: none;
 }
+.os-value.is-tight,
+.os-yvalue.is-tight {
+	font-size: 9px;
+}
 .os-yvalue.is-nan {
 	fill: var(--sim-warn);
 	font-weight: 600;
@@ -2430,4 +2434,42 @@
 }
 [data-sim='online-softmax'] input[type='range'] {
 	min-height: 44px;
+}
+.os-legend {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.25rem 1.25rem;
+	margin: 0.5rem 0 0;
+	padding: 0;
+	list-style: none;
+	font-size: var(--sl-text-xs);
+}
+.os-legend li {
+	display: flex;
+	align-items: center;
+	gap: 0.4rem;
+}
+.os-swatch {
+	flex-shrink: 0;
+	width: 1rem;
+	height: 1rem;
+	border-radius: 2px;
+}
+.os-swatch.is-reading {
+	background: var(--sim-block-a);
+	border: 2.5px solid var(--sim-active);
+}
+.os-swatch.is-dot {
+	width: 0.4rem;
+	height: 0.4rem;
+	border-radius: 50%;
+	background: var(--sim-active);
+}
+.os-swatch.is-overflow {
+	background: var(--sim-warn-fill);
+	border: 2px dashed var(--sim-warn);
+}
+.os-swatch.is-bar {
+	width: 0.6rem;
+	background: var(--sim-active);
 }
