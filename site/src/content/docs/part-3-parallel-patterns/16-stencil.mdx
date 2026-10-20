@@ -1,0 +1,372 @@
+---
+title: 16. Stencil and convolution
+description: How a block computes a tile of a 2D convolution from a shared memory copy of its input plus a halo, what the halo costs as the filter grows, and why the filter belongs in constant memory.
+sidebar:
+  order: 16
+banner:
+  content: Draft chapter. If something is wrong or unclear, use the edit link at the bottom of the page.
+---
+
+import { Code } from '@astrojs/starlight/components';
+import HaloLoader from '@sims/halo-loader/HaloLoader.astro';
+import CodeTabs from '@components/CodeTabs.astro';
+import {
+	CONSTANT_MEMORY_BYTES,
+	filterBytes,
+	fix,
+	haloCells,
+	overhead,
+	pct,
+	rounds,
+	sharedBytes,
+	side,
+	totals,
+} from '@sims/halo-loader/model';
+import cuda from '@kernels/ch16-stencil/cuda/conv2d_kernels.cuh?raw';
+import numba from '@kernels/ch16-stencil/numba/conv2d.py?raw';
+import triton from '@kernels/ch16-stencil/triton/conv2d.py?raw';
+import summary from '@kernels/ch16-stencil/generated/summary.txt?raw';
+
+export const fmt = (x) => x.toLocaleString('en-US');
+export const mb = (bytes) => `${fmt(Math.round(bytes / 1e6))} MB`;
+export const cfg = (tile, radius, position = 'inside') => ({ tile, radius, position });
+export const N = 4096;
+export const hook = totals(cfg(16, 2));
+export const pixels = N * N;
+export const TS = [8, 16, 32];
+export const RS = [1, 2, 3, 4];
+export const crossover = (tile) => {
+	let r = 1;
+	while (overhead(cfg(tile, r)) <= 1) r++;
+	return r;
+};
+export const c162 = cfg(16, 2);
+export const ex1 = cfg(16, 3);
+export const ex1t = totals(ex1);
+export const corner = totals(cfg(16, 2, 'corner'));
+
+Blur a 4096 x 4096 float image with a 5 x 5 filter, one thread per output
+pixel. Each thread reads the 25 pixels around its own: {fmt(hook.naivePerOutput * pixels)}
+loads for the whole image, {mb(4 * hook.naivePerOutput * pixels)} of requests,
+for an input that holds {mb(4 * pixels)}. Every pixel is asked for 25 times,
+by the 25 outputs whose windows contain it.
+
+Those outputs mostly sit in the same block. This chapter shows how a block
+loads each pixel it needs once, including a border of pixels that belong to
+other blocks, and computes every output from shared memory. For 16 x 16 blocks
+that is {fix(hook.tiledPerOutput)} global loads per output instead of 25.
+
+## Stencils and convolutions
+
+A **stencil** computes each output element from a fixed pattern of input
+elements around the same position. The heat equation solver that updates each
+grid point from its four neighbours uses a stencil. So does an image blur, an
+edge detector and the convolution layer of a neural network.
+
+A **convolution** is the stencil whose pattern is a full window with a weight
+for every position. In one dimension, with a filter `f` of `2R + 1` weights
+(`R` is the filter's **radius**):
+
+```
+out[i] = f[0] * in[i - R] + f[1] * in[i - R + 1] + ... + f[2R] * in[i + R]
+```
+
+In two dimensions the window is `(2R + 1) x (2R + 1)`:
+
+```
+out[y][x] = sum over dy, dx in [-R, R] of f[dy + R][dx + R] * in[y + dy][x + dx]
+```
+
+This is the form deep learning libraries use. A textbook convolution flips the
+filter first; for a symmetric filter such as a blur the two are the same.
+
+### The boundary rule
+
+Near an edge, part of the window falls outside the image. Something has to
+decide what those pixels are, and every kernel in this chapter uses the same
+rule: **pixels outside the image are zero** (zero padding), and the output has
+the same size as the input. A pixel in a corner with a 3 x 3 filter therefore
+sums only 4 real pixels. Other common rules repeat the edge pixel, mirror the
+image or shrink the output so that no window leaves the image. They change the
+answer at the border, not the structure of the kernel.
+
+## Tiles and halos
+
+Give a block `T` consecutive outputs of a 1D convolution. Output `i` needs
+inputs `i - R` to `i + R`, so the block as a whole needs inputs from `R` before
+its first output to `R` after its last: `T + 2R` pixels. The `2R` extra pixels
+are the **halo** (also called ghost cells or apron). They belong to the
+neighbouring blocks' outputs, but this block has to read them too.
+
+The tiled kernel copies all `T + 2R` pixels into shared memory once, waits at
+`__syncthreads()`, and then computes each output from shared memory. Global
+loads per output drop from `2R + 1` to `(T + 2R) / T`.
+
+In 2D the same idea gives a `T x T` output tile inside a
+`(T + 2R) x (T + 2R)` input tile:
+
+- Global loads per output, naive: `(2R + 1)²`.
+- Global loads per output, tiled: `(T + 2R)² / T²`.
+- **Halo overhead**: the halo cells per output cell, `((T + 2R)² - T²) / T²`.
+
+The halo is the price of tiling, and it grows with the filter. The tiled
+kernel's loads per output, with the halo overhead in brackets:
+
+<table>
+	<thead>
+		<tr>
+			<th scope="col">Tile</th>
+			{RS.map((r) => <th scope="col">R = {r} ({2 * r + 1} x {2 * r + 1})</th>)}
+		</tr>
+	</thead>
+	<tbody>
+		{TS.map((t) => (
+			<tr>
+				<th scope="row">{t} x {t}</th>
+				{RS.map((r) => <td>{fix(totals(cfg(t, r)).tiledPerOutput)} ({pct(overhead(cfg(t, r)))})</td>)}
+			</tr>
+		))}
+	</tbody>
+</table>
+
+Against the naive kernel's 9, 25, 49 and 81, every entry is a large saving.
+But the halo outgrows the tile itself, overhead above 100%, at R = {crossover(8)}
+for 8 x 8 tiles, R = {crossover(16)} for 16 x 16 and R = {crossover(32)} for
+32 x 32. Larger tiles keep the halo small, which is why a stencil kernel wants
+the biggest tile its block size and shared memory allow.
+
+### Who loads the halo
+
+A block has to fill `(T + 2R)²` slots with `T²` threads. Three arrangements
+are common:
+
+1. **One thread per input pixel.** Launch `(T + 2R)²` threads; each loads one
+   slot, and only the inner `T²` compute. Simple indexing, but the halo threads
+   sit idle during the compute loop.
+2. **One thread per output, looping over the slots.** Thread `t` fills slots
+   `t`, `t + T²`, `t + 2T²` and so on until the tile is full. Every thread
+   computes, and some load two or more slots. This chapter's kernels do this.
+3. **Shared memory for the inner tile only.** Read halo pixels straight from
+   global memory, betting that the neighbouring blocks' loads left them in the
+   L1 or L2 cache (chapter 9).
+
+The simulation steps through the second arrangement. Start with
+`TILE = 8, R = 2` and predict both "loads per output" numbers before you step.
+Then drag the radius up and watch the overhead pass 100%. Switch to the corner
+position to see the zero padding: those slots get `0.0f` and cost no load.
+
+<HaloLoader />
+
+## Reading the counts
+
+- Inside the image, the tiled kernel issues exactly `(T + 2R)²` global loads
+  per block, each pixel once. At the corner it issues fewer, because the padding
+  slots are not loaded: {fmt(corner.tiled)} instead of {fmt(side(c162) ** 2)} for
+  `T = 16, R = 2`.
+- The compute loop still reads `T² (2R + 1)²` values, now from shared memory.
+  The numbers in the compute step show how often each slot is read: once in the
+  corners of the halo, `(2R + 1)²` times in the middle.
+- The number of load rounds, `ceil((T + 2R)² / T²)`, is
+  {rounds(c162)} for `T = 16, R = 2`. In the last round only some threads have a
+  slot left, a small amount of idle time.
+
+The halo also costs shared memory: `4 (T + 2R)²` bytes for float pixels,
+{fmt(sharedBytes(c162))} bytes for `T = 16, R = 2` and
+{fmt(sharedBytes(cfg(32, 8)))} bytes at the simulation's largest setting, far
+inside the 48 KB a block may declare statically (chapter 7). Shared memory is
+rarely the limit here; block size is. `T` stops at 32 because a block holds at
+most 1,024 threads, and chapter 5 showed what large blocks do to occupancy.
+
+Why bother when the caches see the same repeated loads? They do catch many of
+the naive kernel's loads, which the model leaves out. But each load still costs
+an instruction and a trip to L1, and whether the halo pixels are still in the
+cache depends on what else the SM ran. The shared tile makes the reuse certain.
+
+## The filter in constant memory
+
+Every thread reads the same filter, in the same order. In step `(dy, dx)` of
+the compute loop, all 32 threads of a warp read `c_filter[dy * (2R + 1) + dx]`,
+one address. That is the case constant memory was built for (chapter 9): the
+constant cache serves the warp with one broadcast instead of 32 loads.
+
+```cpp
+__constant__ float c_filter[(2 * MAX_R + 1) * (2 * MAX_R + 1)];
+// on the host, before the launch
+cudaMemcpyToSymbol(c_filter, h_filter, (2 * R + 1) * (2 * R + 1) * sizeof(float));
+```
+
+The filter is tiny next to the {fmt(CONSTANT_MEMORY_BYTES / 1024)} KB of
+constant memory: a 7 x 7 float filter is {fmt(filterBytes(cfg(16, 3)))} bytes.
+Constant memory suits it because the filter is read only, shared by every
+thread, and indexed by the loop counter rather than by the thread. A table that
+each thread indexed differently would turn the broadcast into serialized
+requests; exercise 4 is about that.
+
+In Numba, `cuda.const.array_like(filt)` puts a NumPy array in constant memory
+when the kernel compiles. Triton has no constant memory: its kernel passes the
+filter as an ordinary pointer and loads each weight as a scalar, one value for
+the whole program.
+
+## The code
+
+The CUDA and Numba versions hold both kernels: `conv2d_naive` reads every
+window from global memory, `conv2d_tiled` is the kernel in the simulation with
+`TILE = 16` and `R` as a compile-time parameter. The tiled kernel returns early
+only after its single barrier, so every thread takes part in the load loop and
+reaches `__syncthreads()`.
+
+<CodeTabs
+	cuda={cuda}
+	numba={numba}
+	triton={triton}
+	titles={{ cuda: 'cuda/conv2d_kernels.cuh', numba: 'numba/conv2d.py', triton: 'triton/conv2d.py' }}
+>
+	<div slot="triton-note">
+		Triton has no halo to load by hand. A program owns a 16 x 32 block of outputs and, for each of the `(2R + 1)²`
+		filter positions, loads the whole block of input pixels shifted by `(dy, dx)` with one `tl.load`. Offsets that fall
+		outside the image are masked off, and `other=0.0` makes them read as zero: the boundary rule in one argument.
+		`tl.static_range` unrolls both loops at compile time. The shifted blocks overlap, and the compiler does not stage
+		them in shared memory for this kernel (the listing below shows no `local_alloc`); the overlap is left to the L1 and L2
+		caches, the third arrangement above.
+	</div>
+</CodeTabs>
+
+`test_correctness.py` checks the Numba and Triton kernels against a NumPy
+reference for `R = 1, 2, 3` and shapes from 1 x 1 to 40 x 21, including images
+smaller than the halo. The CUDA program checks both of its kernels against a CPU
+loop, and the test runs it when `nvcc` is present. A separate test pins down the boundary rule on the reference itself:
+a 3 x 3 box filter of ones on an image of ones gives 4 in the corner, 6 on an
+edge and 9 inside.
+
+## What the compilers made of it
+
+`generate.py` compiles every kernel for an A100 (sm_80) with a 5 x 5 filter,
+without a GPU, and counts the memory instructions in the PTX:
+
+<Code code={summary} lang="txt" title="generated/summary.txt" />
+
+These count instructions in the code after unrolling, not how often they run.
+
+- **CUDA C++.** Both kernels have 25 `ld.const` loads, one per weight: the
+  filter stays in constant memory. The naive kernel has 25 global loads, the
+  tiled one 25 shared loads, one barrier and a handful of global loads in its
+  load loop.
+- **Numba.** NVVM knows the filter values when it compiles, because
+  `cuda.const.array_like` fixes them then. In the tiled kernel it unrolled the
+  loop, saw every weight, and wrote the 25 values into the multiply-add
+  instructions as immediates: no `ld.const` is left, the same thing chapter 9
+  found for its polynomial. The naive kernel's outer loop stayed a loop, so its
+  weights are still read from constant memory.
+- **Triton.** Only global loads: the shifted pixel blocks and 25 scalar weight
+  loads, with no shared memory and no barrier.
+
+## Measure it yourself
+
+On a GPU, run the three programs and profile the CUDA one:
+
+```sh
+cd kernels/ch16-stencil
+make -C cuda run
+python numba/conv2d.py
+python triton/conv2d.py
+ncu --section MemoryWorkloadAnalysis_Tables ./cuda/conv2d 4096 4096
+```
+
+Things to look for:
+
+- The time of each kernel for each radius, printed by `./cuda/conv2d`. The
+  course does not quote a speedup; measure it on your GPU.
+- In Nsight Compute, the global load requests of `conv2d_naive` against
+  `conv2d_tiled`. They should differ by about the ratio the simulation shows for
+  `TILE = 16`.
+- The L1 hit rate of the naive kernel. It is high, because neighbouring threads
+  load overlapping windows, and it is the reason the measured gap is smaller than
+  the gap in load counts.
+- How the gap changes from R = 1 to R = 3, against the halo overhead table.
+
+## What the model leaves out
+
+The simulation counts element loads the kernel issues. It leaves out the L1
+and L2 caches, which serve many repeated loads of the naive kernel; how loads
+group into memory transactions (chapter 6); bank conflicts in the shared tile
+(chapter 8); the constant cache; and time. It runs all threads of the block in
+lockstep, one round per step. "Inside the image" means a block at least `R`
+pixels from every edge; the corner position shows one block at the top-left
+corner.
+
+## Exercises
+
+**1. Count the loads.** A 7 x 7 filter (R = 3) runs with 16 x 16 tiles on a
+block inside the image. How big is the input tile, how many halo cells does it
+have, and how many global loads per output do the tiled and the naive kernel
+issue?
+
+<details>
+<summary>Answer</summary>
+
+The input tile is {side(ex1)} x {side(ex1)} = {fmt(side(ex1) ** 2)} cells, of
+which {fmt(haloCells(ex1))} are halo: an overhead of {pct(overhead(ex1))}. Tiled:
+{fmt(side(ex1) ** 2)} / 256 = {fix(ex1t.tiledPerOutput, 4)} loads per output.
+Naive: 49. The tiled kernel issues {fix(ex1t.naive / ex1t.tiled, 1)} times fewer.
+
+</details>
+
+**2. One dimension.** A 1D convolution with R = 3 runs with blocks of 256
+threads, one output each. How many input pixels does a block load, and how many
+global loads per output is that? What share of the loads are halo?
+
+<details>
+<summary>Answer</summary>
+
+256 + 2 x 3 = 262 pixels, so 262 / 256 = 1.0234 loads per output, against 7
+for the naive kernel. The halo is 6 of 262 loads, 2.3%. In 1D the halo grows
+with `2R` while the tile grows with `T`, so it stays small; in 2D it grows with
+the whole border of the tile.
+
+</details>
+
+**3. The early return.** Someone moves `if (x >= w || y >= h) return;` to the
+top of `conv2d_tiled`, before the load loop. The test passes for a 32 x 32
+image and fails for 40 x 21. Why?
+
+<details>
+<summary>Answer</summary>
+
+For 32 x 32 every thread of every block is inside the image, so no thread
+returns. For 40 x 21 the blocks on the right and bottom edges have threads past
+the image, and those threads return before loading. The slots they
+were meant to fill are assigned by thread number, not by position, so they
+include pixels that threads still inside the image need. Those slots keep
+whatever was in shared memory, and the outputs that read them are wrong. And the
+returned threads never reach `__syncthreads()`: in conditional code that does
+not evaluate the same across the block, the Programming Guide says execution is
+"likely to hang or produce unintended side effects" (chapter 7).
+
+</details>
+
+**4. Per-pixel weights.** A variant of the kernel weights each output with its
+own scalar `g[y][x]`, stored in `__constant__` memory next to the filter and
+read as `g[y * w + x]`. What happens to the constant memory reads, and what
+limits the image size?
+
+<details>
+<summary>Answer</summary>
+
+The 32 threads of a warp now read 32 different addresses, so the read is split
+into 32 separate requests instead of one broadcast (chapter 9). Constant memory
+also holds only {fmt(CONSTANT_MEMORY_BYTES / 1024)} KB, so `g` could hold at most
+16,384 floats less the filter, not even a 128 x 128 image. Per-pixel data belongs in global memory, read
+through the normal or read-only path; constant memory is for the filter, which
+every thread reads at the same index.
+
+</details>
+
+## Further reading
+
+- [Wen-mei W. Hwu, David B. Kirk and Izzat El Hajj, Programming Massively Parallel Processors, 4th edition (2022)](https://shop.elsevier.com/books/programming-massively-parallel-processors/hwu/978-0-323-91231-0), chapter 7, "Convolution: An introduction to constant memory and caching", and chapter 8, "Stencil".
+- [Paulius Micikevicius, 3D Finite Difference Computation on GPUs using CUDA, GPGPU-2 (2009)](https://doi.org/10.1145/1513895.1513905), a stencil kernel for 3D grids with halos in shared memory and registers ([PDF from NVIDIA](http://developer.download.nvidia.com/CUDA/CUDA_Zone/papers/gpu_3dfd_rev.pdf)).
+- [CUDA Programming Guide: compute capabilities](https://docs.nvidia.com/cuda/cuda-programming-guide/05-appendices/compute-capabilities.html), for the 64 KB of constant memory, the 8 KB constant cache working set per SM, and the 48 KB limit on static shared memory per block.
+- [CUDA C++ Best Practices Guide: constant memory](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#constant-memory), on broadcasts and serialized requests.
+- [CUDA C++ Programming Guide 12.4: Shared Memory](https://docs.nvidia.com/cuda/archive/12.4.0/cuda-c-programming-guide/index.html#shared-memory) and [Synchronization Functions](https://docs.nvidia.com/cuda/archive/12.4.0/cuda-c-programming-guide/index.html#synchronization-functions).
+- [Numba CUDA: memory management](https://nvidia.github.io/numba-cuda/user/memory.html), for `cuda.const.array_like` and `cuda.shared.array`.
+- [triton.language.load](https://triton-lang.org/main/python-api/generated/triton.language.load.html), for `mask` and `other`, and [triton.language.static_range](https://triton-lang.org/main/python-api/generated/triton.language.static_range.html).

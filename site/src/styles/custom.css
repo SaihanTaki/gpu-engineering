@@ -1941,3 +1941,101 @@
 .sp-totals li.is-current {
 	border-inline-start-color: var(--sim-active);
 }
+
+/* Stencil sim: halo loader (chapter 16) */
+.hl-cell {
+	fill: transparent;
+	stroke: var(--sim-line);
+}
+.hl-cell.is-own.is-loaded {
+	fill: var(--sim-block-a);
+}
+.hl-cell.is-halo.is-loaded {
+	fill: var(--sim-block-b);
+}
+.hl-cell.is-current {
+	fill: var(--sim-active);
+	stroke: var(--sim-active);
+}
+/* Outside the image: amber plus a dashed edge, so the signal does not rely on hue. */
+.hl-cell.is-out {
+	stroke: var(--sim-warn);
+	stroke-dasharray: 2 2;
+}
+.hl-cell.is-out:is(.is-loaded, .is-current) {
+	fill: var(--sim-warn-fill);
+}
+.hl-count.is-current:not(.is-out) {
+	fill: var(--sl-color-black);
+}
+.hl-count.is-out {
+	fill: var(--sim-warn);
+}
+.hl-outline {
+	fill: none;
+	stroke: var(--sim-text);
+	stroke-width: 2;
+}
+.hl-window {
+	fill: none;
+	stroke: var(--sim-active);
+	stroke-width: 2.5;
+	stroke-dasharray: 5 3;
+}
+.hl-bar-track {
+	fill: none;
+	stroke: var(--sim-line);
+}
+.hl-bar {
+	fill: var(--sim-active);
+}
+.hl-bar.is-naive {
+	fill: var(--sim-muted);
+}
+.hl-legend {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.25rem 1.25rem;
+	margin: 0.5rem 0 0;
+	padding: 0;
+	list-style: none;
+	font-size: var(--sl-text-xs);
+}
+.hl-legend li {
+	display: flex;
+	align-items: center;
+	gap: 0.4rem;
+}
+.hl-swatch {
+	flex-shrink: 0;
+	width: 0.9rem;
+	height: 0.9rem;
+	border: 1px solid var(--sim-line);
+	border-radius: 2px;
+}
+.hl-swatch.is-own {
+	background: var(--sim-block-a);
+	border: 2px solid var(--sim-text);
+}
+.hl-swatch.is-halo {
+	background: var(--sim-block-b);
+}
+.hl-swatch.is-current {
+	background: var(--sim-active);
+	border-color: var(--sim-active);
+}
+.hl-swatch.is-out {
+	background: var(--sim-warn-fill);
+	border: 1px dashed var(--sim-warn);
+}
+[data-sim='halo-loader'] select {
+	width: 100%;
+	max-width: 100%;
+}
+[data-sim='halo-loader'] input[type='range'] {
+	min-height: 44px;
+}
+[data-sim='halo-loader'] .expressive-code .copy button {
+	width: 44px;
+	height: 44px;
+}
