@@ -1,0 +1,481 @@
+---
+title: 9. Registers, caches and other memory
+description: Where a kernel's data lives besides global and shared memory, what register spilling and local memory cost, how constant memory and the read-only path work, and how L1 and L2 serve a stream of loads.
+sidebar:
+  order: 9
+banner:
+  content: Draft chapter. If something is wrong or unclear, use the edit link at the bottom of the page.
+---
+
+import { Aside, Code } from '@astrojs/starlight/components';
+import CacheSim from '@sims/cache-sim/CacheSim.astro';
+import CodeTabs from '@components/CodeTabs.astro';
+import { GPUS } from '@sim-core/gpu-specs';
+import { CONSTANT_CACHE_BYTES, CONSTANT_MEMORY_BYTES, simulate, totals } from '@sims/cache-sim/model';
+import cuda from '@kernels/ch09-caches/cuda/memory_spaces.cu?raw';
+import numba from '@kernels/ch09-caches/numba/memory_spaces.py?raw';
+import triton from '@kernels/ch09-caches/triton/cache_hints.py?raw';
+import ptxas from '@kernels/ch09-caches/generated/ptxas-v.txt?raw';
+import memops from '@kernels/ch09-caches/generated/memory-ops.txt?raw';
+import tritonLoads from '@kernels/ch09-caches/generated/triton-loads.txt?raw';
+import versions from '@kernels/ch09-caches/generated/VERSIONS.txt?raw';
+
+export const run = (pattern, param, accesses, l1Lines = 4, l2Lines = 16) => {
+	const sim = simulate({ pattern, param, accesses, l1Lines, l2Lines });
+	return totals(sim, sim.length);
+};
+export const seq = run('sequential', 1, 128);
+export const s8 = run('strided', 8, 128);
+export const w32 = run('window', 32, 128);
+export const w64 = run('window', 64, 192);
+export const w160 = run('window', 160, 256);
+export const e1 = run('strided', 4, 128);
+export const e2a = run('window', 48, 144);
+export const e2b = run('window', 48, 144, 8);
+export const KB = 1024;
+
+A kernel needs 96 registers per thread. Cap it at 32 and it still compiles and
+still gives the right answer. The compiler's report for the capped build adds
+one line:
+
+```
+440 bytes stack frame, 512 bytes spill stores, 544 bytes spill loads
+```
+
+Every thread now writes 512 bytes and reads back 544 bytes that the source
+code never asked for. Those bytes go to memory that lives in the same DRAM as
+your arrays, through the same caches. This chapter covers the memory spaces
+a kernel uses besides the global and shared memory of chapters 6 and 7:
+registers, local memory, constant memory and the read-only path. It ends with
+the two caches every load passes through, L1 and L2.
+
+## The memory spaces
+
+The CUDA C++ Best Practices Guide lists them in one table. "On chip" means
+inside the SM; "off chip" means device memory (DRAM).
+
+| Space | Location | Cached | Access | Scope | Lifetime |
+|---|---|---|---|---|---|
+| Registers | On chip | n/a | Read/write | One thread | Thread |
+| Local | Off chip | Yes, in L1 and L2 (L2 only on compute capability 5.x) | Read/write | One thread | Thread |
+| Shared | On chip | n/a | Read/write | All threads of a block | Block |
+| Global | Off chip | Depends on the GPU and the load | Read/write | All threads and the host | Until freed |
+| Constant | Off chip | Yes | Read | All threads and the host | Until freed |
+| Texture | Off chip | Yes | Read | All threads and the host | Until freed |
+
+Two names in that table are misleading. **Local** memory is local only in
+scope: each thread sees its own copy, but it sits in device memory. The Best
+Practices Guide says it plainly: "access to local memory is as expensive as
+access to global memory." **Constant** memory is also in device memory; what
+makes it fast is a small cache in front of it.
+
+## Registers and spilling
+
+Registers are the fastest storage there is: an instruction reads its operands
+from them with no extra delay. Every SM in these GPUs has 65,536 32-bit
+registers, and one thread can use at most 255. Chapter 5 showed that the more
+registers each thread uses, the fewer warps fit on an SM.
+
+When a kernel needs more registers than it may use, either because of a cap
+like `__maxnreg__`, `__launch_bounds__` or `-maxrregcount`, or because it
+needs more than 255, the compiler keeps some values in **local memory**
+instead. It stores a value there when it runs out of registers and loads it
+back before its next use. That is a **spill**.
+
+The compiler also puts a variable in local memory without any register
+shortage when it cannot keep it in registers at all. The CUDA Programming
+Guide names three cases:
+
+1. Arrays the compiler cannot prove are indexed with constant values. Registers
+   have no addresses, so `bins[key % 16]++` with a data-dependent index needs
+   real memory.
+2. Large structures or arrays that would take too many registers.
+3. Any variable, if the kernel uses more registers than are available. This
+   is spilling.
+
+### Reading the ptxas report
+
+`ptxas` is the step that turns PTX into machine code (chapter 0.2), and it is
+where registers are assigned. Pass `-v` to it, with `nvcc -Xptxas -v` or
+`nvcc --ptxas-options=-v`, and it prints one block per kernel. This is the
+report for the chapter's CUDA file, compiled for sm_80 (A100):
+
+<Code code={ptxas} lang="text" title="generated/ptxas-v.txt" />
+
+The kernel names are mangled C++ names: `_Z6mirroriPKfPf` is
+`mirror(int, const float*, float*)`. For each kernel:
+
+- **Used N registers**: registers per thread, the number chapter 5's
+  occupancy calculator needs.
+- **bytes stack frame**: local memory per thread, for local arrays and spills.
+- **bytes spill stores / spill loads**: how many bytes the spill instructions
+  move. They count instructions in the code, not how often they run: a spill
+  inside a loop runs on every iteration.
+- **cmem[N]**: constant memory banks. `36 bytes cmem[3]` at the top is the
+  nine-float `__constant__` array. `cmem[0]` includes the kernel's parameters:
+  `poly_readonly` takes one more pointer than `poly_constant`, and its
+  `cmem[0]` is 8 bytes larger.
+
+`mirror` loads 64 values per thread and sums `v[k] * v[63 - k]`. Half the
+values must stay live until the other half arrive, and with no cap the
+compiler uses 96 registers and spills nothing. `mirror_capped` is the same
+code with `__maxnreg__(32)`. It gets 32 registers and 440 bytes of stack, and
+spills. The machine code has no loops, so every spill instruction runs once
+per thread: 512 + 544 = 1,056 bytes of extra memory traffic per thread.
+
+`bin_counts` shows the other case. Its 16-entry histogram array is indexed by
+data, so it takes a 64-byte stack frame (16 x 4 bytes), with no spills at all.
+
+### Local memory in PTX
+
+You can often see local memory before `ptxas` runs: a variable placed there in
+PTX is declared `.local` and read and written with `ld.local` and `st.local`.
+`generate.py` counts each kind of memory instruction in the PTX of every
+kernel:
+
+<Code code={memops} lang="text" title="generated/memory-ops.txt" />
+
+`bin_counts` has local loads and stores in its PTX, in both the CUDA C++ and
+the Numba version. `mirror_capped` has none: its PTX differs from
+`mirror`'s only by a `.maxnreg 32` line, and the spills appear only when
+`ptxas` assigns registers. That is
+why the Programming Guide says that "subsequent compilation phases might
+still decide otherwise," and why the `-v` report, or the SASS from
+`cuobjdump`, is the place to check. In the SASS of `mirror_capped`, the spill
+instructions are `STL` and `LDL` (store and load local).
+
+### What spills cost
+
+Local memory goes through L1 and L2 like global memory. A spill that stays in
+L1 costs an L1 round trip, slower than a register but far cheaper than DRAM.
+A spill that falls out of L1, because the SM's warps together spill more than
+L1 holds or because other data pushes it out, costs an L2 or DRAM access.
+
+Local memory is laid out so that "consecutive 32-bit words are accessed by
+consecutive thread IDs" (Programming Guide). When all 32 threads of a warp
+spill the same variable, their 32 words are adjacent and the access is fully
+coalesced in the sense of chapter 6. A data-dependent index like
+`bins[key % 16]` sends each lane to a different slot, so those accesses
+coalesce only as well as the keys happen to line up.
+
+To cut spills: use fewer live values (recompute instead of keeping), relax a
+register cap you set, and avoid dynamically indexed per-thread arrays when a
+few named variables or shared memory would do. Then check the `-v` report
+again.
+
+## Constant memory
+
+`__constant__` declares a variable in constant memory. There are 64 KB of it
+on the device, the host writes it with `cudaMemcpyToSymbol`, and kernels can
+only read it. Each SM caches it in a constant cache with an 8 KB working set
+(Programming Guide, compute capability tables).
+
+The constant cache is built for one case: every thread of a warp reading the
+same address. Then the warp gets the value in one request, a broadcast, and
+"constant memory can be as fast as a register access" (Best Practices Guide).
+When threads of a warp read different addresses, the request "is split into
+as many separate requests as there are different memory addresses in the
+initial request," so 32 different addresses cost 32 requests.
+
+That makes constant memory a fit for coefficients, filter weights and
+parameters that every thread uses in the same order. `poly_constant` keeps the
+nine coefficients of a polynomial there; in every step of the loop all threads
+read the same `c_coef[k]`. The PTX table above shows its nine `ld.const`
+loads. Chapter 16 uses constant memory for convolution filters.
+
+In Numba, `cuda.const.array_like(COEF)` copies a NumPy array into constant
+memory when the kernel compiles. The values are fixed at that point. For
+`poly_constant` the Numba PTX has no `ld.const` at all: NVVM unrolled the
+loop, knew every coefficient, and wrote them into the multiply-add
+instructions as immediate values. Nothing is left to load. A table indexed by
+data would stay in constant memory.
+
+## The read-only data path
+
+Data that no thread writes during a kernel can also be read through the SM's
+read-only path, the same hardware the texture unit uses. The Programming Guide
+gives two ways to ask for it:
+
+- `__ldg(&p[i])` loads through the read-only data cache explicitly.
+- `const float *__restrict__ p` promises the compiler that nothing else writes
+  through any pointer to the same data during the kernel. With that promise,
+  "the compiler will detect the read-only condition" more often and use the
+  same path by itself.
+
+In PTX these loads are `ld.global.nc` (non-coherent). `poly_readonly` has ten
+of them: nine coefficients through `__ldg` and the `x[i]` load, which the
+compiler turned into `ld.global.nc` on its own because `x` is
+`const __restrict__`. Non-coherent means writes made during the kernel may
+not be visible to these loads, which is why the data must be read-only for
+the whole kernel.
+
+`__restrict__` is a promise. If two pointers do alias, the compiler may
+reorder or cache loads in a way that gives wrong results.
+
+**Texture memory** is the older interface to the same cache, with extras for
+images: 2D locality, filtering between texels and automatic handling of
+out-of-range coordinates. The Best Practices Guide warns that the texture
+cache "is not kept coherent with respect to global memory writes" within a
+kernel.
+
+**Constant or read-only?** Use constant memory when a warp's threads read the
+same address. Use the read-only path when they read different addresses near
+each other, the usual case for array data.
+
+## L1 and L2
+
+Every global and local memory access goes through one or two caches.
+
+- **L1** is per SM. On these GPUs it is the same on-chip memory as shared
+  memory: the SM has one unified data cache, and whatever shared memory does
+  not take serves as L1 and as the texture cache. The split is chosen per
+  kernel; `cudaFuncAttributePreferredSharedMemoryCarveout` sets a preference.
+- **L2** is one cache shared by all SMs, in front of device memory. All
+  global and local memory accesses go through it.
+
+<table>
+	<thead>
+		<tr>
+			<th></th>
+			{GPUS.map((g) => <th scope="col">{g.name}</th>)}
+		</tr>
+	</thead>
+	<tbody>
+		<tr><th scope="row">L1 and shared memory per SM</th>{GPUS.map((g) => <td>{g.l1SharedKbPerSm} KB</td>)}</tr>
+		<tr><th scope="row">Of which shared memory, at most</th>{GPUS.map((g) => <td>{g.maxSharedKbPerSm} KB</td>)}</tr>
+		<tr><th scope="row">L2, whole GPU</th>{GPUS.map((g) => <td>{g.l2Mb} MB</td>)}</tr>
+		<tr><th scope="row">SMs sharing that L2</th>{GPUS.map((g) => <td>{g.sms}</td>)}</tr>
+		<tr><th scope="row">Registers per SM</th>{GPUS.map((g) => <td>{(g.registerFileKbPerSm * 256).toLocaleString('en-US')} ({g.registerFileKbPerSm} KB)</td>)}</tr>
+		<tr><th scope="row">Constant memory, constant cache per SM</th>{GPUS.map(() => <td>{CONSTANT_MEMORY_BYTES / KB} KB, {CONSTANT_CACHE_BYTES / KB} KB</td>)}</tr>
+	</tbody>
+</table>
+
+The PTX ISA defines what a plain load asks for. The default, `ld.ca`, "allocates
+cache lines in all levels (L1 and L2) with normal eviction policy." The L1
+caches of different SMs are not kept coherent with each other; the driver
+invalidates L1 between dependent kernel launches, so a kernel sees what the
+previous one wrote. Other cache operators change this per load:
+
+- `.cg` caches in L2 only, bypassing L1.
+- `.cs` marks data as streaming, "likely to be accessed once," and evicts it
+  first.
+- `.cv` does not cache and fetches again.
+
+`nvcc -Xptxas -dlcm=cg` makes `.cg` the default cache operator for global and
+generic loads in a file. On
+compute capability 7.0 and later, PTX also has eviction priority hints:
+`evict_first` for streaming data and `evict_last` for data that "should remain
+persistent in cache." All of these are hints: the PTX ISA says they do not
+change what the program computes.
+
+The documentation is less precise about defaults per GPU. The Best Practices
+Guide's table says global loads are cached in L1 and L2 by default on compute
+capability 6.0 and 7.x, and the Programming Guide's sections for 8.x and 9.0
+refer back to the 5.x rules. Measure the hit rates with Nsight Compute rather
+than assume them.
+
+For data that should stay in L2 across kernels, devices of compute capability
+8.0 and later support persisting accesses (CUDA 11.0 and later): `cudaDeviceSetLimit(cudaLimitPersistingL2CacheSize, bytes)` sets
+part of L2 aside, and an access policy window on a stream or graph node marks
+an address range as persisting. The Programming Guide section linked below
+covers it.
+
+## The simulation
+
+Caches work because programs reuse data. **Spatial locality** is reuse of
+nearby bytes: a line brought in for `a[0]` also holds `a[1]` to `a[7]`.
+**Temporal locality** is reuse of the same bytes later. A cache helps only if
+the reuse happens before the line is evicted.
+
+The simulation runs one thread's loads of 4-byte floats through a small L1
+and L2. Pick a pattern and press Play or Next. Each access looks in L1 first;
+on a miss it looks in L2; on a miss there it reads the line from DRAM into L2
+and L1. When a cache is full, it evicts its least recently used line. Before
+you start, guess the L1 hit rate of the default stream, then try the presets.
+
+<Aside type="caution" title="Scaled down, and the policy is assumed">
+	The caches here hold 4 and 16 lines of 32 bytes, so you can see every line. Real ones hold kilobytes (L1) and
+	megabytes (L2). NVIDIA does not publish the associativity, replacement policy or address hashing of its L1 and L2
+	caches, so the model assumes fully associative caches with LRU replacement. Use it to reason about locality, not to
+	predict exact hit rates on a GPU.
+</Aside>
+
+<CacheSim />
+
+## Reading the result
+
+**Sequential.** One line holds 8 floats, so the first access to each line
+misses and the next 7 hit: {seq.l1} L1 hits and {seq.dram} DRAM reads in 128
+accesses, 87.5%. That is spatial locality. No line is ever used again after
+the stream moves on, so the L2 never gets a hit.
+
+**Stride 8.** Each access lands on a new line, so all {s8.dram} accesses read
+DRAM and each 32-byte read delivers 4 useful bytes. Chapter 6 shows the same
+waste for a warp's 32 threads.
+
+**Window fits L1.** `a[i % 32]` cycles over 4 lines, exactly the size of the
+scaled L1. After {w32.dram} misses in the first pass, all {w32.l1} other
+accesses hit L1.
+
+**Window fits L2 only.** `a[i % 64]` cycles over 8 lines. L1 holds 4, and LRU
+evicts each line just before the loop comes back to it, so each later pass
+gets one L2 hit per line: {w64.l1} L1 hits, {w64.l2} L2 hits and only
+{w64.dram} DRAM reads in 192 accesses. Shrink the window to 40 elements, one
+line more than L1, and L1 still misses every line: under LRU, a loop one line
+bigger than the cache gets no reuse at all from it.
+
+**Window bigger than L2.** 160 elements is 20 lines, more than L2's 16. Every
+line is evicted from both levels before its reuse, and the stream reads DRAM
+{w160.dram} times, as if there were no L2. Eviction hints such as
+`evict_last` exist for this kind of case: they let a program say which data
+to keep.
+
+**Random.** Reads spread over 1,024 elements (128 lines) rarely find their line
+still cached; the hit rate is roughly the cache size over the range.
+
+The same patterns appear at full size: a working set that fits in L1 per SM,
+one that fits in L2, and one that does not. Tiling (chapters 7 and 20) and the
+loop order of a kernel decide which case you are in.
+
+## Code
+
+The CUDA C++ file has every kernel discussed above, and its `main()` checks
+each one against a CPU loop and prints the registers and local memory
+`cudaFuncGetAttributes` reports. The Numba file has the constant memory and
+local array kernels. The Triton file shows the cache hints Triton exposes.
+
+<CodeTabs
+	cuda={cuda}
+	numba={numba}
+	triton={triton}
+	titles={{ cuda: 'cuda/memory_spaces.cu', numba: 'numba/memory_spaces.py', triton: 'triton/cache_hints.py' }}
+>
+	<div slot="triton-note">
+		Triton has no `__constant__` variables or per-thread arrays to declare; its compiler decides what goes in
+		registers and shared memory, and `n_spills` on the compiled kernel tells you whether it spilled. What you do
+		control is how each load uses the caches. `tl.load` takes `cache_modifier` (`""`, `".ca"`, `".cg"`, `".cs"` or
+		`".cv"` in Triton 3.8) and `eviction_policy` (`"evict_first"` or `"evict_last"`), which map to the PTX cache
+		operators and eviction hints above. Here `x` is read once and `w`, a 256-entry table, by every program, so the
+		second variant streams `x` and keeps `w`. These are the loads Triton emits for each variant:
+
+		<Code code={tritonLoads} lang="text" title="generated/triton-loads.txt" />
+
+		With an eviction policy, Triton also attaches an L2 cache policy operand (`L2::cache_hint`).
+	</div>
+</CodeTabs>
+
+`generate.py` produces the three text files on this page without a GPU or
+`nvcc`: NVRTC, the CUDA runtime compiler, compiles the CUDA file with
+`-Xptxas -v`, which prints the same `ptxas` report as `nvcc -Xptxas -v`.
+
+<Code code={versions} lang="text" title="generated/VERSIONS.txt" />
+
+`test_correctness.py` checks the Numba and Triton kernels against NumPy and
+PyTorch, checks that the committed `ptxas` report still shows the spill in
+`mirror_capped` and none in `mirror`, and runs the CUDA program when `nvcc` is
+installed.
+
+## Measure it yourself
+
+On a GPU, in the course Docker image:
+
+```sh
+cd kernels/ch09-caches
+make -C cuda run          # also prints the -Xptxas -v report while compiling
+python numba/memory_spaces.py
+python triton/cache_hints.py
+ncu --section MemoryWorkloadAnalysis ./cuda/memory_spaces
+```
+
+Things to look for:
+
+- The register and local memory counts the program prints for `mirror` and
+  `mirror_capped`, and whether they match the report above on your GPU.
+- In Nsight Compute's Memory Workload Analysis section, the L1 and L2 hit
+  rates and the local memory traffic of `mirror_capped` against `mirror`.
+- Whether `poly_constant` and `poly_readonly` differ in time. Both read nine
+  uniform coefficients; the answer depends on the GPU, so measure rather than
+  expect one to win.
+
+## What the model leaves out
+
+The simulation follows one thread's loads through two levels with LRU, which
+is enough to see spatial and temporal locality and the cliff when a working
+set outgrows a cache. It leaves out: the 128-byte lines made of four 32-byte
+sectors, set associativity and address hashing (undocumented), other warps
+and SMs sharing the same caches, writes and write-back, prefetching, the
+eviction hints, L2 persistence, the read-only and constant caches, and any
+timing. Every number on this page outside the simulation comes from the
+compiler output or the cited documentation.
+
+## Exercises
+
+**1. Predict the hit rate.** In the simulation's default caches (L1 4 lines,
+L2 16, 8 floats per line), a thread reads `a[i * 4]` for 128 values of `i`.
+How many accesses hit L1, and how many read DRAM?
+
+<details>
+<summary>Answer</summary>
+
+Each line holds 8 floats, so stride 4 touches every line twice: the first
+access misses, the second hits. {e1.l1} L1 hits and {e1.dram} DRAM reads, 50%.
+No line is used again, so L2 never hits. Check it with the stride slider at 4.
+
+</details>
+
+**2. Where is the reuse?** The thread reads `a[i % 48]` for 144 values of `i`
+(three passes over 48 floats). Count the L1 hits, L2 hits and DRAM reads.
+Then double L1 to 8 lines and count again.
+
+<details>
+<summary>Answer</summary>
+
+48 floats are 6 lines. The first pass misses each line once in both caches: 6
+DRAM reads and 42 L1 hits. L1 holds only 4 of the 6 lines, and under LRU each
+line is evicted before the loop returns, so passes 2 and 3 find each line in
+L2: {e2a.l1} L1 hits, {e2a.l2} L2 hits, {e2a.dram} DRAM reads. With 8 lines,
+all 6 stay in L1: {e2b.l1} L1 hits, {e2b.l2} L2 hits, {e2b.dram} DRAM reads.
+
+</details>
+
+**3. Constant memory and divergent addresses.** A warp runs
+`float c = c_coef[threadIdx.x % 4];` with `c_coef` in `__constant__` memory.
+How many separate constant cache requests does that warp's load become? What
+about `c_coef[threadIdx.x]`?
+
+<details>
+<summary>Answer</summary>
+
+`threadIdx.x % 4` takes 4 different values across the warp, so the request is
+split into 4, a quarter of the throughput of a uniform read. `c_coef[threadIdx.x]`
+has 32 different addresses and becomes 32 requests. For per-thread values,
+`__ldg` or a `const __restrict__` pointer is the better fit.
+
+</details>
+
+**4. Spill traffic.** Using the `ptxas` report above, how many bytes of local
+memory traffic does `mirror_capped` add for a launch of 16,384 threads, if
+every spill stays in L1? What if none do?
+
+<details>
+<summary>Answer</summary>
+
+512 bytes of spill stores plus 544 bytes of spill loads is 1,056 bytes per
+thread, and the code has no loops, so each spill runs once:
+1,056 x 16,384 = 17,301,504 bytes, about 17.3 MB. If every spill stays in L1,
+none of that reaches L2 or DRAM, but it still costs L1 bandwidth and
+instructions. If none do, every spill is at least an L2 access, and a DRAM
+access when it misses L2 too. The register cap that caused the spills was meant to
+raise occupancy (chapter 5); whether it pays off depends on which case you
+are in, so measure both builds.
+
+</details>
+
+## Further reading
+
+- [CUDA C++ Best Practices Guide: device memory spaces](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#device-memory-spaces), with [local memory](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#local-memory), [constant memory](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#constant-memory), [texture memory](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#texture-memory) and [register pressure](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#register-pressure).
+- [CUDA Programming Guide 12.4: device memory accesses](https://docs.nvidia.com/cuda/archive/12.4.0/cuda-c-programming-guide/index.html#device-memory-accesses) (local, constant and texture memory), [the read-only data cache load function](https://docs.nvidia.com/cuda/archive/12.4.0/cuda-c-programming-guide/index.html#read-only-data-cache-load-function), and [L2 access management](https://docs.nvidia.com/cuda/archive/12.4.0/cuda-c-programming-guide/index.html#device-memory-l2-access-management).
+- [CUDA Programming Guide: compute capabilities](https://docs.nvidia.com/cuda/cuda-programming-guide/05-appendices/compute-capabilities.html), for the 64 KB of constant memory, the 8 KB constant cache working set, the unified data cache sizes and the 512 KB of local memory per thread.
+- [PTX ISA: cache operators](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#cache-operators), [cache eviction priority hints](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#cache-eviction-priority-hints) and [ld.global.nc](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-ld-global-nc).
+- [Numba CUDA: memory management](https://nvidia.github.io/numba-cuda/user/memory.html) and the [kernel API reference](https://nvidia.github.io/numba-cuda/reference/kernel.html), for `cuda.const.array_like` and `cuda.local.array`, and [triton.language.load](https://triton-lang.org/main/python-api/generated/triton.language.load.html).
+- [Nsight Compute Profiling Guide: memory chart and tables](https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#memory-chart), for reading L1 and L2 hit rates.

@@ -1,0 +1,21 @@
+ptxas info    : 0 bytes gmem, 36 bytes cmem[3]
+ptxas info    : Compiling entry function '_Z13mirror_cappediPKfPf' for 'sm_80'
+ptxas info    : Function properties for _Z13mirror_cappediPKfPf
+ptxas         .     440 bytes stack frame, 512 bytes spill stores, 544 bytes spill loads
+ptxas info    : Used 32 registers, used 0 barriers, 440 bytes cumulative stack size, 376 bytes cmem[0]
+ptxas info    : Compiling entry function '_Z6mirroriPKfPf' for 'sm_80'
+ptxas info    : Function properties for _Z6mirroriPKfPf
+ptxas         .     0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 96 registers, used 0 barriers, 376 bytes cmem[0]
+ptxas info    : Compiling entry function '_Z10bin_countsiPKiPi' for 'sm_80'
+ptxas info    : Function properties for _Z10bin_countsiPKiPi
+ptxas         .     64 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 28 registers, used 0 barriers, 64 bytes cumulative stack size, 376 bytes cmem[0]
+ptxas info    : Compiling entry function '_Z13poly_readonlyiPKfS0_Pf' for 'sm_80'
+ptxas info    : Function properties for _Z13poly_readonlyiPKfS0_Pf
+ptxas         .     0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 20 registers, used 0 barriers, 384 bytes cmem[0]
+ptxas info    : Compiling entry function '_Z13poly_constantiPKfPf' for 'sm_80'
+ptxas info    : Function properties for _Z13poly_constantiPKfPf
+ptxas         .     0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 12 registers, used 0 barriers, 376 bytes cmem[0]

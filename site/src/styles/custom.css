@@ -1147,3 +1147,105 @@
 	width: 44px;
 	height: 44px;
 }
+
+/* Cache sim (chapter 9) */
+[data-sim='cache-sim'] select {
+	width: 100%;
+	max-width: 100%;
+}
+[data-sim='cache-sim'] input[type='range'] {
+	min-height: 44px;
+}
+[data-sim='cache-sim'] input[type='range']:disabled {
+	opacity: 0.4;
+}
+.cache-presets {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.5rem;
+	margin-bottom: 0.75rem;
+}
+.cache-presets button {
+	font: inherit;
+	font-size: var(--sl-text-sm);
+	min-height: 44px;
+	padding: 0 0.8rem;
+	color: var(--sim-text);
+	background: transparent;
+	border: 1px solid var(--sim-muted);
+	border-radius: 4px;
+	cursor: pointer;
+}
+.cache-presets button:hover {
+	border-color: var(--sim-active);
+}
+.cache-result {
+	margin: 0 0 0.5rem;
+	font-family: var(--sl-font-mono);
+	font-size: var(--sl-text-sm);
+	overflow-wrap: anywhere;
+}
+.cache-slot {
+	fill: var(--sim-block-b);
+	stroke: var(--sim-muted);
+}
+.cache-slot.is-empty {
+	fill: transparent;
+	stroke: var(--sim-line);
+	stroke-dasharray: 3 2;
+}
+.cache-slot.is-hit {
+	fill: var(--sim-active);
+	stroke: var(--sim-active);
+}
+.cache-slot.is-filled {
+	fill: transparent;
+	stroke: var(--sim-active);
+	stroke-width: 2.5;
+}
+.cache-slot-text.is-on {
+	fill: var(--sl-color-black);
+}
+.cache-evicted {
+	fill: var(--sim-warn);
+}
+.cache-track {
+	fill: none;
+	stroke: var(--sim-line);
+}
+.cache-bar.is-l1 {
+	fill: var(--sim-active);
+}
+.cache-bar.is-l2 {
+	fill: var(--sim-muted);
+}
+.cache-bar.is-dram {
+	fill: var(--sim-warn);
+}
+.cache-now {
+	fill: none;
+	stroke: var(--sim-text);
+	stroke-width: 1.5;
+}
+.cache-legend {
+	display: grid;
+	gap: 0.35rem;
+	margin: 0.5rem 0 0;
+	padding: 0;
+	list-style: none;
+	font-size: var(--sl-text-sm);
+}
+.cache-key {
+	display: inline-block;
+	width: 1em;
+	height: 1em;
+	margin-inline-end: 0.5em;
+	vertical-align: -0.15em;
+	border-radius: 2px;
+}
+.cache-key.is-hit {
+	background: var(--sim-active);
+}
+.cache-key.is-filled {
+	border: 2.5px solid var(--sim-active);
+}

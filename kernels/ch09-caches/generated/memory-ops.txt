@@ -1,0 +1,12 @@
+CUDA C++ (NVRTC), cuda/memory_spaces.cu
+  kernel               ld.const ld.global.nc    ld.global           ld     ld.local     st.local    st.global           st
+  poly_constant               9            0            1            0            0            0            1            0
+  poly_readonly               0           10            0            0            0            0            1            0
+  bin_counts                  0            0           64            0           68           68           16            0
+  mirror                      0            0           64            0            0            0            1            0
+  mirror_capped               0            0           64            0            0            0            1            0
+
+Numba (NVVM), numba/memory_spaces.py
+  kernel               ld.const ld.global.nc    ld.global           ld     ld.local     st.local    st.global           st
+  poly_constant               0            0            0            1            0            0            0            1
+  bin_counts                  0            0            0           64           80           72            0           16
