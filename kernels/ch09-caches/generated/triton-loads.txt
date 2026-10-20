@@ -1,0 +1,16 @@
+triton/cache_hints.py, BLOCK=1024, TABLE=256. Global loads in the PTX:
+
+default: cache_modifier='', x eviction_policy='', w eviction_policy=''
+  ld.global.b32
+
+stream x, keep w: cache_modifier='', x eviction_policy='evict_first', w eviction_policy='evict_last'
+  ld.global.L1::evict_first.L2::cache_hint.b32
+  ld.global.L1::evict_last.L2::cache_hint.b32
+
+x in L2 only: cache_modifier='.cg', x eviction_policy='', w eviction_policy=''
+  ld.global.cg.b32
+  ld.global.b32
+
+x streaming: cache_modifier='.cs', x eviction_policy='', w eviction_policy=''
+  ld.global.cs.b32
+  ld.global.b32
