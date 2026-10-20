@@ -1,0 +1,89 @@
+---
+import SimFrame from '@components/SimFrame.astro';
+import { CODE, INPUT_IDS, INPUTS, SIZES, type InputId, type Size } from './model';
+
+interface Props {
+	n?: Size;
+	input?: InputId;
+}
+
+const { n = 8, input = 'random' } = Astro.props;
+---
+
+<SimFrame
+	title="Bitonic network: compare-swap stage by stage"
+	sim="bitonic-network"
+	code={[{ name: 'step', code: CODE, lang: 'cpp' }]}
+	config={{ n, input, seed: 17 }}
+>
+	<Fragment slot="params">
+		<label class="sim-field">
+			<span>Keys</span>
+			<select name="n">
+				{SIZES.map((s) => <option value={s} selected={s === n}>{s} keys</option>)}
+			</select>
+		</label>
+		<label class="sim-field">
+			<span>Input order</span>
+			<select name="input">
+				{INPUT_IDS.map((id) => <option value={id} selected={id === input}>{INPUTS[id]}</option>)}
+			</select>
+		</label>
+	</Fragment>
+
+	<p class="sim-launch" data-stats></p>
+	<div class="sim-canvas" data-canvas>
+		<svg role="img" aria-label="Keys on horizontal wires, with one column of vertical compare-swap lines per stage"></svg>
+	</div>
+	<ul class="bn-legend" aria-label="Legend">
+		<li><span class="bn-swatch is-swap"></span>this stage, keys swapped</li>
+		<li><span class="bn-swatch is-kept"></span>this stage, already in order</li>
+		<li><span class="bn-swatch is-done"></span>earlier stage</li>
+		<li><span class="bn-arrow" aria-hidden="true">&#9660;</span>arrowhead: wire that gets the larger key</li>
+	</ul>
+
+	<Fragment slot="caption">
+		One step is one stage: every comparator in a column runs at the same time, one thread each, and the next stage
+		starts only when all of them are done. In the kernel each stage is one launch. The key column shows the keys
+		after the current stage; a thick outline marks keys that moved.
+	</Fragment>
+</SimFrame>
+
+<script>
+	import { Stepper } from '@sim-core/stepper';
+	import { bindControls } from '@sim-core/controls';
+	import { highlightLines, showVariant } from '@sim-core/code-sync';
+	import { ACTIVE_LINES, comparatorCount, describe, lastStep, stageCount, stateAt, type Config } from './model';
+	import { render } from './view';
+
+	function mount(frame: HTMLElement) {
+		const config: Config = JSON.parse(frame.dataset.config!);
+		const stepper = new Stepper(lastStep(config), 1200);
+		const canvas = frame.querySelector<HTMLElement>('[data-canvas]')!;
+		const svgEl = canvas.querySelector('svg')!;
+		const stats = frame.querySelector<HTMLElement>('[data-stats]')!;
+		const code = showVariant(frame, 'step');
+
+		const draw = () => {
+			const st = stateAt(config, stepper.step);
+			render(svgEl, config, st, Math.max(280, canvas.clientWidth));
+			highlightLines(code, st.stage ? ACTIVE_LINES : []);
+			stats.textContent = st.stage
+				? `k = ${st.stage.k}, j = ${st.stage.j}. Comparators ${st.comparatorsSoFar} of ${comparatorCount(config.n)}, swaps ${st.swapsSoFar}.`
+				: `${config.n} keys: ${stageCount(config.n)} stages of ${config.n / 2} comparators.`;
+		};
+
+		frame.querySelector('.sim-params')!.addEventListener('change', () => {
+			config.n = Number(frame.querySelector<HTMLSelectElement>('select[name="n"]')!.value) as Config['n'];
+			config.input = frame.querySelector<HTMLSelectElement>('select[name="input"]')!.value as Config['input'];
+			stepper.setLast(lastStep(config));
+		});
+
+		bindControls(frame, stepper, (step) => describe(config, step));
+		stepper.onChange(draw);
+		new ResizeObserver(draw).observe(canvas);
+		draw();
+	}
+
+	document.querySelectorAll<HTMLElement>('[data-sim="bitonic-network"]').forEach(mount);
+</script>
