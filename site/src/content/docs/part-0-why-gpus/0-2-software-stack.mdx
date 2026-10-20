@@ -1,0 +1,282 @@
+---
+title: 0.2 The GPU software stack
+description: What happens between the kernel you write and the instructions a GPU runs, from nvcc, PTX and SASS to the driver, and where Numba and Triton fit.
+sidebar:
+  order: 2
+banner:
+  content: Draft chapter. If something is wrong or unclear, use the edit link at the bottom of the page.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import CompilePipeline from '@sims/compile-pipeline/CompilePipeline.astro';
+import CodeTabs from '@components/CodeTabs.astro';
+import cuda from '@kernels/ch0-2-software-stack/cuda/saxpy.cu?raw';
+import numba from '@kernels/ch0-2-software-stack/numba/saxpy.py?raw';
+import triton from '@kernels/ch0-2-software-stack/triton/saxpy.py?raw';
+
+A program built for an A100 years ago can run on an H100, a GPU that did not
+exist when it was compiled. A Python function decorated with `@triton.jit`
+runs on the GPU without you ever calling a compiler. Neither works by magic.
+Both depend on a layer between your source code and the hardware that most
+people never look at.
+
+This chapter follows one small kernel through every stage of that layer, and
+shows the real compiler output at each one.
+
+## The pieces
+
+Four pieces of software sit between your code and the GPU:
+
+- **The NVIDIA driver.** NVIDIA's CUDA Programming Guide calls it the
+  operating system of the GPU. It is installed on the machine, separately from
+  any CUDA tools, and every use of the GPU goes through it, graphics included.
+  It exposes a low-level API, the **CUDA driver API**.
+- **The CUDA Toolkit.** The compilers, libraries, headers and tools you build
+  with, such as `nvcc`, `cuobjdump` and Nsight. It is a separate product from
+  the driver.
+- **The CUDA runtime.** One library from the toolkit, with the API you used in
+  chapter 2: `cudaMalloc`, `cudaMemcpy` and the `<<<...>>>` launch. The runtime
+  API is built on top of the driver API. By default `nvcc` links it into your
+  program statically.
+- **A compiler** that turns kernel source into code the GPU can run. For CUDA
+  C++ that is `nvcc`. Numba and Triton bring their own.
+
+The compiler is the interesting part, because it works in two stages.
+
+## Two instruction sets: PTX and SASS
+
+Each NVIDIA GPU generation has its own machine instruction set, and NVIDIA
+changes it from one generation to the next. NVIDIA's tools call the
+disassembled machine code **SASS**. It is what the SMs actually execute.
+
+If compilers wrote SASS directly, every program would have to be rebuilt for
+every new GPU. So there is a layer in between: **PTX** (Parallel Thread
+Execution), a virtual instruction set. PTX looks like assembly, but for an
+idealized GPU. It is plain text, it is documented, and NVIDIA keeps it stable
+across generations.
+
+Compilation therefore has two steps:
+
+1. A front end compiles your kernel to PTX.
+2. `ptxas`, the PTX assembler, compiles the PTX to SASS for one specific GPU
+   and packs it into a **cubin** (CUDA binary), an ELF file.
+
+### Compute capability names both targets
+
+Every NVIDIA GPU has a **compute capability**, a version number such as 8.0
+(A100), 7.5 (T4) or 9.0 (H100). The same number labels both kinds of code:
+
+- `compute_80` is PTX that may use every feature of compute capability 8.0.
+  It is a *virtual* architecture.
+- `sm_80` is SASS for GPUs with compute capability 8.0. It is a *real*
+  architecture.
+
+`nvcc` takes both. `-arch=compute_80` says which PTX to generate and
+`-code=sm_80` says which SASS to build from it. The shorthand `-arch=sm_80`
+means both at once: SASS for `sm_80` plus the `compute_80` PTX. With no
+option at all, the `nvcc` in CUDA 13.4 builds for `sm_75` and includes
+`compute_75` PTX, the oldest target it supports.
+
+### Two compatibility rules
+
+The two kinds of code age differently:
+
+- **A cubin runs on its own major version only.** A cubin for compute
+  capability 8.6 runs on GPUs with compute capability 8.6 or 8.9, but not on
+  8.0, whose minor version is lower, and not on 9.0, a different major version.
+- **PTX runs on anything newer.** PTX for `compute_80` can be compiled for
+  `sm_90`, `sm_120` or any later GPU.
+
+That second rule is what keeps the old A100 program working on an H100.
+
+### Fatbins and JIT compilation
+
+`nvcc` puts all the GPU code for a program into a **fatbin**, a container
+embedded in the executable. A fatbin can hold several cubins and several PTX
+versions. When the program runs, the driver picks the best code in it for the
+GPU it finds.
+
+If the fatbin has a matching cubin, the driver loads it. If not, but it has
+PTX the GPU can use, the driver compiles that PTX to SASS on the spot. This is
+**just-in-time (JIT) compilation**. It costs time when the program starts, so
+the driver keeps the result in a cache on disk for the next run, and empties
+the cache when the driver is upgraded.
+
+<Aside type="note">
+  Starting with compute capability 10.0 there is a third mechanism: the driver can
+  re-finalize a cubin for another GPU in the same family, which is cheaper than
+  compiling PTX. Cubins for 9.x and earlier, including every GPU this course uses,
+  do not get this.
+</Aside>
+
+## Where Numba and Triton fit
+
+Because PTX is documented and the driver accepts it, any compiler that can
+write PTX can target NVIDIA GPUs. Numba and Triton both do, and neither needs
+`nvcc`:
+
+- **Numba** compiles your Python function to **NVVM IR**, which is LLVM IR
+  with NVIDIA's rules and conventions. NVIDIA's NVVM compiler, shipped as a
+  library in the CUDA Python packages, turns that into PTX. numba-cuda then
+  links the PTX into a cubin and the driver loads it.
+- **Triton** goes through more stages. Its front end reads the Python syntax
+  tree of your function and writes **Triton IR** (TTIR), where every value is a
+  whole block of data. Triton then decides which thread holds which elements
+  and writes that into **TritonGPU IR** (TTGIR). From there it emits **LLVM
+  IR**, LLVM's NVPTX back end writes PTX, and the copy of `ptxas` bundled with
+  Triton makes the cubin.
+
+So the PTX layer is where three very different front ends meet. After it,
+everything is the same machinery.
+
+## Follow one kernel
+
+The simulation follows SAXPY, `out[i] = a * x[i] + y[i]`, through each path.
+Pick a path, then step through the stages or click one. The code panel shows
+the real output of each stage for an A100 (`sm_80`), with the lines the
+"Look for" note talks about highlighted.
+
+<CompilePipeline />
+
+None of these listings was written by hand. `generate.py` in
+`kernels/ch0-2-software-stack/` compiled the Numba and Triton kernels on a
+machine with no GPU and no `nvcc`, ran `cuobjdump -sass` on both cubins, and
+saved every stage. The tool versions are in `generated/VERSIONS.txt`.
+
+A few things the listings show:
+
+- **Both Python paths end in the same instruction.** Triton's LLVM IR still
+  has a separate multiply and add, and the PTX has one `fma.rn.f32`. Numba's PTX
+  has the same instruction, and in SASS both are `FFMA`.
+- **Triton's threads are invisible until the TTGIR.** The TTIR works on
+  `tensor<1024xf32>` values. The TTGIR layout then gives each of 128 threads 8
+  of the 1024 elements, which is why the PTX has 8 loads of `x` per thread.
+- **The same source can compile to different loads.** Numba's PTX uses
+  `ld.f32`, a generic load: the address goes to global memory unless it falls in
+  the address window of shared, local or constant memory. Triton's uses
+  `ld.global.b32`, which names global memory directly. The SASS keeps the difference: `LD.E` against `LDG.E`.
+- **The PTX version depends on the tool.** Numba's PTX starts with
+  `.version 9.4`, written by NVVM from CUDA 13.4. Triton's starts with
+  `.version 8.8`, because Triton derives the PTX version from the `ptxas` it
+  bundles, which is from CUDA 12.9.
+
+## The code
+
+The same kernel in each language. The CUDA C++ `Makefile` has targets that
+print each stage of the `nvcc` path inside the course Docker image:
+`make -C cuda ptx`, `make -C cuda sass` and `make -C cuda fatbin`.
+
+<CodeTabs
+	cuda={cuda}
+	numba={numba}
+	triton={triton}
+	titles={{ cuda: 'cuda/saxpy.cu', numba: 'numba/saxpy.py', triton: 'triton/saxpy.py' }}
+>
+	<div slot="triton">
+		The Triton kernel works on a block of `BLOCK` elements per program, so the source has no thread index. How the
+		block is split over threads appears in the TTGIR stage of the simulation.
+	</div>
+</CodeTabs>
+
+To look at the stages yourself:
+
+- **CUDA C++:** `nvcc -ptx` writes the PTX, `nvcc -cubin` writes a cubin, and
+  `cuobjdump -sass` prints the SASS of a cubin or of a whole executable.
+  `cuobjdump -lelf` and `-lptx` list the cubins and PTX inside a fatbin.
+- **Numba:** `numba.cuda.compile_ptx(fn, signature, cc=(8, 0))` returns the PTX
+  for a compute capability without needing a GPU. On a GPU, a kernel's
+  `inspect_llvm()`, `inspect_asm()` and `inspect_sass()` return the other
+  stages.
+- **Triton:** a compiled kernel's `asm` dictionary holds the `ttir`, `ttgir`,
+  `llir`, `ptx` and `cubin` of every stage. `generate.py` shows how to compile
+  for a chosen GPU with `triton.compile`.
+
+## Exercises
+
+**1. Which GPUs can run it?** A program is built with
+`nvcc -arch=compute_80 -code=sm_80`. Can it run on a T4 (7.5), an A100 (8.0),
+an RTX 4090 (8.9) and an H100 (9.0)?
+
+<details>
+<summary>Answer</summary>
+
+The fatbin holds only an `sm_80` cubin and no PTX. The A100 and the RTX 4090
+can run it, since both have major version 8 and a minor version of at least 0.
+The H100 cannot: the cubin is for a different major version, and there is no
+PTX for the driver to JIT compile. The T4 cannot either, because its compute
+capability is lower than 8.0. Adding `compute_80` to `-code` would fix the
+H100 but not the T4.
+
+</details>
+
+**2. Unpack the shorthand.** What does `nvcc -arch=sm_86` put in the fatbin,
+and can the result run on an A100?
+
+<details>
+<summary>Answer</summary>
+
+It is the same as `-arch=compute_86 -code=sm_86,compute_86`: an `sm_86` cubin
+and `compute_86` PTX. Neither runs on an A100 (8.0). The cubin needs a minor
+version of at least 6, and `compute_86` PTX can only be compiled for 8.6 or
+newer GPUs. The program would run on an RTX 4090 (8.9) using the cubin, and on
+an H100 through JIT compilation of the PTX.
+
+</details>
+
+**3. Count the loads.** In the Triton path, open the TTGIR stage. The layout
+says `sizePerThread = [4]`, `threadsPerWarp = [32]` and `warpsPerCTA = [4]`,
+and `BLOCK` is 1024. How many elements does each thread handle, and how many
+`ld.global.b32` instructions does the whole PTX file contain? Check your
+answer with **Show the whole file** on the PTX stage.
+
+<details>
+<summary>Answer</summary>
+
+One pass of the layout covers 4 * 32 * 4 = 512 elements, so each of the 128
+threads handles 1024 / 128 = 8 elements. Each thread loads 8 values of `x` and
+8 of `y`, so the PTX has 16 `ld.global.b32` instructions, plus 8
+`st.global.b32` for `out`.
+
+</details>
+
+**4. Generic or global?** Step to the PTX stage of the Numba path. Which state
+space do its `ld.f32` instructions use, and what do they become in SASS?
+
+<details>
+<summary>Answer</summary>
+
+None is written, so PTX uses generic addressing: a generic address goes to
+global memory unless it falls in the window of shared, local or constant
+memory. In the SASS they are
+`LD.E`, the generic load. The Triton kernel's `ld.global.b32` become `LDG.E`,
+the global load.
+
+</details>
+
+**5. Run it.** Run `python kernels/ch0-2-software-stack/generate.py` with the
+versions pinned in `docker/requirements.txt`, then `git status`. Did any
+listing change? Then change `TRITON_BLOCK` in the script to 256, run it again,
+and look at `generated/triton.ttgir` and `triton.ptx`.
+
+<details>
+<summary>Answer</summary>
+
+With the same tool versions, nothing changes: for the same input and target
+the compilers write the same files. With `BLOCK` = 256 the TTIR tensors become
+`tensor<256x...>` and the TTGIR layout changes to `sizePerThread = [2]`. The
+128 threads now cover the block in one pass with 2 elements each, so the PTX
+has 4 `ld.global.b32` instead of 16. Restore the files with `git checkout`
+when you are done.
+
+</details>
+
+## Further reading
+
+- [CUDA Programming Guide: the CUDA platform](https://docs.nvidia.com/cuda/cuda-programming-guide/01-introduction/cuda-platform.html), on the driver, the runtime, PTX, cubins, fatbins, compatibility and JIT compilation.
+- [CUDA Programming Guide: NVCC](https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/nvcc.html), the compilation workflow and the `-arch` and `-gencode` options.
+- [NVCC documentation](https://docs.nvidia.com/cuda/cuda-compiler-driver-nvcc/index.html), especially the sections on virtual architectures, just-in-time compilation and fatbinaries.
+- [PTX ISA](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html), the reference for every PTX directive and instruction in the listings.
+- [CUDA binary utilities](https://docs.nvidia.com/cuda/cuda-binary-utilities/index.html), for `cuobjdump`, `nvdisasm` and the SASS instruction lists for each architecture.
+- [NVVM IR specification](https://docs.nvidia.com/cuda/nvvm-ir-spec/index.html), the IR that Numba hands to NVVM.
+- [Numba CUDA: compiling Python functions](https://nvidia.github.io/numba-cuda/user/cuda_compilation.html), for `compile_ptx` and its options.
+- [Triton's NVIDIA back end](https://github.com/triton-lang/triton/blob/v3.8.0/third_party/nvidia/backend/compiler.py), the source of the TTIR, TTGIR, LLVM IR, PTX and cubin stages in Triton 3.8.0.
