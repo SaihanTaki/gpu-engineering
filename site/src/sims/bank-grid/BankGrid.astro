@@ -1,0 +1,107 @@
+---
+import SimFrame from '@components/SimFrame.astro';
+import { codeFor, LAYOUT_IDS, LAYOUTS, SHARES, STRIDES, type Layout } from './model';
+
+interface Props {
+	stride?: number;
+	share?: number;
+	layout?: Layout;
+}
+
+const { stride = 32, share = 1, layout = 'plain' } = Astro.props;
+const code = LAYOUT_IDS.map((id) => ({ name: id, code: codeFor(id), lang: 'cpp' }));
+// SimFrame shows the first variant until the script runs, so put the starting one first.
+code.sort((a, b) => Number(b.name === layout) - Number(a.name === layout));
+const group = `bk-layout-${Math.random().toString(36).slice(2, 8)}`;
+---
+
+<SimFrame title="Bank grid: one warp, 32 banks" sim="bank-grid" code={code} config={{ stride, share, layout }}>
+	<Fragment slot="params">
+		<label class="sim-field">
+			<span>Stride S (elements)</span>
+			<select name="stride">
+				{STRIDES.map((s) => <option value={s} selected={s === stride}>{s === 0 ? '0, every lane the same element' : s === 32 ? '32, a column' : String(s)}</option>)}
+			</select>
+		</label>
+		<label class="sim-field">
+			<span>Lanes per element G</span>
+			<select name="share">
+				{SHARES.map((g) => <option value={g} selected={g === share}>{g}</option>)}
+			</select>
+		</label>
+		<fieldset class="bk-layout">
+			<legend>Tile layout</legend>
+			{
+				LAYOUT_IDS.map((id) => (
+					<label class="sim-check">
+						<input type="radio" name={group} value={id} checked={id === layout} />
+						{LAYOUTS[id].label}
+					</label>
+				))
+			}
+		</fieldset>
+	</Fragment>
+
+	<p class="sim-launch" data-stats></p>
+	<div class="sim-canvas" data-canvas>
+		<svg role="img" aria-label="32 bank columns; each row is one wavefront, and each cell is a word a bank sends to the lane numbered in it"></svg>
+	</div>
+	<ul class="ws-legend bk-legend" aria-label="Legend">
+		<li><span class="sim-swatch is-first">5</span>first word from a bank, sent to lane 5</li>
+		<li><span class="sim-swatch is-replay">7</span>a second or later word from the same bank: lane 7 waited (conflict)</li>
+		<li><span class="sim-swatch is-plain">4+</span>lane 4 and others read the same word: broadcast</li>
+		<li><span class="sim-swatch is-now"></span>current wavefront</li>
+	</ul>
+
+	<Fragment slot="caption">
+		Lane i reads element k = (i / G) * S of a float tile with 32 columns, as row k / 32 and column k % 32. One step is one
+		wavefront: every bank sends at most one 4-byte word. The model covers 4-byte reads only; wider loads and writes have
+		extra rules, and the order in which a bank serves its words is not documented, only the count.
+	</Fragment>
+</SimFrame>
+
+<script>
+	import { Stepper } from '@sim-core/stepper';
+	import { bindControls } from '@sim-core/controls';
+	import { highlightLines, showVariant } from '@sim-core/code-sync';
+	import { degree, describe, INDEX_LINES, LAYOUTS, lastStep, READ_LINE, stateAt, type Config, type Layout } from './model';
+	import { render } from './view';
+
+	function mount(frame: HTMLElement) {
+		const config: Config = JSON.parse(frame.dataset.config!);
+		const stepper = new Stepper(lastStep(config), 900);
+		const canvas = frame.querySelector<HTMLElement>('[data-canvas]')!;
+		const svgEl = canvas.querySelector('svg')!;
+		const stats = frame.querySelector<HTMLElement>('[data-stats]')!;
+		let code = showVariant(frame, config.layout);
+
+		const draw = () => {
+			const st = stateAt(config, stepper.step);
+			render(svgEl, config, st, Math.max(260, canvas.clientWidth));
+			highlightLines(code, st.step ? [READ_LINE] : INDEX_LINES);
+			const d = degree(config);
+			const head = `S = ${config.stride}, G = ${config.share}, ${LAYOUTS[config.layout].label.toLowerCase()}: `;
+			stats.textContent =
+				head +
+				(stepper.atEnd
+					? `${d} wavefront${d === 1 ? '' : 's'} (ideal 1), ${d === 1 ? 'conflict-free' : `${d}-way conflict`}.`
+					: `${st.step} wavefront${st.step === 1 ? '' : 's'} so far.`);
+			stats.classList.toggle('is-warning', stepper.atEnd && d > 1);
+		};
+
+		frame.querySelector('.sim-params')!.addEventListener('change', () => {
+			config.stride = Number(frame.querySelector<HTMLSelectElement>('select[name="stride"]')!.value);
+			config.share = Number(frame.querySelector<HTMLSelectElement>('select[name="share"]')!.value);
+			config.layout = (frame.querySelector<HTMLInputElement>('.bk-layout input:checked')?.value ?? 'plain') as Layout;
+			code = showVariant(frame, config.layout);
+			stepper.setLast(lastStep(config));
+		});
+
+		bindControls(frame, stepper, (step) => describe(config, step));
+		stepper.onChange(draw);
+		new ResizeObserver(draw).observe(canvas);
+		draw();
+	}
+
+	document.querySelectorAll<HTMLElement>('[data-sim="bank-grid"]').forEach(mount);
+</script>
