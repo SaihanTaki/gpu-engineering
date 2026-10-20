@@ -1576,3 +1576,80 @@
 	padding-inline-start: 0.6rem;
 	border-inline-start: 3px solid var(--sim-line);
 }
+
+/* Contention sim (chapter 15) */
+[data-sim='contention'] select {
+	width: 100%;
+	max-width: 100%;
+}
+[data-sim='contention'] .expressive-code .copy button {
+	width: 44px;
+	height: 44px;
+}
+.ct-atomic {
+	fill: var(--sim-active);
+}
+.ct-atomic.is-worst {
+	fill: var(--sim-warn);
+}
+.ct-rule {
+	stroke: var(--sim-line);
+}
+.ct-base {
+	stroke: var(--sim-muted);
+}
+.ct-count,
+.ct-group-label,
+.ct-bar-label {
+	fill: var(--sim-text);
+}
+.ct-costly {
+	fill: var(--sim-warn);
+}
+.ct-group {
+	fill: var(--sim-block-a);
+	stroke: var(--sim-line);
+}
+.ct-group.is-b {
+	fill: var(--sim-block-b);
+}
+.ct-bar-track {
+	fill: none;
+	stroke: var(--sim-line);
+}
+.ct-bar {
+	fill: var(--sim-active);
+}
+.ct-legend,
+.ct-totals {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.25rem 1.25rem;
+	margin: 0.5rem 0 0;
+	padding: 0;
+	list-style: none;
+	font-size: var(--sl-text-xs);
+}
+.ct-legend li {
+	display: flex;
+	align-items: center;
+	gap: 0.4rem;
+}
+.ct-swatch {
+	flex-shrink: 0;
+	width: 1.25rem;
+	height: 0.4rem;
+	background: var(--sim-active);
+}
+.ct-swatch.is-worst {
+	background: var(--sim-warn);
+}
+.ct-totals {
+	display: grid;
+	gap: 0.35rem;
+	font-size: var(--sl-text-sm);
+}
+.ct-totals li {
+	padding-inline-start: 0.6rem;
+	border-inline-start: 3px solid var(--sim-line);
+}

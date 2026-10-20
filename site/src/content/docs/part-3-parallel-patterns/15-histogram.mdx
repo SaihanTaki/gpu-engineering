@@ -1,0 +1,265 @@
+---
+title: 15. Histogram and atomics
+description: Why a histogram needs atomic operations, why threads that hit the same bin wait for each other, and how a private copy per block in shared memory cuts that wait.
+sidebar:
+  order: 15
+banner:
+  content: Draft chapter. If something is wrong or unclear, use the edit link at the bottom of the page.
+---
+
+import { Code } from '@astrojs/starlight/components';
+import Contention from '@sims/contention/Contention.astro';
+import CodeTabs from '@components/CodeTabs.astro';
+import { BINS, HOT_BIN, LAST_STEP, N, ROUNDS, THREADS, totalsAt } from '@sims/contention/model';
+import cuda from '@kernels/ch15-histogram/cuda/histogram_kernels.cuh?raw';
+import numba from '@kernels/ch15-histogram/numba/histogram.py?raw';
+import triton from '@kernels/ch15-histogram/triton/histogram.py?raw';
+import summary from '@kernels/ch15-histogram/generated/summary.txt?raw';
+
+export const slots = (dist, blocks, k) => totalsAt({ dist, blocks }, k, LAST_STEP).slots;
+export const merges = (dist, blocks) => totalsAt({ dist, blocks }, 'shared', LAST_STEP).globalAtomics;
+
+A histogram counts how many input values fall into each bin. On a CPU it is
+one line in a loop, `hist[data[i]]++`. On a GPU each thread takes some of the
+elements, and that one line becomes the hard part: two threads with the same
+value both want to add 1 to the same counter.
+
+In 2015 Nikolay Sakharnykh timed two GPU histograms of 1080p images, one that
+updates counters in global memory and one that counts into a copy per block in
+shared memory first. On a Maxwell GPU (GeForce GTX TITAN X) the shared memory
+version was "almost 2x faster". On the Kepler GPU he tried (GeForce GTX TITAN),
+the global version won on most inputs. The input mattered too: he calls an
+image where every pixel has the same value "the worst case scenario for
+atomics since all threads are trying to write to the same address." This
+chapter explains all three effects.
+
+## Why `hist[b]++` is wrong in parallel
+
+`hist[b]++` is three steps: read `hist[b]`, add 1, write it back. If two
+threads read the counter before either writes, both write the same new value
+and one count is lost. Chapter 22 steps through this race; here it is enough
+that it happens, and that the result can still look plausible.
+
+An **atomic** operation does the three steps as one. The CUDA C++ Programming
+Guide says `atomicAdd()` "reads a word at some address in global or shared
+memory, adds a number to it, and writes the result back to the same address",
+and that "these three operations are performed in one atomic transaction". No
+other thread can touch the word in between, so no count is lost:
+
+```cpp
+atomicAdd(&hist[data[i]], 1u);
+```
+
+Two details from the same section matter for histograms:
+
+- Plain `atomicAdd` is atomic at device scope, so it is correct across all
+  blocks of the grid. `atomicAdd_block` is atomic only within a block, and
+  `atomicAdd_system` also covers the CPU and other GPUs.
+- These atomics have relaxed memory ordering. They count correctly, but they
+  do not order other memory accesses. That is all a histogram needs.
+
+## Contention
+
+Atomicity has a cost when threads collide. The Programming Guide, in its
+description of the SIMT architecture, says that when an atomic instruction of
+a warp writes the same location from several threads, "each read/modify/write
+to that location occurs and they are all serialized, but the order in which
+they occur is undefined."
+
+So the time a histogram takes depends on the data, not only on its size.
+Spread values over many bins and the atomics go to different addresses.
+Put every value in one bin and every thread queues on one counter. This is
+**contention**: the cost is set by the busiest bin.
+
+Integer addition gives the same total in any order, so an integer histogram is
+exact whatever order the queue runs in. A `float` sum built with `atomicAdd`
+can differ in its last bits from run to run, because floating point addition
+is not associative.
+
+## Privatization
+
+The fix is to give each block its own copy of the histogram, a **private**
+histogram in shared memory:
+
+1. The block zeroes its copy and calls `__syncthreads()`.
+2. Each thread adds its elements to the block's copy with shared memory
+   atomics. Only the threads of this block compete for these counters.
+3. After another `__syncthreads()`, the block adds each nonzero bin of its copy
+   to the global histogram with one global atomic.
+
+The number of threads that can collide on one counter drops from every thread
+in the grid to the threads of one block. The global histogram now gets at most
+one atomic per bin per block, instead of one per element. The price is the
+merge, and a shared memory copy per block, `BINS * 4` bytes: 1 KB for 256
+bins.
+
+This is also why Kepler and Maxwell disagreed. Sakharnykh's article explains
+that Kepler emulates shared memory atomics in software, while its global
+atomics benefit from conflict resolution in the L2 cache; Maxwell has hardware
+support for shared memory atomics. A private copy only pays off when updating
+it is cheap.
+
+## The simulation
+
+The simulation is a small launch: {THREADS} threads count {N} values into
+{BINS} bins with a grid-stride loop, so each step is one round in which every
+thread issues one atomic. Atomics on the same address wait in line; atomics on
+different addresses run at the same time. A step costs as many **slots** as its
+longest queue. The top panel runs the global kernel, the middle one the
+private copies, and the bars add up the slots of each kernel.
+
+Start on the one hot bin input. Before you step, guess the slots for each
+kernel with 4 blocks.
+
+<Contention />
+
+Things to try:
+
+- **One hot bin, 4 blocks.** Every value is bin {HOT_BIN}, so all 32 threads
+  queue on one counter: {slots('hot', 4, 'global')} slots for the global kernel.
+  Each private copy sees only its block's 8 threads, and the merge adds one
+  atomic per block: {slots('hot', 4, 'shared')} slots.
+- **One hot bin, 1 block.** With a single block the private copy is just a
+  second global histogram: {slots('hot', 1, 'shared')} slots, one more than the
+  global kernel. Privatization needs many copies to help.
+- **Uniform, 4 and 8 blocks.** The values are already spread, so the global
+  kernel's queues are short: {slots('uniform', 4, 'global')} slots. Four blocks
+  give {slots('uniform', 4, 'shared')}, but eight give
+  {slots('uniform', 8, 'shared')}: with every bin nonzero in every block, the
+  merge queues 8 blocks on each bin.
+
+## The code
+
+All three languages compute a 256-bin histogram of bytes. Both CUDA kernels use
+a grid-stride loop, so the grid size does not depend on the input size. The
+merge skips bins that stayed at zero.
+
+<CodeTabs
+	cuda={cuda}
+	numba={numba}
+	triton={triton}
+	titles={{ cuda: 'cuda/histogram_kernels.cuh', numba: 'numba/histogram.py', triton: 'triton/histogram.py' }}
+>
+	<div slot="triton-note">
+		Triton has `tl.atomic_add`, which takes a whole tensor of pointers, so `hist_atomic_kernel` is the global kernel:
+		one atomic per element. It has no shared memory to put a private copy in, but `tl.histogram` counts a tensor of
+		values into bins inside one program. `hist_local_kernel` uses it and then adds the program's counts with one atomic
+		per bin, the same shape as the shared memory kernel. Both pass `sem="relaxed"`, the ordering of CUDA's `atomicAdd`;
+		Triton's default is `acq_rel`. The summary below, from compiling both kernels for sm_80 with `generate.py`, shows
+		how `tl.histogram` is built.
+	</div>
+</CodeTabs>
+
+The CUDA kernels are in a header with no host code, so the tests can compile
+them with NVRTC on a machine without `nvcc`. `cuda/histogram.cu` includes it,
+times each kernel on three inputs and checks it against a CPU count. Every
+version is tested against `np.bincount`, exactly, for uniform, skewed and
+one-bin inputs.
+
+What the Triton compiler produced, counted in its PTX:
+
+<Code code={summary} lang="text" title="generated/summary.txt" />
+
+The `atomic` kernel has only global atomics. The `local` kernel has shared
+memory atomics, two barriers and a few global atomics: the compiler built a
+private histogram in shared memory for each program, the same plan as
+`hist_shared`. The counts are instructions in the code, not how many times
+they run.
+
+## Measure it yourself
+
+On a GPU, from `kernels/ch15-histogram`:
+
+```sh
+make -C cuda run
+python numba/histogram.py
+python triton/histogram.py
+ncu --section MemoryWorkloadAnalysis_Tables ./cuda/histogram
+```
+
+Each program prints, for each input and kernel, the time of one histogram and
+its throughput in bytes read per second. Things to look for:
+
+- How much slower the global kernel is on the one-bin input than on the
+  uniform one. That gap is contention.
+- Whether the shared kernel is faster than the global one, on which inputs,
+  and how much its time changes between inputs.
+- How your GPU's ratios compare with the model's slot counts. The model gives a
+  shared atomic and a global atomic the same cost, and real hardware does not.
+
+## Exercises
+
+**1. Predict the slots.** For the one hot bin input with {THREADS} threads in
+`B` blocks, each running {ROUNDS} rounds, write the model's slot count for the
+shared kernel as a formula in `B`. Which of 1, 2, 4, 8, 16 and 32 blocks gives
+the fewest slots?
+
+<details>
+<summary>Answer</summary>
+
+Each round, one block's `32 / B` threads queue on the hot bin of its copy, so
+the four rounds take `4 x 32 / B = 128 / B` slots. In the merge, all `B` blocks
+queue on that bin of the global histogram: `B` slots. The total is
+`128 / B + B`: 129, 66, 36, 24, 24 and 36. Eight or sixteen blocks are best, at
+24, near the square root of 128. Fewer blocks leave long queues in the copies,
+and more blocks make the merge queue long. The simulation stops at 8 blocks;
+it shows {slots('hot', 8, 'shared')}.
+
+</details>
+
+**2. More copies, more slots.** On the uniform input, why does the shared kernel
+take {slots('uniform', 8, 'shared')} slots with 8 blocks but only
+{slots('uniform', 4, 'shared')} with 4?
+
+<details>
+<summary>Answer</summary>
+
+With 8 blocks of 4 threads, each round's queues in a copy are short, but by the
+end almost every bin is nonzero in every block. The merge then sends
+{merges('uniform', 8)} global atomics, and up to 8 of them queue on one bin.
+With 4 blocks the merge sends {merges('uniform', 4)}. Step to the merge in the
+simulation and compare the queue heights. On a real GPU each block counts many
+more elements than here, so the merge is a small part of the work, but the same
+trade applies: every copy adds one merge per bin.
+
+</details>
+
+**3. Fix the bug.** Someone deletes the second `__syncthreads()` in
+`hist_shared`, the one before the merge, and the result is right in their test.
+What can go wrong?
+
+<details>
+<summary>Answer</summary>
+
+A thread can reach the merge loop while other threads of its block are still
+adding to the private copy. It reads `local[b]`, adds that to the global
+histogram, and the later additions to `local[b]` are never merged: counts go
+missing. Whether it happens depends on how the warps are scheduled, so a test
+can pass by luck. Deleting the first barrier is also a bug: a thread could add
+to a bin that another thread has not zeroed yet. `compute-sanitizer --tool
+racecheck` reports both.
+
+</details>
+
+**4. Why skip zeros?** The merge does `if (local[b] > 0) atomicAdd(...)`. On
+the skewed input with 4 blocks, how many global atomics does the model's merge
+send, and how many would it send without the check?
+
+<details>
+<summary>Answer</summary>
+
+With the check, {merges('skewed', 4)}: one for each block and bin with a
+nonzero count. Without it, every block adds every bin, {4 * BINS}. On the real
+kernel's 256 bins, a skewed input leaves most bins at zero in every block, so
+the check saves most of the merge.
+
+</details>
+
+## Further reading
+
+- [Nikolay Sakharnykh, GPU Pro Tip: Fast Histograms Using Shared Atomics on Maxwell](https://developer.nvidia.com/blog/gpu-pro-tip-fast-histograms-using-shared-atomics-maxwell/) (NVIDIA Technical Blog, 2015), the two-phase histogram behind this chapter's shared kernel, measured on Kepler and Maxwell GPUs with synthetic and real images. Its merge is a second kernel instead of the end of the first.
+- [CUDA C++ Programming Guide 12.4: atomic functions](https://docs.nvidia.com/cuda/archive/12.4.0/cuda-c-programming-guide/index.html#atomic-functions), for `atomicAdd`, scopes and memory ordering, and [SIMT architecture](https://docs.nvidia.com/cuda/archive/12.4.0/cuda-c-programming-guide/index.html#simt-architecture), for the rule that same-address atomics in a warp are serialized.
+- [Andy Adinets, CUDA Pro Tip: Optimized Filtering with Warp-Aggregated Atomics](https://developer.nvidia.com/blog/cuda-pro-tip-optimized-filtering-warp-aggregated-atomics/) (NVIDIA Technical Blog), another way to cut contention: one lane adds for its whole warp. The updated post says `nvcc` does this automatically in many cases.
+- [Triton: tl.atomic_add](https://triton-lang.org/main/python-api/generated/triton.language.atomic_add.html) and [tl.histogram](https://triton-lang.org/main/python-api/generated/triton.language.histogram.html).
+- [Numba CUDA: supported atomic operations](https://nvidia.github.io/numba-cuda/user/intrinsics.html).
+- [CUB DeviceHistogram](https://nvidia.github.io/cccl/unstable/cub/api/structcub_1_1DeviceHistogram.html), the library histogram to compare your kernels against.

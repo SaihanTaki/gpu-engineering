@@ -1,0 +1,108 @@
+---
+import SimFrame from '@components/SimFrame.astro';
+import { BLOCK_OPTIONS, CODE, DIST_IDS, DIST_NAMES, KERNEL_IDS, KERNEL_NAMES, THREADS, type Config, type Dist, type KernelId } from './model';
+
+interface Props {
+	dist?: Dist;
+	blocks?: Config['blocks'];
+	code?: KernelId;
+}
+
+const { dist = 'hot', blocks = 4, code = 'shared' } = Astro.props;
+const variants = KERNEL_IDS.map((id) => ({ name: id, code: CODE[id], lang: 'cpp' }));
+// SimFrame shows the first variant until the script runs, so put the starting one first.
+variants.sort((a, b) => Number(b.name === code) - Number(a.name === code));
+---
+
+<SimFrame title="Contention: one counter or a copy per block" sim="contention" code={variants} config={{ dist, blocks, code }}>
+	<Fragment slot="params">
+		<label class="sim-field">
+			<span>Input</span>
+			<select name="dist">
+				{DIST_IDS.map((d) => <option value={d} selected={d === dist}>{DIST_NAMES[d]}</option>)}
+			</select>
+		</label>
+		<label class="sim-field">
+			<span>Blocks (the {THREADS} threads are split among them)</span>
+			<select name="blocks">
+				{BLOCK_OPTIONS.map((b) => <option value={b} selected={b === blocks}>{b} of {THREADS / b} threads</option>)}
+			</select>
+		</label>
+		<label class="sim-field">
+			<span>Code panel</span>
+			<select name="code">
+				{KERNEL_IDS.map((id) => <option value={id} selected={id === code}>{KERNEL_NAMES[id]}</option>)}
+			</select>
+		</label>
+	</Fragment>
+
+	<div class="sim-canvas" data-canvas>
+		<svg role="img" aria-label="Queues of atomic operations on each of 8 bins: on the global counters, on each block's private copy, and during the merge; then bars of serialized slots for both kernels"></svg>
+	</div>
+	<ul class="ct-legend" aria-label="Legend">
+		<li><span class="ct-swatch"></span>one atomic waiting on that bin this step</li>
+		<li><span class="ct-swatch is-worst"></span>the longest queue: it sets the step's cost in slots</li>
+		<li>Under each column: the bin number, then its count so far.</li>
+	</ul>
+	<ul class="ct-totals" data-totals aria-label="Running totals"></ul>
+
+	<Fragment slot="caption">
+		Model, not a measurement. Each step is one pass of the grid-stride loop: all {THREADS} threads issue one atomic at once.
+		Atomics on one address go one at a time; atomics on different addresses go in parallel. A step costs as many slots as
+		its longest queue. The model gives shared and global atomics the same cost, and leaves out latency, the hardware's
+		atomic throughput, warp-level aggregation by the compiler, and the time to zero and read the private copies.
+	</Fragment>
+</SimFrame>
+
+<script>
+	import { Stepper } from '@sim-core/stepper';
+	import { bindControls } from '@sim-core/controls';
+	import { highlightLines, showVariant } from '@sim-core/code-sync';
+	import { describe, KERNEL_IDS, KERNEL_NAMES, LAST_STEP, lineAt, totalsAt, type Config, type Dist, type KernelId } from './model';
+	import { render } from './view';
+
+	function mount(frame: HTMLElement) {
+		const config: Config & { code: KernelId } = JSON.parse(frame.dataset.config!);
+		const stepper = new Stepper(LAST_STEP, 1100);
+		const canvas = frame.querySelector<HTMLElement>('[data-canvas]')!;
+		const svgEl = canvas.querySelector('svg')!;
+		const totalsEl = frame.querySelector<HTMLElement>('[data-totals]')!;
+		const field = <T extends HTMLElement>(name: string) => frame.querySelector<T>(`[name="${name}"]`)!;
+		let code = showVariant(frame, config.code);
+
+		const draw = () => {
+			const step = stepper.step;
+			render(svgEl, config, step, Math.max(260, canvas.clientWidth));
+			const line = lineAt(config.code, step);
+			highlightLines(code, line === null ? [] : [line]);
+			totalsEl.replaceChildren(
+				...KERNEL_IDS.map((k) => {
+					const t = totalsAt(config, k, step);
+					const li = document.createElement('li');
+					const name = document.createElement('strong');
+					name.textContent = `${KERNEL_NAMES[k]}:`;
+					const atomics = k === 'global' ? `${t.globalAtomics} global atomics` : `${t.sharedAtomics} shared + ${t.globalAtomics} global ${t.globalAtomics === 1 ? 'atomic' : 'atomics'}`;
+					li.append(name, ` ${atomics}, ${t.slots} serialized ${t.slots === 1 ? 'slot' : 'slots'} so far.`);
+					return li;
+				}),
+			);
+		};
+
+		frame.querySelector('.sim-params')!.addEventListener('input', () => {
+			config.dist = field<HTMLSelectElement>('dist').value as Dist;
+			config.blocks = Number(field<HTMLSelectElement>('blocks').value);
+			config.code = field<HTMLSelectElement>('code').value as KernelId;
+			code = showVariant(frame, config.code);
+			// The step stays put so a change is compared at the same point; the status must follow it.
+			sync(stepper.step);
+			draw();
+		});
+
+		const sync = bindControls(frame, stepper, (step) => describe(config, step));
+		stepper.onChange(draw);
+		new ResizeObserver(draw).observe(canvas);
+		draw();
+	}
+
+	document.querySelectorAll<HTMLElement>('[data-sim="contention"]').forEach(mount);
+</script>
