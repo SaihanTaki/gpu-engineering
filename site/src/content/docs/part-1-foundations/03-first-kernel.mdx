@@ -50,7 +50,8 @@ makes sense on the side it belongs to. `cudaMalloc` returns an address in GPU
 memory. The CPU cannot read through it: on a typical PCIe system, writing
 `d_a[0]` in host code crashes the program, because no CPU memory is mapped at
 that address. The same goes the other way for a host pointer passed to a
-kernel. CUDA code marks the side in the name: `h_a` for a host array, `d_a`
+kernel, unless the system supports heterogeneous memory management (chapter
+10). CUDA code marks the side in the name: `h_a` for a host array, `d_a`
 for a device array.
 
 Three runtime calls manage device memory:
@@ -59,7 +60,10 @@ Three runtime calls manage device memory:
   address in `d_a`. The memory holds no useful data yet.
 - `cudaMemcpy(dst, src, bytes, kind)` copies between the two memories. `kind`
   says which way: `cudaMemcpyHostToDevice` or `cudaMemcpyDeviceToHost`.
-  `cudaMemcpy` does not return until the copy is done.
+  A device-to-host `cudaMemcpy` returns once the data has arrived. A
+  host-to-device copy from ordinary memory returns once the source can be
+  reused, which may be before the data reaches the GPU; work queued after it
+  still waits for it.
 - `cudaFree(d_a)` releases the allocation.
 
 <Aside type="note">
@@ -158,13 +162,14 @@ message, then exits:
 A kernel launch returns nothing, so it needs two checks of its own:
 
 1. **`cudaGetLastError()` right after the launch** reports errors in the launch
-   itself, such as a block size over 1024. It also resets the error state to
-   `cudaSuccess`.
+   itself, such as a block size over 1024. For errors that are not sticky (see
+   below), it also resets the error state to `cudaSuccess`.
 2. **`cudaDeviceSynchronize()`** waits for the kernel to finish. A launch is
    asynchronous: it returns to the CPU before the kernel has run. An error
    that happens while the kernel runs, such as an out-of-bounds access, can
-   only be reported after that, so it shows up as the return value of the
-   synchronize, or of whichever later call waits for the GPU first.
+   only be reported after that, so it shows up in the next CUDA call that
+   checks the error state after the kernel has run. The synchronize is the
+   call that guarantees the kernel has run.
 
 Some kernel errors, such as an illegal memory access, leave the GPU context
 unusable. After one of those, every later CUDA call in the process returns the
@@ -300,8 +305,8 @@ the launch call and the kernel time drops close to zero. `copy_to_host` has to
 wait for the kernel before it can copy `c`, so the copy-out time now includes
 the kernel. The sum stays about the same; it is only attributed to the wrong
 phase. In the CUDA version, the same mistake also moves where an error inside
-the kernel is reported: to the next call that waits for the GPU, here the
-`cudaMemcpy` of step 6.
+the kernel is reported: to a later call, at the latest the `cudaMemcpy` of
+step 6, which has to wait for the kernel.
 
 </details>
 
