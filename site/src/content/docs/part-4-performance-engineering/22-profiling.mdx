@@ -1,0 +1,521 @@
+---
+title: 22. Profiling and debugging
+description: How to find out whether a kernel is wrong and where its time goes. Nsight Systems for the timeline, Nsight Compute for one kernel, compute-sanitizer for races and bad memory accesses, and the Numba simulator and Triton interpreter for debugging without a GPU.
+sidebar:
+  order: 22
+banner:
+  content: Draft chapter. If something is wrong or unclear, use the edit link at the bottom of the page.
+---
+
+import { Code } from '@astrojs/starlight/components';
+import RaceCondition from '@sims/race-condition/RaceCondition.astro';
+import CodeTabs from '@components/CodeTabs.astro';
+import { lastStep, stateAt } from '@sims/race-condition/model';
+import cuda from '@kernels/ch22-profiling/cuda/bugs_kernels.cuh?raw';
+import numba from '@kernels/ch22-profiling/numba/bugs.py?raw';
+import triton from '@kernels/ch22-profiling/triton/bugs.py?raw';
+import racyPtx from '@kernels/ch22-profiling/generated/count_racy.ptx?raw';
+
+export const final = (threads, mode, preset) => {
+	const c = { threads, mode, preset, custom: [] };
+	return stateAt(c, lastStep(c)).count;
+};
+
+Every chapter so far ended with a kernel that passed its test. A test that
+passes says less than it seems. Chapter 3 noted that a kernel can read past
+the end of an array and still print OK. Chapter 15 noted that `hist[b]++`
+loses counts when two threads hit the same bin, and that the result can still
+look plausible. In the Compute Sanitizer documentation, NVIDIA's sample
+`block_error` has 128 threads write shared memory and thread 0 read it back
+with no barrier in between; the racecheck tool reports "508 hazards" for that
+one missing line.
+
+After a kernel compiles, two questions remain: is it right, and where does
+its time go? This chapter covers the tools for each, and the bugs they find.
+
+| Question | Tool | What it shows |
+|---|---|---|
+| Is the kernel right? | `compute-sanitizer` | Out-of-bounds and misaligned accesses, shared memory races, reads of uninitialized memory, misused barriers |
+| Is it right, without a GPU? | Numba with `NUMBA_ENABLE_CUDASIM=1`, Triton with `TRITON_INTERPRET=1` | The kernel runs on the CPU in Python, where you can print and use `pdb` |
+| Where does the program's time go? | Nsight Systems (`nsys`) | A timeline of CUDA API calls, copies, kernels and your own NVTX ranges |
+| Why is this kernel slow? | Nsight Compute (`ncu`) | Hardware counters for one kernel: throughput against peak, memory traffic, occupancy, why warps stall, all per source line |
+
+Every command, option, section and metric name in this chapter was checked
+against NVIDIA's documentation for Nsight Compute 2026.3.1, Nsight Systems
+2026.5 and Compute Sanitizer 2026.3.0, linked at the end. None of them was
+run for this chapter: no GPU was available. If your version rejects a name,
+`ncu --list-sections`, `ncu --query-metrics` and `compute-sanitizer --help`
+list what it has.
+
+## A race, one instruction at a time
+
+`count += 1` looks like one operation. It is three. Compiled with NVRTC for
+`sm_80`, the line `count += 1` on a shared counter in
+`kernels/ch22-profiling/cuda/bugs_kernels.cuh` becomes a load into a register,
+an add, and a store:
+
+```text
+ld.shared.u32 	%r7, [_ZZ10count_racyPKfiPjE5count];
+add.s32 	%r8, %r7, 1;
+st.shared.u32 	[_ZZ10count_racyPKfiPjE5count], %r8;
+```
+
+<details>
+<summary>The whole kernel's PTX</summary>
+
+<Code code={racyPtx} lang="text" title="generated/count_racy.ptx" />
+
+</details>
+
+Each thread has its own register. If a second thread loads the counter after
+the first one has loaded it but before it has stored, both add 1 to the same
+old value and both store the same new value. One update is gone. This is a
+**data race**: two threads access the same location, at least one of them
+writes, and nothing orders the accesses. The result depends on the order the
+hardware happens to run them in, so the bug can hide for thousands of runs.
+
+The simulation lets you choose that order. Start with two threads and the
+preset "Thread 1 loads before thread 0 stores". Before you step, predict what
+`count` holds at the end.
+
+<RaceCondition />
+
+Things to try:
+
+- **Thread 1 loads before thread 0 stores.** Both threads load 0. Thread 0
+  stores 1, then thread 1 stores 1 over it: {final(2, 'plain', 'lost-one')}
+  instead of 2.
+- **Every thread loads first, like a warp.** With 4 threads, all four load 0
+  and all four store 1: {final(4, 'plain', 'all-load')} instead of 4. The 32
+  threads of a warp run the same instruction together, so on a GPU this order
+  is the common one, not the rare one.
+- **Switch to `atomicAdd`.** Each thread's update becomes one instruction,
+  which the CUDA C++ Programming Guide says is "performed in one atomic
+  transaction". No interleaving can split it, and every preset ends at the
+  number of threads.
+- **Custom.** Pick the threads yourself. With 3 threads, can you end with 0?
+  With 1? Step back and pick differently: a new pick replaces the rest of the
+  order.
+
+The fix is the atomic, or not sharing the counter at all: give each thread
+its own partial count and add the partial counts in a reduction (chapter 13).
+Chapter 15 measured the price of atomics when many threads hit one address.
+
+## Common bugs and the tool for each
+
+`compute-sanitizer` ships with the CUDA toolkit. It runs your program
+unchanged and checks every memory access and barrier as the kernels run. It
+has four tools, picked with `--tool`; memcheck is the default.
+
+| Bug | What you see without a tool | Tool, and the example in `bugs_kernels.cuh` |
+|---|---|---|
+| Out-of-bounds or misaligned access | Often nothing: the address usually exists, so the kernel reads garbage or overwrites another buffer | `--tool memcheck`. `diff_oob`: thread `n - 1` reads `in[n]` |
+| Race on shared memory | Results that change from run to run, or only on another GPU | `--tool racecheck`. `count_racy`: `count += 1` on a shared counter |
+| Missing `__syncthreads()` | Same as a race: a thread reads a value another warp has not written yet | `--tool racecheck`. `reverse_nosync`: reverse a block through shared memory without a barrier |
+| Uninitialized memory | Right answers while fresh memory happens to hold zeros | `--tool initcheck`. `add_index` after `cudaMemset(d_v, 0, n)`: `n` bytes, not `n` ints |
+| Barrier in divergent code | A hang or wrong results, depending on the GPU | `--tool synccheck`. `block_sum_divergent`: one `__syncthreads()` in each branch of an `if` |
+| Unchecked launch error | The kernel never ran, and the output is whatever was in memory | memcheck reports failing API calls; `CUDA_CHECK` catches it. A launch with 2,048 threads per block |
+
+The Makefile in `kernels/ch22-profiling/cuda` runs each tool on the bug it
+finds:
+
+```sh
+make -C kernels/ch22-profiling/cuda sanitize
+# which runs, among others:
+compute-sanitizer --tool memcheck --padding 32 ./bugs oob
+compute-sanitizer --tool racecheck ./bugs race
+compute-sanitizer --tool initcheck ./bugs uninit
+compute-sanitizer --tool synccheck ./bugs divergent
+```
+
+What each tool does, from the Compute Sanitizer documentation:
+
+- **memcheck** "can precisely detect and report out of bounds and misaligned
+  memory accesses to global, local and shared memory". A report names the
+  memory space and size ("Invalid \_\_global\_\_ write of size 4 bytes"), the
+  kernel and instruction offset, the thread and block, and the address. Build
+  with `-lineinfo` and it adds the source file and line. It also reports CUDA
+  API calls that return an error, and leaks with `--leak-check full`. One
+  catch: two allocations can sit back to back, and "an overflow access into
+  the first buffer will simply happen in the second buffer and not be
+  detected". `--padding 32` puts a 32 byte guard after every allocation, so a
+  read one past the end always hits invalid memory.
+- **racecheck** finds hazards on **shared memory**: write after write, write
+  after read, and read after write between two threads. By default it prints
+  an analysis report per race, such as "Race reported between Write access at
+  ... and Read access at ...", with the two source lines and the number of
+  hazards. It does not check global memory, so a race on a global counter is
+  invisible to it, and it does no bounds checking, so the guide recommends
+  running memcheck first.
+- **initcheck** reports reads of device global memory that nothing wrote
+  first, by a kernel, `cudaMemcpy` or `cudaMemset`. `--initcheck-address-space
+  shared` checks shared memory instead, and `all` checks both.
+- **synccheck** reports invalid use of `__syncthreads()`, `__syncwarp()` and
+  their Cooperative Groups versions. Each report starts with "Barrier error
+  detected" and a class, such as "Divergent thread(s) in warp".
+
+Run them on small inputs: they check every access, and racecheck reports
+hazards byte by byte, so a large launch produces a lot of output. They also
+only see the code paths a run takes: a clean report says this run had no
+errors, not that the kernel has none.
+
+### Checking every launch
+
+Chapter 3 introduced `CUDA_CHECK`, which checks the error code of a runtime
+call. A launch returns no error code. The Programming Guide says
+`cudaPeekAtLastError()` or `cudaGetLastError()` "must be called just after the
+kernel launch to retrieve any pre-launch errors", and that errors while the
+kernel runs show up only after a synchronization. This chapter's program does
+both after every launch:
+
+```cpp
+#define CUDA_CHECK_LAUNCH()                     \
+    do {                                        \
+        CUDA_CHECK(cudaGetLastError());         \
+        CUDA_CHECK(cudaDeviceSynchronize());    \
+    } while (0)
+
+kernel<<<blocks, threads>>>(args);
+CUDA_CHECK_LAUNCH();
+```
+
+The synchronize costs time, which is why some programs check it only in
+debug builds. `./bugs launch` shows the other side: a launch with 2,048
+threads per block, over the limit of 1,024, does not run, and the program
+carries on with the old contents of memory unless something checks.
+
+### Without a GPU
+
+The Numba simulator and the Triton interpreter run kernels on the CPU, in
+Python. They are not GPUs, and the differences matter for debugging:
+
+- **Numba, `NUMBA_ENABLE_CUDASIM=1`.** The simulator runs "one block at a
+  time" and spawns a Python thread for each thread of the block. Arrays are
+  NumPy arrays, so an index past the end raises an `IndexError` that names the
+  thread and block. One run of `scale_unguarded` on 300 elements stopped with
+  `tid=[161, 0, 0] ctaid=[1, 0, 0]: index 417 is out of bounds for axis 0 with
+  size 300`; which thread past the end gets there first changes from run to
+  run. Two blind
+  spots: a negative index wraps around as it does in NumPy, so `x[i - 1]` at
+  `i = 0` silently reads the last element, and Python rarely switches threads
+  in the middle of `count[0] += 1`, so `count_racy` almost always gives the
+  right count there. You can also call `pdb.set_trace()` inside a kernel; the
+  Numba guide suggests guarding it so only one thread stops.
+- **Triton, `TRITON_INTERPRET=1`.** The interpreter runs each program
+  instance in turn using NumPy. It does not check bounds: an unmasked
+  `tl.load` past the end reads whatever is there, and an unmasked `tl.store`
+  writes there. What it gives you is Python: `print` and `tl.device_print` show
+  whole blocks of offsets or masks, and `pdb` steps through the kernel line by
+  line. `triton/bugs.py` puts a guard band of known values after each buffer,
+  so a stray store shows up as a changed guard. With 1,000 elements and
+  `BLOCK = 256`, the unmasked kernel overwrites the guard and the masked one
+  does not. With 1,024 elements both pass: an unmasked kernel only breaks when
+  the size is not a multiple of the block, which is why the tests use sizes
+  like 1, 300 and 1,000.
+
+## The code
+
+Each bug sits next to its fix. The CUDA kernels are a header with no host
+code, so the tests compile them with NVRTC on a machine without `nvcc`;
+`cuda/bugs.cu` runs each pair and checks it against the CPU. The tests check
+every fixed version, and check that each bug shows up where it should: the
+unmasked Triton store hits the guard band, the Numba simulator raises
+`IndexError`, the PTX of `count_racy` has a plain load, add and store and no
+atomic, and `reverse_nosync` has no barrier.
+
+<CodeTabs
+	cuda={cuda}
+	numba={numba}
+	triton={triton}
+	titles={{ cuda: 'cuda/bugs_kernels.cuh', numba: 'numba/bugs.py', triton: 'triton/bugs.py' }}
+>
+	<div slot="triton-note">
+		Triton has no threads, so it has no thread races and no barriers to forget: each program owns its block of
+		offsets. Its common bug is the mask. `scale_unmasked_kernel` loads and stores a full block even in the last program,
+		where fewer elements are left. Run it with `TRITON_INTERPRET=1`, call `scale(variant, x, show=True)` to print the
+		offsets or the mask of each program, and compare the guard bands. On a GPU, prepend `compute-sanitizer` to the Python
+		command, as the Triton debugging guide suggests for races and memory access errors.
+	</div>
+</CodeTabs>
+
+## Where the time goes
+
+Once the kernel is right, the question is speed. Guessing which part is slow
+is how hours go into a kernel that takes 3% of the run. A workflow that avoids
+that:
+
+1. **Time the whole thing.** Wall clock or CUDA events around the part you
+   care about, so you know what you are trying to shrink.
+2. **Look at the timeline with Nsight Systems.** It shows every kernel, copy
+   and API call on one time axis. Find the kernel that takes the most total
+   time, and check what is between the kernels: copies, synchronizations, gaps
+   where the GPU waits for the CPU.
+3. **Profile that one kernel with Nsight Compute.** Start with the Speed Of
+   Light section and compare it with the kernel's place on the roofline from
+   chapter 19.
+4. **Drill into the limit it hits.** Memory tables for a memory-bound kernel,
+   pipelines for a compute-bound one, occupancy and warp stall reasons for a
+   kernel that hits neither.
+
+### Nsight Systems: the timeline
+
+```sh
+nsys profile --trace=cuda,nvtx --stats=true -o timeline ./bugs all
+nsys stats --report cuda_gpu_kern_sum timeline.nsys-rep
+```
+
+`--trace` picks the APIs to record; `cuda` covers the runtime, launches and
+copies, and `nvtx` your own ranges. `--stats=true` prints summary tables after
+the run, and `-o` names the report, which opens in the Nsight Systems GUI.
+`nsys stats` prints the same tables later; `cuda_gpu_kern_sum` is the time
+per kernel, `cuda_gpu_mem_time_sum` the time per kind of copy, and
+`cuda_api_sum` the time in each CUDA API call on the CPU.
+
+NVTX ranges put your own names on the timeline. `bugs.cu` wraps each bug in
+one:
+
+```cpp
+#include <nvtx3/nvToolsExt.h>
+
+nvtxRangePushA("race");
+run_race(n);
+nvtxRangePop();
+```
+
+NVTX 3 is header-only; the Nsight Systems guide asks for `-ldl` when linking.
+On the timeline, the range `race` then spans the launches, copies and checks
+of that bug, and `nsys stats` adds an `nvtx_sum` table. Nsight Systems shows
+the whole program but nothing inside a kernel: for that you need Nsight
+Compute.
+
+### Nsight Compute: one kernel
+
+```sh
+ncu --kernel-name regex:count_ --launch-count 1 --set full -o count ./bugs race
+ncu --import count.ncu-rep --page details
+```
+
+`--kernel-name` (short `-k`) picks the kernels to profile; `regex:` makes it a
+partial match, so `regex:count_` matches both counters. `--launch-count`
+(`-c`) stops after that many matching launches. `--set full` collects every
+section; with no `--set`, `--section` or `--metrics`, `ncu` collects the
+smaller `basic` set. `--import` with `--page details` prints a saved report.
+
+To collect a few sections instead of all of them:
+
+```sh
+ncu --section SpeedOfLight --section MemoryWorkloadAnalysis \
+    --section Occupancy --section WarpStateStats --section SourceCounters ./bugs race
+```
+
+| Section identifier | Display name | Question it answers |
+|---|---|---|
+| `SpeedOfLight` | GPU Speed Of Light Throughput | How close does the kernel come to the peak of compute and of memory? |
+| `SpeedOfLight_RooflineChart` | GPU Speed Of Light Roofline Chart | Where does the kernel sit on the roofline (chapter 19)? |
+| `MemoryWorkloadAnalysis` and `_Tables` | Memory Workload Analysis | How many bytes and requests at each level: L1, shared memory, L2, DRAM? |
+| `ComputeWorkloadAnalysis` | Compute Workload Analysis | Which pipelines are busy, and how many instructions per clock? |
+| `LaunchStats` | Launch Statistics | Grid, block, registers and shared memory per block |
+| `Occupancy` | Occupancy | Theoretical and achieved active warps, and what limits them (chapter 5) |
+| `SchedulerStats` | Scheduler Statistics | How often each scheduler had a ready warp to issue (chapter 4) |
+| `WarpStateStats` | Warp State Statistics | Why warps were not issuing: the stall reasons |
+| `SourceCounters` | Source Counters | Sampled stalls and other counters per line of source or SASS |
+
+**Speed Of Light** first. The Profiling Guide describes it as the throughput
+of the GPU's compute and memory resources, each "the achieved percentage of
+utilization with respect to the theoretical maximum". Read it with the
+roofline of chapter 19 in mind:
+
+- **Memory throughput near the top, compute low.** The kernel is
+  memory-bound. Go to Memory Workload Analysis and ask whether every byte is
+  needed: sectors per request for coalescing (chapter 6), bank conflicts
+  (chapter 8), traffic that tiling or fusion would remove (chapters 7, 12).
+- **Compute near the top.** The kernel is compute-bound. Compute Workload
+  Analysis shows which pipeline is full; the fix is fewer or cheaper
+  instructions, or tensor cores.
+- **Both low.** Neither limit is the problem: the kernel is waiting. Check the
+  launch (are there enough blocks to fill the GPU?), Occupancy, and the warp
+  stall reasons.
+
+**Warp stall reasons** say why a warp could not issue. The guide's
+description of Long Scoreboard, for example, is waiting "for a scoreboard
+dependency on a L1TEX (local, global, surface, texture) operation", that is,
+on a load from memory, and Barrier is waiting "for sibling warps at a CTA
+barrier". Two cautions from the same page: selected and not selected "are
+scheduler states, not true stalls", and a stall is counted on the
+instruction that waits for the data, "not the producer". With `-lineinfo`,
+Source Counters puts these samples next to your source lines, which is the
+closest thing to a line-by-line profile a GPU has.
+
+Metric names follow the Profiling Guide's scheme: a counter such as
+`dram__bytes_read` (unit, two underscores, quantity and qualifiers), then a
+rollup (`.sum`, `.avg`, `.min`, `.max`), then optionally a submetric such as
+`.pct_of_peak_sustained_elapsed`. The ones this course uses most:
+
+| Metric | What it counts | Chapter |
+|---|---|---|
+| `gpu__time_duration.sum` | Kernel duration | all |
+| `dram__bytes_read.sum`, `dram__bytes_write.sum` | Bytes read from and written to device memory | 12, 19 |
+| `dram__throughput.avg.pct_of_peak_sustained_elapsed` | DRAM throughput in percent of peak; drives the DRAM row of Speed Of Light | 19 |
+| `sm__throughput.avg.pct_of_peak_sustained_elapsed` | SM throughput in percent of peak | 19 |
+| `l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum`, `l1tex__t_requests_pipe_lsu_mem_global_op_ld.sum` | Sectors and requests of global loads; their ratio is sectors per request | 6 |
+| `l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum` | Bank conflicts on shared memory loads | 8, 11 |
+| `sm__warps_active.avg.pct_of_peak_sustained_active` | Achieved occupancy | 5 |
+| `sm__maximum_warps_per_active_cycle_pct` | Theoretical occupancy | 5 |
+| `smsp__inst_executed.sum`, `smsp__thread_inst_executed.sum` | Warp instructions and thread instructions executed; their ratio is the active lanes per instruction | 4, 13 |
+
+```sh
+ncu --kernel-name regex:count_ \
+    --metrics gpu__time_duration.sum,dram__bytes_read.sum,sm__warps_active.avg.pct_of_peak_sustained_active \
+    ./bugs race
+```
+
+The names come from the Profiling Guide, its release notes, and the
+metric mapping table in the Nsight Compute 2025.1 CLI guide, which lists
+the replacement for each old `nvprof` metric (for example
+`achieved_occupancy` became `sm__warps_active.avg.pct_of_peak_sustained_active`).
+The current guide points to that older page. `ncu --query-metrics` lists the
+base names your GPU supports, and `--query-metrics-mode suffix --metrics
+<name>` the full names built from one.
+
+### Why Nsight Compute's numbers differ from your timer
+
+Nsight Compute replays a kernel several times to collect all the counters,
+and saves and restores the memory it writes between passes. By default it
+also locks the clocks ("Nsight Compute locks SM clocks by default") and
+flushes the caches between passes. Its kernel times therefore differ from a
+normal run, and the Profiling Guide warns that host timers or CUDA events
+around a profiled kernel measure the tool's overhead too. Compare kernels
+with `gpu__time_duration` from the same tool, and measure end-to-end time
+without the profiler. Nsight Systems records one normal run, without
+replays, clock locking or cache flushes, so its times are closer to what the
+program sees.
+
+## Measure it yourself
+
+On a GPU, from `kernels/ch22-profiling`:
+
+```sh
+make -C cuda run
+make -C cuda sanitize
+make -C cuda nsys
+make -C cuda ncu
+python numba/bugs.py
+python triton/bugs.py
+```
+
+Things to look for:
+
+- Which buggy versions print `WRONG` without a tool, and which print `OK`
+  until a tool runs. Run `./cuda/bugs race` a few times and see whether the
+  racy count changes.
+- The racecheck report for `count_racy`: which lines it names, and how many
+  hazards it counts.
+- What memcheck says about `./bugs oob` with and without `--padding 32`.
+- In the `nsys` summary, how much of the run is kernels and how much is
+  copies and API calls.
+- In Nsight Compute, Speed Of Light for `count_racy` and `count_atomic`, and
+  whether the atomic version stalls on something the racy one does not.
+
+## Exercises
+
+**1. How low can it go?** In the model, 3 threads each run `count += 1` once.
+List every final value of `count` that some interleaving can produce. Can it
+end at 0?
+
+<details>
+<summary>Answer</summary>
+
+1, 2 or 3. The model's tests try all 1,680 orders of 3 threads with 3
+instructions each and find exactly these. It cannot end at 0: the last store
+writes some thread's register, and every register holds a loaded value plus
+1, at least 1. It can end at 1 in more than one way. "Every thread loads
+first" is one. Another: thread 0 loads 0, threads 1 and 2 run to completion
+and leave 2, and then thread 0 stores its stale 1 over the 2. Try that order
+in the custom mode: the count goes down.
+
+</details>
+
+**2. One warp, one count.** `count_racy` runs on a block of 256 threads, 8
+warps, and every element is positive. Assume each warp runs converged: its 32
+threads execute each instruction together. What is the largest and the
+smallest count the block can report?
+
+<details>
+<summary>Answer</summary>
+
+In one warp, all 32 threads load the same value, add 1 and store the same
+value, so the warp adds 1, not 32. If the 8 warps run their load, add and
+store without overlapping, the block counts 8. If they all load before any of
+them stores, it counts 1. So between 1 and 8, against the right answer of
+256. So expect the racy kernel in `bugs.cu` to miss most of the count, not a
+few elements. Real warps can also diverge, which changes the details but not
+the conclusion.
+
+</details>
+
+**3. Fix the bug.** Someone shrinks `BLOCK` to 32 and `reverse_nosync`, the
+kernel without `__syncthreads()`, gives the right answer in every test. Is
+the bug gone?
+
+<details>
+<summary>Answer</summary>
+
+No. With one warp per block, the store to `tile` and the load from it are
+two instructions of the same warp, and a converged warp finishes the store
+for all its threads before any of them loads, so the test passes. Nothing
+guarantees the warp stays converged. The Compute Sanitizer guide's
+`warp_error` sample is this case: racecheck reports it as a warning,
+"(Warp Level Programming) Potential RAW hazard", and the guide's fix is
+`__syncwarp()` between the write and the read. Keep the barrier: `__syncwarp()`
+for one warp, `__syncthreads()` for a block of several.
+
+</details>
+
+**4. Which tool?** For each symptom, pick the first tool to run.
+(a) A shared memory reduction gives a slightly different sum on every run.
+(b) A kernel is right for `n = 1024` and wrong, or crashing, for `n = 1000`.
+(c) After one kernel, every CUDA call in the program fails with the same error.
+(d) The kernel takes 2 ms in Nsight Compute, but the program takes 300 ms.
+
+<details>
+<summary>Answer</summary>
+
+(a) racecheck: results that change from run to run point to a race, and the
+reduction shares memory. Floating point addition in a different order can
+also change the last bits, so check for a race first, then the order.
+(b) memcheck, ideally with `--padding 32`: a size that is not a multiple of
+the block exposes a missing bounds check. (c) A sticky error such as an
+illegal address: check every launch with `CUDA_CHECK_LAUNCH` to find the
+first kernel that failed, then run memcheck on it. (d) Nsight Systems: the
+time is outside that kernel, in copies, other kernels, synchronization or
+the CPU, and only the timeline shows which.
+
+</details>
+
+**5. Read the Speed Of Light.** Kernel A shows memory throughput at 88% and
+compute at 15%. Kernel B shows 12% and 9%. What do you look at next for each?
+
+<details>
+<summary>Answer</summary>
+
+A is memory-bound: the memory system is nearly as busy as it can be, so the
+only way to speed it up is to move fewer bytes. Look at Memory Workload
+Analysis for wasted traffic: sectors per request above the ideal (chapter 6),
+bank conflicts (chapter 8), data loaded twice that shared memory tiling would
+reuse (chapter 7), or intermediate arrays that fusion would remove (chapter
+12). B is limited by neither: the kernel waits. Look at Launch Statistics for
+too few blocks, at Occupancy for too few warps per SM, and at Warp State
+Statistics for the stall reason that dominates; long scoreboard stalls with
+low memory throughput mean too few loads in flight to hide the latency.
+
+</details>
+
+## Further reading
+
+- [Compute Sanitizer documentation](https://docs.nvidia.com/compute-sanitizer/ComputeSanitizer/index.html): the four tools, their options, and walk-throughs of `memcheck_demo`, `block_error`, `warp_error`, `memset_error` and two synccheck samples. The samples are in the [compute-sanitizer-samples](https://github.com/NVIDIA/compute-sanitizer-samples) repository.
+- [Nsight Compute Profiling Guide](https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html): [sets and sections](https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#sections-and-rules), [replay](https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#replay) and [overhead](https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#overhead), [metrics structure](https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#metrics-structure), [warp stall reasons](https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#warp-stall-reasons) and [roofline charts](https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#roofline-charts).
+- [Nsight Compute CLI](https://docs.nvidia.com/nsight-compute/NsightComputeCli/index.html), for every `ncu` option, and the [nvprof metric mapping table](https://docs.nvidia.com/nsight-compute/2025.1/NsightComputeCli/index.html#metric-comparison) in the 2025.1 version of the same guide.
+- [Nsight Systems User Guide](https://docs.nvidia.com/nsight-systems/UserGuide/index.html): the `nsys profile` options, `nsys stats` reports, and NVTX.
+- [CUDA C++ Programming Guide 12.4: error checking](https://docs.nvidia.com/cuda/archive/12.4.0/cuda-c-programming-guide/index.html#error-checking) and [synchronization functions](https://docs.nvidia.com/cuda/archive/12.4.0/cuda-c-programming-guide/index.html#synchronization-functions), for when `__syncthreads()` in conditional code is allowed.
+- [Triton: debugging](https://triton-lang.org/main/programming-guide/chapter-3/debugging.html), on the interpreter, `device_print`, `pdb` and running Triton under `compute-sanitizer`.
+- [Numba CUDA: the simulator](https://nvidia.github.io/numba-cuda/user/simulator.html), including how to stop one thread in `pdb`.
