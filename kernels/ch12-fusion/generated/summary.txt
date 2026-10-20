@@ -1,0 +1,7 @@
+NVRTC 13.4, compute_80. Per kernel:
+
+kernel   ld.global st.global fma.rn.f32
+scale            1         1          0
+add              2         1          0
+relu             1         1          0
+fused            2         1          1
