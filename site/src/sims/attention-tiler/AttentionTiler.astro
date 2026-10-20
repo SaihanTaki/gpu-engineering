@@ -1,0 +1,204 @@
+---
+import SimFrame from '@components/SimFrame.astro';
+import { BLOCK_OPTIONS, CODE, D_OPTIONS, DEFAULT_CONFIG, N_OPTIONS, type Config } from './model';
+
+type Props = Partial<Config>;
+const config: Config = { ...DEFAULT_CONFIG, ...Astro.props };
+const select = (name: keyof Config, label: string, options: readonly number[]) => ({ name, label, options });
+const fields = [
+	select('n', 'Sequence length n', N_OPTIONS),
+	select('d', 'Head dimension d', D_OPTIONS),
+	select('br', 'Q block rows Br', BLOCK_OPTIONS),
+	select('bc', 'K/V block rows Bc', BLOCK_OPTIONS),
+];
+---
+
+<SimFrame title="Attention tiler: FlashAttention-2 forward, tile by tile" sim="attention-tiler" code={[{ name: 'triton', code: CODE, lang: 'python' }]} config={config}>
+	<Fragment slot="params">
+		{
+			fields.map((f) => (
+				<label class="sim-field">
+					<span>{f.label}</span>
+					<select name={f.name}>
+						{f.options.map((o) => (
+							<option value={o} selected={o === config[f.name]}>
+								{o}
+							</option>
+						))}
+					</select>
+				</label>
+			))
+		}
+		<label class="sim-check">
+			<input type="checkbox" name="causal" checked={config.causal} />
+			<span>Causal mask</span>
+		</label>
+	</Fragment>
+
+	<div class="sim-canvas" data-canvas>
+		<svg role="img" aria-label="Q on the left, K transposed above, V transposed below and O on the right of the score matrix S, drawn as tiles; the tiles on chip in the current step are highlighted; two bars compare HBM traffic of naive and flash attention"></svg>
+	</div>
+	<ul class="at-legend" aria-label="Legend">
+		<li><span class="at-swatch is-current"></span>tile computed this step</li>
+		<li><span class="at-swatch is-sram"></span>on chip this step</li>
+		<li><span class="at-swatch is-done"></span>score tile done, or O row written</li>
+		<li><span class="at-swatch is-acc"></span>O rows still accumulating</li>
+		<li><span class="at-swatch is-masked"></span>masked (crossed: tile skipped)</li>
+		<li><span class="at-swatch is-read"></span>bytes read</li>
+		<li><span class="at-swatch is-write"></span>bytes written</li>
+	</ul>
+	<div class="at-rows" data-rows></div>
+	<ul class="at-totals" data-totals aria-label="Counters"></ul>
+
+	<Fragment slot="caption">
+		Model, not a measurement. Q, K and V hold small made-up numbers and every value shown is computed: the final O equals
+		softmax(QKᵀ / √d) V. HBM traffic counts FP16 elements (2 bytes) moved between HBM and the chip. The naive count is
+		Algorithm 0 of Dao et al. 2022 with each matrix multiply reading its inputs once. Neither count includes the L2 cache,
+		which on a real GPU serves many of the repeated K and V reads. Q blocks run one after another here; on a GPU each is
+		its own program and they run in parallel.
+	</Fragment>
+</SimFrame>
+
+<script>
+	import { Stepper } from '@sim-core/stepper';
+	import { bindControls } from '@sim-core/controls';
+	import { highlightLines } from '@sim-core/code-sync';
+	import {
+		describe,
+		flashTraffic,
+		fmtBytes,
+		inputs,
+		linesAt,
+		naiveTraffic,
+		num,
+		onChip,
+		REAL_CONFIG,
+		referenceAttention,
+		simulate,
+		type Config,
+	} from './model';
+	import { render } from './view';
+
+	function cellRow(tag: 'th' | 'td', cells: string[]) {
+		const tr = document.createElement('tr');
+		for (const c of cells) {
+			const el = document.createElement(tag);
+			if (tag === 'th') el.scope = 'col';
+			el.textContent = c;
+			tr.append(el);
+		}
+		return tr;
+	}
+
+	function refOf(c: Config) {
+		const { q, k, v } = inputs(c.n, c.d);
+		return referenceAttention(q, k, v, c.causal);
+	}
+
+	function mount(frame: HTMLElement) {
+		const config: Config = JSON.parse(frame.dataset.config!);
+		let run = simulate(config);
+		let ref = refOf(config);
+		const stepper = new Stepper(run.frames.length - 1, 1100);
+		const canvas = frame.querySelector<HTMLElement>('[data-canvas]')!;
+		const svgEl = canvas.querySelector('svg')!;
+		const rowsEl = frame.querySelector<HTMLElement>('[data-rows]')!;
+		const totalsEl = frame.querySelector<HTMLElement>('[data-totals]')!;
+		const code = frame.querySelector('[data-code-variant]');
+
+		const drawRows = (step: number) => {
+			const f = run.frames[step];
+			if (f.step.kind === 'start') {
+				rowsEl.replaceChildren(Object.assign(document.createElement('p'), { textContent: 'Row statistics m and l appear here once a tile runs.' }));
+				return;
+			}
+			const write = f.step.kind === 'write';
+			const table = document.createElement('table');
+			const cap = document.createElement('caption');
+			cap.textContent = write
+				? `Q block ${f.step.i}: final values, O = acc / l (column 0)`
+				: `Q block ${f.step.i}, after tile S(${f.step.i}, ${f.step.kind === 'tile' ? f.step.j : ''}): running row statistics`;
+			const head = write ? ['row', 'm', 'l', 'O[row, 0]', 'reference'] : ['row', 'm', 'l', 'rescale', 'acc[row, 0]'];
+			const body = document.createElement('tbody');
+			for (const r of f.rows) {
+				body.append(
+					cellRow(
+						'td',
+						write
+							? [String(r.row), num(r.mNew), num(r.lNew), num(r.out!), num(ref[r.row][0])]
+							: [
+									String(r.row),
+									`${num(r.mOld)} → ${num(r.mNew)}`,
+									`${num(r.lOld)} → ${num(r.lNew)}`,
+									r.mOld === -Infinity ? 'first' : `x ${num(r.alpha)}`,
+									`${num(r.accOld)} → ${num(r.accNew)}`,
+								],
+					),
+				);
+			}
+			const thead = document.createElement('thead');
+			thead.append(cellRow('th', head));
+			table.append(cap, thead, body);
+			rowsEl.replaceChildren(table);
+		};
+
+		const item = (label: string, rest: string) => {
+			const li = document.createElement('li');
+			const b = document.createElement('strong');
+			b.textContent = `${label}:`;
+			li.append(b, ` ${rest}`);
+			return li;
+		};
+
+		const draw = () => {
+			const step = stepper.step;
+			render(svgEl, config, run, step, Math.max(260, canvas.clientWidth));
+			highlightLines(code, linesAt(run.frames[step].step));
+			drawRows(step);
+			const f = run.frames[step];
+			const nv = naiveTraffic(config);
+			const chip = onChip(config);
+			const real = { ...REAL_CONFIG, causal: config.causal };
+			const rf = flashTraffic(real);
+			const rn = naiveTraffic(real);
+			totalsEl.replaceChildren(
+				item('Flash so far', `${fmtBytes(f.read)} read and ${fmtBytes(f.written)} written to HBM. S never goes to HBM.`),
+				item(
+					'Naive, whole pass',
+					`${fmtBytes(nv.read)} read and ${fmtBytes(nv.written)} written, including S and P (${fmtBytes(nv.scoreBytes)} together) written to HBM and read back.`,
+				),
+				item(
+					'On chip per Q block',
+					`Q, K, V tiles ${fmtBytes(chip.tiles)} (FP16) + score tile ${fmtBytes(chip.scores)} + acc ${fmtBytes(chip.acc)} + m and l ${fmtBytes(chip.stats)} (FP32) = ${fmtBytes(chip.total)}.`,
+				),
+				item(
+					`Same formulas at n = 4,096, d = 64, Br = 128, Bc = 64${config.causal ? ', causal' : ''}`,
+					`naive ${fmtBytes(rn.read + rn.written)}, flash ${fmtBytes(rf.read + rf.written)} per head.`,
+				),
+			);
+		};
+
+		const sync = bindControls(frame, stepper, (step) => describe(config, run, step));
+
+		frame.querySelector('.sim-params')!.addEventListener('change', () => {
+			const field = (name: string) => frame.querySelector<HTMLInputElement>(`[name="${name}"]`)!;
+			config.n = Number(field('n').value);
+			config.d = Number(field('d').value);
+			config.br = Number(field('br').value);
+			config.bc = Number(field('bc').value);
+			config.causal = field('causal').checked;
+			run = simulate(config);
+			ref = refOf(config);
+			// setLast resets to step 0 and notifies listeners, which redraws and updates the status.
+			stepper.setLast(run.frames.length - 1);
+			sync(stepper.step);
+			draw();
+		});
+
+		stepper.onChange(draw);
+		new ResizeObserver(draw).observe(canvas);
+		draw();
+	}
+
+	document.querySelectorAll<HTMLElement>('[data-sim="attention-tiler"]').forEach(mount);
+</script>
