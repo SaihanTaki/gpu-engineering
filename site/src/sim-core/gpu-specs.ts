@@ -23,6 +23,9 @@ export interface GpuSpec {
 	memoryGb: number;
 	memoryGbPerS: number;
 	maxWarpsPerSm: number;
+	pcieGen: 3 | 4 | 5;
+	/** Peak PCIe x16 bandwidth in one direction, GB/s. */
+	pcieGbPerS: number;
 	sources: string[];
 }
 
@@ -51,6 +54,9 @@ export const GPUS: GpuSpec[] = [
 		// Product datasheet figure; the Turing whitepaper lists 320 GB/s.
 		memoryGbPerS: 300,
 		maxWarpsPerSm: 32,
+		pcieGen: 3,
+		// Datasheet: x16 PCIe Gen3, 32 GB/s. One direction of Gen3 x16 is 8 GT/s x 16 x 128/130 / 8 = 15.75 GB/s, so 32 sums both; we use half.
+		pcieGbPerS: 16,
 		sources: [
 			'https://images.nvidia.com/aem-dam/en-zz/Solutions/design-visualization/technologies/turing-architecture/NVIDIA-Turing-Architecture-Whitepaper.pdf',
 			'https://www.nvidia.com/content/dam/en-zz/Solutions/Data-Center/tesla-t4/t4-tensor-core-datasheet-951643.pdf',
@@ -80,6 +86,9 @@ export const GPUS: GpuSpec[] = [
 		memoryGb: 80,
 		memoryGbPerS: 2039,
 		maxWarpsPerSm: 64,
+		pcieGen: 4,
+		// Datasheet: PCIe Gen4 64 GB/s, both directions summed (Gen4 x16 is 31.5 GB/s each way); we use half.
+		pcieGbPerS: 32,
 		sources: [
 			'https://images.nvidia.com/aem-dam/en-zz/Solutions/data-center/nvidia-ampere-architecture-whitepaper.pdf',
 			'https://www.nvidia.com/content/dam/en-zz/Solutions/Data-Center/a100/pdf/nvidia-a100-datasheet-us-nvidia-1758950-r4-web.pdf',
@@ -110,6 +119,9 @@ export const GPUS: GpuSpec[] = [
 		// Product page figure; the pre-launch Hopper whitepaper lists 3000 GB/s.
 		memoryGbPerS: 3350,
 		maxWarpsPerSm: 64,
+		pcieGen: 5,
+		// Product page: PCIe Gen5 128 GB/s, both directions summed (Gen5 x16 is 63 GB/s each way); we use half.
+		pcieGbPerS: 64,
 		sources: [
 			'https://developer.nvidia.com/blog/nvidia-hopper-architecture-in-depth/',
 			'https://www.nvidia.com/en-us/data-center/h100/',
