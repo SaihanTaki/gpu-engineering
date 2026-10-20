@@ -109,6 +109,8 @@ def test_cuda_kernel_compiles_nvrtc(arch):
     assert not re.search(r"\b(w?mma|wgmma)\.", ptx)
     # S is never stored: the only global stores are the output rows.
     assert ptx.count("st.global") == 64
+    # With d fixed and the loops unrolled, q, acc and s stay in registers, not local memory.
+    assert ".local" not in ptx
 
 
 @pytest.mark.skipif(shutil.which("nvcc") is None, reason="nvcc not on PATH")
