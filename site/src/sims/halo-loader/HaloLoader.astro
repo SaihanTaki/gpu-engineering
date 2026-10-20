@@ -1,0 +1,121 @@
+---
+import SimFrame from '@components/SimFrame.astro';
+import { CODE, POSITIONS, RADIUS_RANGE, TILE_RANGE, type Position } from './model';
+
+interface Props {
+	tile?: number;
+	radius?: number;
+	position?: Position;
+}
+
+const { tile = 8, radius = 2, position = 'inside' } = Astro.props;
+const label: Record<Position, string> = {
+	inside: 'Inside the image',
+	corner: 'Top-left corner of the image',
+};
+---
+
+<SimFrame
+	title="Halo loader: one block of a 2D convolution"
+	sim="halo-loader"
+	code={[{ name: 'tiled', code: CODE, lang: 'cpp' }]}
+	config={{ tile, radius, position }}
+>
+	<Fragment slot="params">
+		<label class="sim-field">
+			<span>Tile size TILE <output data-out="tile">{tile} x {tile}</output></span>
+			<input type="range" name="tile" min={TILE_RANGE.min} max={TILE_RANGE.max} step={TILE_RANGE.step} value={tile} />
+		</label>
+		<label class="sim-field">
+			<span>Filter radius R <output data-out="radius">{radius} ({2 * radius + 1} x {2 * radius + 1} filter)</output></span>
+			<input type="range" name="radius" min={RADIUS_RANGE.min} max={RADIUS_RANGE.max} step={RADIUS_RANGE.step} value={radius} />
+		</label>
+		<label class="sim-field">
+			<span>Block position</span>
+			<select name="position">
+				{POSITIONS.map((p) => <option value={p} selected={p === position}>{label[p]}</option>)}
+			</select>
+		</label>
+	</Fragment>
+
+	<p class="sim-launch" data-stats></p>
+	<div class="sim-canvas" data-canvas>
+		<svg role="img" aria-label="The block's input tile in shared memory: its output tile, the halo around it and any padding outside the image, with bars comparing global loads per output for the naive and the tiled kernel"></svg>
+	</div>
+	<ul class="hl-legend" aria-label="Legend">
+		<li><span class="hl-swatch is-own" aria-hidden="true"></span>loaded pixel of the block's own output tile (heavy outline)</li>
+		<li><span class="hl-swatch is-halo" aria-hidden="true"></span>loaded halo pixel, needed but not computed by this block</li>
+		<li><span class="hl-swatch is-current" aria-hidden="true"></span>loaded in this round</li>
+		<li><span class="hl-swatch is-out" aria-hidden="true"></span>outside the image: set to 0, no load</li>
+	</ul>
+
+	<Fragment slot="caption">
+		One step is one round of the load loop, run by every thread of the block together. Loads count the element loads
+		the kernel issues; the L1 and L2 caches serve many of the naive kernel's repeated loads, and the model leaves them
+		out. Numbers inside cells appear when the cells are large enough to hold them. Blocks of more than 1,024 threads
+		(TILE above 32) cannot be launched, so the slider stops there.
+	</Fragment>
+</SimFrame>
+
+<script>
+	import { Stepper } from '@sim-core/stepper';
+	import { bindControls } from '@sim-core/controls';
+	import { highlightLines, showVariant } from '@sim-core/code-sync';
+	import {
+		describe,
+		filterBytes,
+		fix,
+		haloCells,
+		lastStep,
+		overhead,
+		pct,
+		sharedBytes,
+		side,
+		stateAt,
+		totals,
+		type Config,
+	} from './model';
+	import { render } from './view';
+
+	const fmt = (x: number) => x.toLocaleString('en-US');
+
+	function mount(frame: HTMLElement) {
+		const config: Config = JSON.parse(frame.dataset.config!);
+		const stepper = new Stepper(lastStep(config), 900);
+		const canvas = frame.querySelector<HTMLElement>('[data-canvas]')!;
+		const svgEl = canvas.querySelector('svg')!;
+		const stats = frame.querySelector<HTMLElement>('[data-stats]')!;
+		const field = <T extends HTMLElement>(name: string) => frame.querySelector<T>(`[name="${name}"]`)!;
+		const out = (name: string) => frame.querySelector<HTMLElement>(`[data-out="${name}"]`)!;
+		const code = showVariant(frame, 'tiled');
+
+		const draw = () => {
+			const st = stateAt(config, stepper.step);
+			render(svgEl, config, st, Math.max(260, canvas.clientWidth));
+			highlightLines(code, st.cur.lines);
+			const t = totals(config);
+			const s = side(config);
+			stats.textContent =
+				`Input tile ${s} x ${s} = ${fmt(s * s)} slots: ${fmt(config.tile ** 2)} outputs and ${fmt(haloCells(config))} halo, ` +
+				`overhead ${pct(overhead(config))}. Global loads per output: ${fix(t.tiledPerOutput)} tiled, ${fix(t.naivePerOutput)} naive ` +
+				`(${fix(t.naive / t.tiled, 1)} times fewer). Shared memory ${fmt(sharedBytes(config))} bytes, filter ${fmt(filterBytes(config))} bytes of constant memory.`;
+		};
+
+		frame.querySelector('.sim-params')!.addEventListener('input', () => {
+			config.tile = Number(field<HTMLInputElement>('tile').value);
+			config.radius = Number(field<HTMLInputElement>('radius').value);
+			config.position = field<HTMLSelectElement>('position').value as Config['position'];
+			const k = 2 * config.radius + 1;
+			out('tile').textContent = `${config.tile} x ${config.tile}`;
+			out('radius').textContent = `${config.radius} (${k} x ${k} filter)`;
+			stepper.setLast(lastStep(config));
+		});
+
+		bindControls(frame, stepper, (step) => describe(config, step));
+		stepper.onChange(draw);
+		new ResizeObserver(draw).observe(canvas);
+		draw();
+	}
+
+	document.querySelectorAll<HTMLElement>('[data-sim="halo-loader"]').forEach(mount);
+</script>
