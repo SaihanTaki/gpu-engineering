@@ -1,0 +1,386 @@
+---
+title: 18. Sparse matrices
+description: How COO, CSR and ELL store a sparse matrix, three SpMV kernels that give rows to threads in different ways, and why uneven rows decide which one is fast.
+sidebar:
+  order: 18
+banner:
+  content: Draft chapter. If something is wrong or unclear, use the edit link at the bottom of the page.
+---
+
+import SparseFormats from '@sims/sparse-formats/SparseFormats.astro';
+import CodeTabs from '@components/CodeTabs.astro';
+import { ell, maxLen, N, nnz, pct, totals, WARP } from '@sims/sparse-formats/model';
+import cuda from '@kernels/ch18-sparse/cuda/spmv_kernels.cuh?raw';
+import numba from '@kernels/ch18-sparse/numba/spmv.py?raw';
+import triton from '@kernels/ch18-sparse/triton/spmv.py?raw';
+
+export const pl = { scalar: totals('scalar', 'power-law'), vector: totals('vector', 'power-law'), ell: totals('ell', 'power-law') };
+export const bd = { scalar: totals('scalar', 'banded'), vector: totals('vector', 'banded'), ell: totals('ell', 'banded') };
+export const plNnz = nnz('power-law');
+export const plWidth = ell('power-law').width;
+export const storage = { coo: 3 * plNnz, csr: 2 * plNnz + N + 1, ell: 2 * N * plWidth };
+
+A road network, a social graph or the stiffness matrix of a finite-element
+model is a matrix with millions of rows in which almost every entry is zero.
+A row of the stiffness matrix couples one mesh point to its handful of
+neighbours, so it has a few dozen nonzeros out of millions of columns. Stored
+densely, a million by a million floats is 4 TB. Stored as a list of nonzeros,
+it fits in a few hundred MB.
+
+The operation done most on such a matrix is the sparse matrix-vector product,
+SpMV: `y = A x`. Iterative solvers such as conjugate gradients spend most of
+their time in it, and so does PageRank. On a GPU the question is how to split
+the work. Give each thread a row, and a graph where one row has a million
+nonzeros and the rest have three keeps one thread busy while thousands wait.
+This chapter shows three ways to store the matrix, three ways to give out the
+rows, and how to see which one a given matrix needs.
+
+## Three formats
+
+Bell and Garland's report on SpMV in CUDA uses this 4 x 4 matrix as its running
+example, with 9 nonzeros:
+
+```text
+    | 1 7 0 0 |
+A = | 0 2 8 0 |
+    | 5 0 3 9 |
+    | 0 6 0 4 |
+```
+
+**COO** (coordinate) stores three arrays of length nnz, the number of
+nonzeros: the row, the column and the value of each one. Sorted by row:
+
+```text
+row = [0 0 1 1 2 2 2 3 3]
+col = [0 1 1 2 0 2 3 1 3]
+val = [1 7 2 8 5 3 9 6 4]
+```
+
+**CSR** (compressed sparse row) keeps `col` and `val` as they are and replaces
+`row` with `row_ptr`, one entry per row plus one. Row `r` is entries
+`row_ptr[r]` to `row_ptr[r + 1] - 1`, and its length is
+`row_ptr[r + 1] - row_ptr[r]`:
+
+```text
+row_ptr = [0 2 4 7 9]
+col     = [0 1 1 2 0 2 3 1 3]
+val     = [1 7 2 8 5 3 9 6 4]
+```
+
+**ELL** (ELLPACK) pads every row to the length of the longest, here 3, and
+stores the result as two dense `rows x width` arrays. The `*` slots are
+padding: column 0 and value 0 in the kernels below, so they add nothing.
+
+```text
+col = | 0 1 * |    val = | 1 7 * |
+      | 1 2 * |          | 2 8 * |
+      | 0 2 3 |          | 5 3 9 |
+      | 1 3 * |          | 6 4 * |
+```
+
+ELL arrays are stored column-major: slot 0 of every row, then slot 1 of every
+row. Slot `k` of row `r` is at `k * rows + r`. The reason is in the kernel
+below.
+
+The storage cost differs. COO needs 3 x nnz entries, CSR 2 x nnz + rows + 1,
+and ELL 2 x rows x width. ELL is the most compact when all rows have about
+the same length, because it needs no row array, and the worst when one row is
+much longer than the others.
+
+## Why SpMV is slow
+
+Each nonzero is used once: one multiply and one add, 2 flops, for at least 8
+bytes of `col` and `val` read from memory. That is at most 0.25 flops per
+byte before `x`, `y` and `row_ptr` are counted, far below what any GPU can
+compute per byte it reads (chapter 19 puts a number on this). SpMV is limited
+by memory, so the kernels below differ in how well they use each 32-byte
+sector they read (chapter 6) and in how many threads sit idle (chapter 4).
+
+## Three kernels
+
+### CSR scalar: one thread per row
+
+```cpp
+int row = blockIdx.x * blockDim.x + threadIdx.x;
+if (row < rows) {
+    float sum = 0.0f;
+    for (int i = row_ptr[row]; i < row_ptr[row + 1]; ++i)
+        sum += val[i] * x[col[i]];
+    y[row] = sum;
+}
+```
+
+This is the CPU loop with the outer loop turned into threads. It has two
+problems.
+
+- **Imbalance.** The 32 threads of a warp run the loop together. A warp is
+  done when its longest row is done; threads with short rows are masked off
+  and wait. Bell and Garland: "Matrices whose distribution of nonzeros per row
+  follows a power law distribution are particularly troublesome for the
+  scalar kernel."
+- **Scattered reads.** At iteration `j`, thread `r` reads `val[row_ptr[r] + j]`.
+  Neighbouring threads read entries a whole row apart, so for rows longer than
+  a few entries each thread's read lands in its own sector.
+
+### CSR vector: one warp per row
+
+```cpp
+int lane = threadIdx.x % 32;
+int row = (blockIdx.x * blockDim.x + threadIdx.x) / 32;
+if (row >= rows) return;
+float sum = 0.0f;
+for (int i = row_ptr[row] + lane; i < row_ptr[row + 1]; i += 32)
+    sum += val[i] * x[col[i]];
+for (int offset = 16; offset > 0; offset /= 2)
+    sum += __shfl_down_sync(0xffffffff, sum, offset);
+if (lane == 0) y[row] = sum;
+```
+
+Now the 32 lanes walk one row together, lane `l` taking entries `l`, `l + 32`,
+`l + 64`, and so on. Neighbouring lanes read neighbouring entries, so a full
+pass reads 128 contiguous bytes. Each lane ends with a partial sum, and five
+`__shfl_down_sync` steps add them up: after the step with offset 16, lane `l`
+holds its own sum plus lane `l + 16`'s, and after offset 1, lane 0 holds the
+row total. Chapter 13 covers this reduction; here it is just the last five
+steps of each row.
+
+The cost moves to the other end. A row with 3 nonzeros still occupies 32
+lanes, so 29 of them do nothing in the loop, and every row pays the 5
+shuffle steps. Bell and Garland: "efficient execution of the vector kernel
+demands that matrix rows contain a number of nonzeros greater than the warp
+size (32)."
+
+The early return is safe because `row` is the same for all 32 lanes, so whole
+warps leave together and every lane that reaches the shuffle has all 31
+others with it. Exercise 3 breaks this.
+
+### ELL: one thread per row, padded
+
+```cpp
+int row = blockIdx.x * blockDim.x + threadIdx.x;
+if (row < rows) {
+    float sum = 0.0f;
+    for (int k = 0; k < width; ++k) {
+        int i = k * rows + row;
+        sum += val[i] * x[col[i]];
+    }
+    y[row] = sum;
+}
+```
+
+The assignment is the scalar kernel's, but at iteration `k` thread `r` reads
+entry `k * rows + r`. Neighbouring threads read neighbouring entries: this is
+why the arrays are column-major. Every thread runs exactly `width`
+iterations, so no thread waits for another, but the padded slots are loaded
+and multiplied like real ones. When one row is much longer than the rest,
+almost all of the arrays are padding. Bell and Garland's fix is a hybrid
+format, HYB: ELL for the first `K` entries of each row, with `K` set to a
+typical row length, and COO for what is left of the long rows.
+
+### And COO?
+
+COO's storage does not depend on how nonzeros are spread over rows, and a
+kernel can give each thread one nonzero, which is perfectly balanced. The
+catch is the output: several threads add into the same `y[r]`, so they need
+atomic adds (chapter 15) or a segmented reduction, a sum that restarts at
+each row boundary (chapter 14). This chapter does not implement it.
+
+## Rows to threads, step by step
+
+The simulation holds a {N} x {N} matrix in all three formats and runs one
+kernel on it, one loop iteration per step. The matrix on the left fills in as
+entries are read. Next to each row is its thread's work: one box per loop
+iteration for the scalar and ELL kernels, one box per lane for the vector
+kernel. Below are the arrays of the format you pick, with this step's reads
+highlighted. In the CSR and COO strips a tick marks every 32-byte sector, so
+you can count how many sectors a step touches. Before you step, guess how
+many steps the scalar kernel needs on the power-law matrix.
+
+<SparseFormats />
+
+Things to try:
+
+- **Power-law, CSR scalar.** Row 0 has {maxLen('power-law')} nonzeros and row 11
+  has 1. The warp runs {pl.scalar.steps} iterations, and only
+  {pl.scalar.useful} of its {pl.scalar.slots} thread slots do work
+  ({pct(pl.scalar.useful, pl.scalar.slots)}%). Watch the reads in the `val`
+  strip jump between sectors.
+- **Power-law, ELL.** The same {pl.ell.steps} steps, with no idle threads,
+  but {pl.ell.padding} of the {pl.ell.slots} slots are padding. Each step
+  reads {N} contiguous entries: switch the arrays to ELL and follow one
+  column of slots.
+- **Banded.** Every row has 2 or 3 nonzeros. ELL wastes {bd.ell.padding}
+  slots and needs {bd.ell.sectors} sectors of `col` in all, against
+  {bd.scalar.sectors} for CSR scalar. The vector kernel uses
+  {bd.vector.useful} of its {bd.vector.slots} lanes.
+- **CSR vector on any matrix.** No row here is longer than {WARP}, so every
+  warp makes one pass and then spends 5 steps on shuffles.
+
+The totals under the picture compare all three kernels on the chosen matrix.
+None of them wins everywhere: ELL is best when rows are even, the vector
+kernel when rows are long, and the scalar kernel needs neither, at the cost of
+both problems at once.
+
+What the model leaves out: the reads of `row_ptr` and the gather from `x`,
+whose addresses depend on the column indices and follow no pattern in any of
+the three kernels; the caches, which catch some of the scattered `col` and
+`val` reads of the scalar kernel because neighbouring threads read nearby
+sectors on later iterations; and how long a step takes. A shuffle step costs
+far less than a memory step on real hardware, and many warps run at once.
+
+## Real matrices and real libraries
+
+On a {N}-row toy every kernel finishes in a few steps. On a real power-law
+matrix the longest row can be thousands of times the average. The CUDA
+program in `kernels/ch18-sparse` builds such a matrix: a million rows of 1 to
+16 nonzeros, plus every 1024th row with 131,072. That is about 143 million
+nonzeros, and its ELL form would have 2<sup>20</sup> x 131,072, about 137
+billion slots, so the program skips ELL there.
+
+Production libraries go further than these three kernels. They sort or bin
+rows by length and pick a kernel per bin, or split the nonzeros evenly across
+threads regardless of rows, as in Merrill and Garland's merge-based SpMV. For
+real work use [cuSPARSE](https://docs.nvidia.com/cuda/cusparse/index.html):
+its generic [`cusparseSpMV`](https://docs.nvidia.com/cuda/cusparse/index.html#cusparsespmv)
+takes a matrix in COO, CSR, CSC, sliced ELL (SELL) or block CSR (BSR) format.
+From Python, `torch.sparse` and CuPy's `cupyx.scipy.sparse` use cuSPARSE for their GPU sparse products.
+
+## The code
+
+The CUDA and Numba versions have all three kernels. The Numba version also has
+`csr_from_dense` and `ell_from_csr`, which build the arrays with NumPy.
+
+<CodeTabs
+	cuda={cuda}
+	numba={numba}
+	triton={triton}
+	titles={{ cuda: 'cuda/spmv_kernels.cuh', numba: 'numba/spmv.py', triton: 'triton/spmv.py' }}
+>
+	<div slot="triton-note">
+		Triton has one kernel here: one program per CSR row, looping over the row in blocks of 32 nonzeros with a mask
+		for the ragged last block, and a `tl.sum` at the end. It is the CSR scalar assignment with a block of lanes
+		inside each row, close to CSR vector. Irregular sparsity fits Triton poorly for three reasons. Its unit of work is
+		a dense block whose shape is fixed when the kernel compiles, while row lengths are only known at run time, so
+		short rows leave most of the block masked off and long rows loop. Each program handles its own rows, and Triton
+		has no way to rebalance work between programs during a launch, so one long row still holds up its program. And
+		the gather `x[col]` gives the compiler no contiguous addresses to vectorize. Block-sparse matrices, where the
+		nonzeros come in dense tiles, are the case Triton handles well.
+	</div>
+</CodeTabs>
+
+The tests in `test_correctness.py` check every kernel against `scipy.sparse`
+when it is installed, else against a dense NumPy product, on banded, random,
+power-law and empty-row matrices, including a row longer than a warp. The
+Numba simulator has no warp shuffles, so the test adds one built on block
+barriers to run `spmv_csr_vector` on the CPU, and compiles the kernel to real
+PTX to check that it uses `shfl.sync.down`.
+
+## Measure it yourself
+
+On a GPU, from `kernels/ch18-sparse`:
+
+```sh
+make -C cuda run
+python numba/spmv.py
+python triton/spmv.py
+ncu --section MemoryWorkloadAnalysis_Tables --section SourceCounters ./cuda/spmv
+```
+
+The CUDA program times each kernel on the `uniform` and `skewed` matrices
+and prints the ELL width and slots per nonzero. Things to look for:
+
+- On `uniform`, the order of the three kernels. Rows of 1 to 16 nonzeros are
+  shorter than a warp, which the vector kernel does not like.
+- On `skewed`, how much the scalar kernel slows down compared with the
+  vector kernel. A few thousand long rows are enough.
+- In the memory tables, the sectors per request of global loads: high for
+  `spmv_csr_scalar`, lower for `spmv_ell` and `spmv_csr_vector`.
+- In Source Counters, the average number of active threads per instruction
+  in the loop of `spmv_csr_scalar`, which falls when rows are uneven.
+
+Every number from these tools depends on your GPU and matrix, so none is
+quoted here.
+
+## Exercises
+
+**1. Count the storage.** The power-law matrix of the simulation has {N}
+rows and {plNnz} nonzeros, and its longest row has {plWidth}. How many array
+entries do COO, CSR and ELL need?
+
+<details>
+<summary>Answer</summary>
+
+COO: 3 x {plNnz} = {storage.coo}. CSR: 2 x {plNnz} + {N} + 1 = {storage.csr}.
+ELL: 2 x {N} x {plWidth} = {storage.ell}, of which
+{2 * pl.ell.padding} are padding. CSR is the smallest; ELL needs
+{(storage.ell / storage.csr).toFixed(1)} times as much.
+
+</details>
+
+**2. Predict the idle threads.** A warp of 32 threads runs CSR scalar on 32
+rows. One row has 64 nonzeros, the other 31 have 2. How many iterations does
+the warp run, and what fraction of its thread slots do useful work? What
+would the vector kernel do with the long row?
+
+<details>
+<summary>Answer</summary>
+
+The warp runs 64 iterations, the length of the longest row. Useful work is
+64 + 31 x 2 = 126 multiplies out of 32 x 64 = 2,048 slots, about 6%. The
+vector kernel gives the long row its own warp, which finishes it in 2 passes
+of 32 and 5 shuffles; the 31 short rows each take one pass with 2 of 32
+lanes busy.
+
+</details>
+
+**3. Fix the bug.** To skip idle lanes, someone changes the vector kernel to
+
+```cpp
+int i = row_ptr[row] + lane;
+if (i >= row_ptr[row + 1]) return;
+for (; i < row_ptr[row + 1]; i += 32)
+    sum += val[i] * x[col[i]];
+for (int offset = 16; offset > 0; offset /= 2)
+    sum += __shfl_down_sync(0xffffffff, sum, offset);
+```
+
+It passes on a matrix whose rows all have 32 or more nonzeros. What goes wrong
+on the banded matrix?
+
+<details>
+<summary>Answer</summary>
+
+On a row of 3 nonzeros, lanes 3 to 31 return before the shuffles. Lane 0
+then reads from lanes 16, 8 and 4, which have exited. The CUDA Programming
+Guide says that a shuffle may only read from a thread that is taking part in
+it: "If the target thread is inactive, the retrieved value is undefined." The
+row sum can come out as garbage. The fix is the original kernel: let idle
+lanes fall through the loop with `sum = 0` and take part in every shuffle.
+
+</details>
+
+**4. When ELL breaks.** A matrix has 2<sup>20</sup> rows. One has 4,096
+nonzeros, every other row has 8. How many slots does its ELL form have, how much memory
+do `col` and `val` take at 4 bytes each, and what would the HYB format store
+instead?
+
+<details>
+<summary>Answer</summary>
+
+The width is 4,096, so ELL has 2<sup>20</sup> x 4,096 = 2<sup>32</sup> slots.
+With 8 bytes per slot that is 32 GiB, for about 8.4 million nonzeros, 64 MiB
+of real data. HYB with `K = 8` puts the first 8 entries of every row in ELL
+(2<sup>23</sup> slots, no padding) and the other 4,088 entries of the long
+row in COO.
+
+</details>
+
+## Further reading
+
+- [Nathan Bell and Michael Garland, Efficient Sparse Matrix-Vector Multiplication on CUDA](https://www.nvidia.com/docs/IO/66889/nvr-2008-004.pdf) (NVIDIA Technical Report NVR-2008-004, 2008), the source of the formats, the 4 x 4 example and the scalar, vector and ELL kernels. Their vector kernel reduces through shared memory; the one here uses warp shuffles, which came later.
+- [Duane Merrill and Michael Garland, Merge-based Parallel Sparse Matrix-Vector Multiplication](https://doi.org/10.1109/SC.2016.57) (SC16), which balances work by splitting nonzeros and row boundaries evenly across threads, with [code on GitHub](https://github.com/dumerrill/merge-spmv).
+- [cuSPARSE documentation](https://docs.nvidia.com/cuda/cusparse/index.html), in particular the [`cusparseSpMV`](https://docs.nvidia.com/cuda/cusparse/index.html#cusparsespmv) generic API and its supported formats.
+- [CUDA C++ Programming Guide 12.4: warp shuffle functions](https://docs.nvidia.com/cuda/archive/12.4.0/cuda-c-programming-guide/index.html#warp-shuffle-functions), for the mask rules behind exercise 3.
+- [CUDA C++ Best Practices Guide: coalesced access to global memory](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#coalesced-access-to-global-memory), the 32-byte sector rule the simulation counts with.
+- [SciPy: scipy.sparse.csr_array](https://docs.scipy.org/doc/scipy/reference/generated/scipy.sparse.csr_array.html), the same CSR layout on the CPU, as `indptr`, `indices` and `data`.
+- [Triton: tl.load](https://triton-lang.org/main/python-api/generated/triton.language.load.html), for the `mask` and `other` arguments the Triton kernel uses.
