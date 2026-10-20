@@ -1,0 +1,336 @@
+---
+title: '3. First kernel: vector add'
+description: A complete CUDA program for c = a + b, from allocating GPU memory and copying data over PCIe to launching, checking errors and copying the result back.
+sidebar:
+  order: 3
+banner:
+  content: Draft chapter. If something is wrong or unclear, use the edit link at the bottom of the page.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import DataJourney from '@sims/data-journey/DataJourney.astro';
+import CodeTabs from '@components/CodeTabs.astro';
+import { gpuById } from '@sim-core/gpu-specs';
+import { arrayBytes, blocksFor, DEFAULT_N, fmt, fmtBytes, fmtTime, pct, THREADS_PER_BLOCK, times } from '@sims/data-journey/model';
+import cuda from '@kernels/ch03-vector-add/cuda/vector_add.cu?raw';
+import numba from '@kernels/ch03-vector-add/numba/vector_add.py?raw';
+import triton from '@kernels/ch03-vector-add/triton/vector_add.py?raw';
+
+export const a100 = gpuById('a100');
+export const h100 = gpuById('h100');
+export const t4 = gpuById('t4');
+export const tA = times(a100, DEFAULT_N);
+export const tH = times(h100, DEFAULT_N);
+export const ratio = (g) => (g.memoryGbPerS / g.pcieGbPerS).toFixed(1);
+export const N1 = 1_000_000;
+export const N2 = 2 ** 20;
+export const t4t = times(t4, N2);
+export const pcieTime = (g, arrays, n) => fmtTime((arrays * arrayBytes(n)) / (g.pcieGbPerS * 1e9));
+
+The kernel for `c = a + b` is one line: each thread adds one pair of numbers.
+The program around it allocates GPU memory, copies data in, launches, checks
+for errors and copies the result back. On an {a100.name} with
+{fmt(DEFAULT_N)} elements, the one line of work is the cheapest part. The
+simulation below puts a lower bound of {fmtTime(tA.kernel)} on the kernel and
+{fmtTime(tA.copyIn + tA.copyOut)} on copying the data in and out.
+
+This chapter writes that whole program, explains each call in it, and shows
+why the copies decide how fast it runs.
+
+## Two memories
+
+A machine with an NVIDIA GPU card has two separate memories. The CPU (the
+**host**) has its RAM. The GPU (the **device**) has its own DRAM on the card,
+the global memory from chapter 1. A kernel reads and writes device memory, so
+data that starts in host RAM has to be copied across first, over the PCIe link
+that connects the card to the rest of the machine.
+
+The two memories are reached through different hardware, so a pointer only
+makes sense on the side it belongs to. `cudaMalloc` returns an address in GPU
+memory. The CPU cannot read through it: on a typical PCIe system, writing
+`d_a[0]` in host code crashes the program, because no CPU memory is mapped at
+that address. The same goes the other way for a host pointer passed to a
+kernel, unless the system supports heterogeneous memory management (chapter
+10). CUDA code marks the side in the name: `h_a` for a host array, `d_a`
+for a device array.
+
+Three runtime calls manage device memory:
+
+- `cudaMalloc(&d_a, bytes)` allocates `bytes` of GPU memory and stores the
+  address in `d_a`. The memory holds no useful data yet.
+- `cudaMemcpy(dst, src, bytes, kind)` copies between the two memories. `kind`
+  says which way: `cudaMemcpyHostToDevice` or `cudaMemcpyDeviceToHost`.
+  A device-to-host `cudaMemcpy` returns once the data has arrived. A
+  host-to-device copy from ordinary memory returns once the source can be
+  reused, which may be before the data reaches the GPU; work queued after it
+  still waits for it.
+- `cudaFree(d_a)` releases the allocation.
+
+<Aside type="note">
+  Unified Memory (`cudaMallocManaged`) gives one pointer that works on both sides
+  and lets the driver move the data. It is convenient, but the data still has to
+  cross the link. This chapter does every copy by hand so you can see each one.
+  Chapter 10 covers Unified Memory and pinned host memory.
+</Aside>
+
+## The journey of one vector add
+
+The host program does five things in order: allocate device arrays, copy `a`
+and `b` in, launch the kernel, copy `c` out, free the device arrays. Step
+through it below. The highlighted code line follows each step, and the time
+bar fills in as each phase finishes. Before you press Next, guess which bar
+will be longest.
+
+<DataJourney gpu="a100" n={DEFAULT_N} />
+
+At the last step the simulation adds up the bars. On the {a100.name}, the copies
+take {pct(tA.copyIn + tA.copyOut, tA.total)} of the total. The reason is in the
+two bandwidths. Copying moves {fmtBytes(3 * arrayBytes(DEFAULT_N))} over PCIe
+Gen{a100.pcieGen} at {a100.pcieGbPerS} GB/s each way. The kernel moves the
+same {fmtBytes(3 * arrayBytes(DEFAULT_N))} (it reads `a` and `b` and writes
+`c`) between the SMs and {a100.memory} at {fmt(a100.memoryGbPerS)} GB/s, which is
+{ratio(a100)} times faster. Vector add does one addition per 12 bytes, so the
+arithmetic is almost free and only the bytes count.
+
+Switch to the {h100.name}. Its PCIe Gen{h100.pcieGen} link is {h100.pcieGbPerS / a100.pcieGbPerS} times as fast, but
+its memory is faster too, and the copies still take
+{pct(tH.copyIn + tH.copyOut, tH.total)} of the total. Change `n` as well: the
+share stays the same at every size, because every phase grows in proportion to
+`n`.
+
+The lesson for real programs: **copy data to the GPU once, keep it there
+across many kernels, and copy back only the final result.** A single vector add
+is not worth moving to a GPU on its own. A chain of operations on data that
+already lives on the GPU is.
+
+<Aside type="caution">
+  The times in the simulation are lower bounds from NVIDIA's peak figures, not
+  measurements. A real `cudaMemcpy` from ordinary (pageable) host memory is
+  slower than the PCIe peak, because the driver first copies the data into a
+  staging buffer. Pinned host memory avoids that step; chapter 10 shows how.
+</Aside>
+
+## Launch configuration
+
+The launch in the program is
+
+```cpp
+int threads = 256;
+int blocks = (n + threads - 1) / threads;
+vector_add<<<blocks, threads>>>(d_a, d_b, d_c, n);
+```
+
+This is the pattern from chapter 2. 256 threads per block is a common starting
+point: it is a multiple of the 32-thread warp and well under the limit of 1024
+per block. Chapter 5 shows how to choose the block size properly. The grid is
+`n / threads` rounded up, so every element gets a thread. For the simulation's
+default of {fmt(DEFAULT_N)} elements that is {fmt(blocksFor(DEFAULT_N))} blocks
+of {THREADS_PER_BLOCK}.
+
+Rounding up leaves extra threads in the last block whenever `n` is not a
+multiple of 256. The kernel stops them with a bounds check:
+
+```cpp
+int i = blockIdx.x * blockDim.x + threadIdx.x;
+if (i < n) {
+    c[i] = a[i] + b[i];
+}
+```
+
+Without the check, those threads read past the end of `a` and `b` and write
+past the end of `c`.
+
+## Error handling
+
+Almost every CUDA runtime call returns a `cudaError_t`. If you ignore it, a
+failed call goes unnoticed and the program carries on with garbage. The
+course code wraps every call in a macro that prints the file, line and error
+message, then exits:
+
+```cpp
+#define CUDA_CHECK(call)                                                  \
+    do {                                                                  \
+        cudaError_t err_ = (call);                                        \
+        if (err_ != cudaSuccess) {                                        \
+            std::fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__,       \
+                         cudaGetErrorString(err_));                       \
+            std::exit(1);                                                 \
+        }                                                                 \
+    } while (0)
+```
+
+A kernel launch returns nothing, so it needs two checks of its own:
+
+1. **`cudaGetLastError()` right after the launch** reports errors in the launch
+   itself, such as a block size over 1024. For errors that are not sticky (see
+   below), it also resets the error state to `cudaSuccess`.
+2. **`cudaDeviceSynchronize()`** waits for the kernel to finish. A launch is
+   asynchronous: it returns to the CPU before the kernel has run. An error
+   that happens while the kernel runs, such as an out-of-bounds access, can
+   only be reported after that, so it shows up in the next CUDA call that
+   checks the error state after the kernel has run. The synchronize is the
+   call that guarantees the kernel has run.
+
+Some kernel errors, such as an illegal memory access, leave the GPU context
+unusable. After one of those, every later CUDA call in the process returns the
+same error, which is why the macro exits instead of carrying on.
+
+## The code
+
+The CUDA file follows the journey with numbered comments. Steps 1 and 2 fill
+the host arrays and allocate the device arrays, step 3 copies `a` and `b` in,
+step 4 launches, step 5 checks the launch and waits for the kernel, step 6
+copies `c` back, step 7 checks the result against a CPU loop, and step 8 frees
+the device arrays. Before step 3 the program launches the kernel once
+untimed, because the first launch includes loading the kernel onto the GPU.
+CUDA events around each phase measure the times it prints.
+
+<CodeTabs
+	cuda={cuda}
+	numba={numba}
+	triton={triton}
+	titles={{ cuda: 'cuda/vector_add.cu', numba: 'numba/vector_add.py', triton: 'triton/vector_add.py' }}
+/>
+
+The same steps in the other two languages:
+
+- **Numba.** `cuda.to_device(a)` allocates a device array and copies `a` into
+  it, `cuda.device_array_like(a)` allocates without copying, and
+  `d_c.copy_to_host()` copies back. You can also pass NumPy arrays straight to
+  the kernel. Numba then copies each one to the device before the launch and
+  back to the host after it, every time, even the arrays the kernel only reads.
+  That is convenient for a test and wasteful in a loop. Numba raises a Python
+  exception when a CUDA call fails, so there is no macro to write.
+- **Triton.** Triton kernels take PyTorch tensors, and the tensors must already
+  be on the GPU. The copies are PyTorch's: `a.to("cuda")` copies in and
+  `c.cpu()` copies back. `torch.empty_like(a)` allocates the output on the
+  same device as `a`. The grid is `triton.cdiv(n, BLOCK)` programs, the same
+  rounded-up division, and the mask does the job of the bounds check.
+
+All three versions are checked against NumPy by
+`kernels/ch03-vector-add/test_correctness.py`, at sizes chosen so the last
+block is only partly full.
+
+## Measure it yourself
+
+Each program times the three phases separately and prints the effective
+bandwidth of each: bytes moved divided by time. Run them on your own GPU:
+
+```sh
+cd kernels/ch03-vector-add
+make -C cuda run
+python numba/vector_add.py
+python triton/vector_add.py
+```
+
+The Makefile builds for an A100 by default; add `ARCH=75` for a T4 or
+`ARCH=90` for an H100. Things to look for:
+
+- Compare the copy bandwidth with your link's peak, and the kernel bandwidth
+  with your GPU's memory bandwidth from chapter 1. How far below the peak is
+  each one?
+- Add the two copy times and compare them with the kernel time.
+- Pass a small count, such as `./cuda/vector_add 1000`. At that size, fixed
+  costs per call can be larger than the data movement.
+
+Without an NVIDIA GPU, the Python scripts run on the CPU with
+`NUMBA_ENABLE_CUDASIM=1` or `TRITON_INTERPRET=1` and a small count. Their times
+then say nothing about GPUs.
+
+## Exercises
+
+**1. Count the blocks.** You add two arrays of {fmt(N1)} floats with 256
+threads per block and a rounded-up grid. How many blocks launch, and how many
+threads fail the bounds check?
+
+<details>
+<summary>Answer</summary>
+
+({fmt(N1)} + 255) / 256 = {fmt(blocksFor(N1))} in integer division
+({fmt(N1)} / 256 is {N1 / 256}, rounded up). That is
+{fmt(blocksFor(N1) * 256)} threads, so {fmt(blocksFor(N1) * 256 - N1)} threads
+fail `i < n`, all of them in the last block.
+
+</details>
+
+**2. Bytes and a lower bound.** On a {t4.name} (PCIe Gen{t4.pcieGen},
+{t4.pcieGbPerS} GB/s each way, {t4.memoryGbPerS} GB/s memory), you add two
+arrays of 2<sup>20</sup> floats. How many bytes cross PCIe in total, and how
+many bytes does the kernel move in GPU memory? What is the lower bound on each
+phase? Check your answer in the simulation.
+
+<details>
+<summary>Answer</summary>
+
+Each array is 2<sup>20</sup> * 4 = {fmt(arrayBytes(N2))} bytes. PCIe carries
+three arrays, `a` and `b` in and `c` out: {fmt(3 * arrayBytes(N2))} bytes. The
+kernel reads two arrays and writes one, also {fmt(3 * arrayBytes(N2))} bytes.
+
+- Copy in: {fmt(2 * arrayBytes(N2))} / ({t4.pcieGbPerS} * 10<sup>9</sup>) = {fmtTime(t4t.copyIn)}
+- Kernel: {fmt(3 * arrayBytes(N2))} / ({t4.memoryGbPerS} * 10<sup>9</sup>) = {fmtTime(t4t.kernel)}
+- Copy out: {fmt(arrayBytes(N2))} / ({t4.pcieGbPerS} * 10<sup>9</sup>) = {fmtTime(t4t.copyOut)}
+
+The total is at least {fmtTime(t4t.total)}, and the copies are
+{pct(t4t.copyIn + t4t.copyOut, t4t.total)} of it.
+
+</details>
+
+**3. Drop the bounds check.** Someone removes `if (i < n)` from the kernel and
+runs it with `n = 1000`. Which threads misbehave, and what can happen?
+
+<details>
+<summary>Answer</summary>
+
+The grid is {blocksFor(1000)} blocks of 256, so {fmt(blocksFor(1000) * 256)}
+threads run and threads with `i` from 1000 to {blocksFor(1000) * 256 - 1}, the
+last {blocksFor(1000) * 256 - 1000} of block {blocksFor(1000) - 1}, read past the
+end of `a` and `b` and write past the end of `c`. The result is undefined. The
+writes may land in another allocation and corrupt it, or the kernel may fail
+with an illegal address error that `cudaDeviceSynchronize` reports, or the
+program may print OK because the memory past the end happened to be unused.
+The test passing does not prove the kernel is correct. Chapter 22 uses
+`compute-sanitizer` to catch this kind of bug.
+
+</details>
+
+**4. Drop the synchronize.** In `numba/vector_add.py`, remove the
+`cuda.synchronize()` right after the timed kernel launch. What happens to the
+printed kernel time and copy-out time, and why?
+
+<details>
+<summary>Answer</summary>
+
+The launch returns as soon as the kernel is queued, so `t2 - t1` measures only
+the launch call and the kernel time drops close to zero. `copy_to_host` has to
+wait for the kernel before it can copy `c`, so the copy-out time now includes
+the kernel. The sum stays about the same; it is only attributed to the wrong
+phase. In the CUDA version, the same mistake also moves where an error inside
+the kernel is reported: to a later call, at the latest the `cudaMemcpy` of
+step 6, which has to wait for the kernel.
+
+</details>
+
+**5. Keep it on the GPU.** A program computes `c = a + b`, then `d = 2 * c`,
+then `e = d + a`, with one kernel each, on {fmt(DEFAULT_N)} floats on an
+{a100.name}. Version A copies the inputs of each kernel in and its output back
+out. Version B copies `a` and `b` in once and only `e` back. How many arrays
+cross PCIe in each version, and what is the lower bound on the copy time?
+
+<details>
+<summary>Answer</summary>
+
+Version A: the first kernel copies `a`, `b` in and `c` out (3 arrays), the
+second copies `c` in and `d` out (2), the third copies `d`, `a` in and `e` out
+(3). That is 8 arrays, at least {pcieTime(a100, 8, DEFAULT_N)} over PCIe.
+Version B: `a` and `b` in, `e` out, 3 arrays, at least
+{pcieTime(a100, 3, DEFAULT_N)}. The three kernels are the same in both
+versions; only the copies change.
+
+</details>
+
+## Further reading
+
+- [CUDA Programming Guide: Intro to CUDA C++](https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/intro-to-cuda-cpp.html), with sections on [explicit memory management](https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/intro-to-cuda-cpp.html#explicit-memory-management), [bounds checking](https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/intro-to-cuda-cpp.html#bounds-checking) and [error checking](https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/intro-to-cuda-cpp.html#error-checking-in-cuda).
+- [CUDA C++ Best Practices Guide: data transfer between host and device](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#data-transfer-between-host-and-device), on why to keep intermediate data on the GPU.
+- [Numba CUDA: memory management](https://nvidia.github.io/numba-cuda/user/memory.html), for `to_device`, `copy_to_host` and the implicit copies.
+- [Triton tutorial: vector addition](https://triton-lang.org/main/getting-started/tutorials/01-vector-add.html), the same kernel written by the Triton authors.
