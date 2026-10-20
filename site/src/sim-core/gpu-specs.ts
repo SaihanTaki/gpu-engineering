@@ -23,6 +23,19 @@ export interface GpuSpec {
 	memoryGb: number;
 	memoryGbPerS: number;
 	maxWarpsPerSm: number;
+	/** Occupancy limits; see OCCUPANCY_SOURCES. */
+	maxBlocksPerSm: number;
+	maxThreadsPerBlock: number;
+	maxRegsPerThread: number;
+	maxRegsPerBlock: number;
+	/** Registers are given to a warp in multiples of this many. */
+	regAllocUnit: number;
+	/** Bytes; a block's shared memory is rounded up to a multiple of this. */
+	smemAllocUnit: number;
+	/** Bytes of shared memory the driver takes for every resident block. */
+	reservedSmemPerBlock: number;
+	/** Largest shared memory one block can opt in to, KB, not counting the reserved part. */
+	maxSharedKbPerBlock: number;
 	pcieGen: 3 | 4 | 5;
 	/** Peak PCIe x16 bandwidth in one direction, GB/s. */
 	pcieGbPerS: number;
@@ -54,6 +67,15 @@ export const GPUS: GpuSpec[] = [
 		// Product datasheet figure; the Turing whitepaper lists 320 GB/s.
 		memoryGbPerS: 300,
 		maxWarpsPerSm: 32,
+		// Turing (7.5): 16 resident blocks, 256-byte shared memory granularity, nothing reserved per block.
+		maxBlocksPerSm: 16,
+		maxThreadsPerBlock: 1024,
+		maxRegsPerThread: 255,
+		maxRegsPerBlock: 65536,
+		regAllocUnit: 256,
+		smemAllocUnit: 256,
+		reservedSmemPerBlock: 0,
+		maxSharedKbPerBlock: 64,
 		pcieGen: 3,
 		// Datasheet: x16 PCIe Gen3, 32 GB/s. One direction of Gen3 x16 is 8 GT/s x 16 x 128/130 / 8 = 15.75 GB/s, so 32 sums both; we use half.
 		pcieGbPerS: 16,
@@ -86,6 +108,15 @@ export const GPUS: GpuSpec[] = [
 		memoryGb: 80,
 		memoryGbPerS: 2039,
 		maxWarpsPerSm: 64,
+		// Ampere (8.0): 32 resident blocks, 128-byte granularity, 1 KB reserved per block, so 164 KB per SM but 163 KB per block.
+		maxBlocksPerSm: 32,
+		maxThreadsPerBlock: 1024,
+		maxRegsPerThread: 255,
+		maxRegsPerBlock: 65536,
+		regAllocUnit: 256,
+		smemAllocUnit: 128,
+		reservedSmemPerBlock: 1024,
+		maxSharedKbPerBlock: 163,
 		pcieGen: 4,
 		// Datasheet: PCIe Gen4 64 GB/s, both directions summed (Gen4 x16 is 31.5 GB/s each way); we use half.
 		pcieGbPerS: 32,
@@ -119,6 +150,15 @@ export const GPUS: GpuSpec[] = [
 		// Product page figure; the pre-launch Hopper whitepaper lists 3000 GB/s.
 		memoryGbPerS: 3350,
 		maxWarpsPerSm: 64,
+		// Hopper (9.0): 32 resident blocks, 128-byte granularity, 1 KB reserved per block, so 228 KB per SM but 227 KB per block.
+		maxBlocksPerSm: 32,
+		maxThreadsPerBlock: 1024,
+		maxRegsPerThread: 255,
+		maxRegsPerBlock: 65536,
+		regAllocUnit: 256,
+		smemAllocUnit: 128,
+		reservedSmemPerBlock: 1024,
+		maxSharedKbPerBlock: 227,
 		pcieGen: 5,
 		// Product page: PCIe Gen5 128 GB/s, both directions summed (Gen5 x16 is 63 GB/s each way); we use half.
 		pcieGbPerS: 64,
@@ -129,6 +169,20 @@ export const GPUS: GpuSpec[] = [
 			'https://docs.nvidia.com/cuda/archive/12.4.0/cuda-c-programming-guide/index.html',
 		],
 	},
+];
+
+/**
+ * Sources for the occupancy fields. The compute capability tables give the
+ * per-SM and per-block limits. Allocation units and the per-block reservation
+ * are what cuda_occupancy.h, the CUDA Toolkit header behind the runtime's
+ * occupancy API, uses (cudaOccRegAllocationGranularity,
+ * cudaOccSMemAllocationGranularity, reservedSharedMemPerBlock); the 12.4
+ * programming guide states the 1 KB reservation for 8.x and 9.0.
+ */
+export const OCCUPANCY_SOURCES = [
+	'https://docs.nvidia.com/cuda/cuda-programming-guide/05-appendices/compute-capabilities.html',
+	'https://docs.nvidia.com/cuda/archive/12.4.0/cuda-c-programming-guide/index.html#shared-memory-8-x',
+	'https://docs.nvidia.com/cuda/cuda-runtime-api/cuda_runtime_api/group__CUDART__OCCUPANCY.html',
 ];
 
 export const gpuById = (id: string) => GPUS.find((g) => g.id === id) ?? GPUS[0];
