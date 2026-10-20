@@ -1,0 +1,338 @@
+---
+title: 7. Shared memory
+description: How a block of threads stages data in on-chip shared memory, why it needs __syncthreads() to do it safely, and how tiling a matrix multiply cuts its global memory loads by the tile size.
+sidebar:
+  order: 7
+banner:
+  content: Draft chapter. If something is wrong or unclear, use the edit link at the bottom of the page.
+---
+
+import { Code } from '@astrojs/starlight/components';
+import TileLoader from '@sims/tile-loader/TileLoader.astro';
+import CodeTabs from '@components/CodeTabs.astro';
+import { GPUS, gpuById } from '@sim-core/gpu-specs';
+import { gridTotals, sharedBytes } from '@sims/tile-loader/model';
+import { occupancy, pct, fmt } from '@sims/occupancy/model';
+import cuda from '@kernels/ch07-shared-memory/cuda/matmul.cu?raw';
+import numba from '@kernels/ch07-shared-memory/numba/matmul.py?raw';
+import triton from '@kernels/ch07-shared-memory/triton/matmul.py?raw';
+import sharedOps from '@kernels/ch07-shared-memory/generated/shared_ops.txt?raw';
+
+export const a100 = gpuById('a100');
+export const big = gridTotals({ mode: 'shared', n: 1024, tile: 16 });
+export const inputBytes = 2 * 1024 * 1024 * 4;
+export const mb = (bytes) => `${fmt(Math.round(bytes / 1e6))} MB`;
+export const ex1 = gridTotals({ mode: 'shared', n: 2048, tile: 16 });
+export const s16 = sharedBytes({ mode: 'shared', n: 8, tile: 16 });
+export const s32 = sharedBytes({ mode: 'shared', n: 8, tile: 32 });
+export const o16 = occupancy(a100, { regsPerThread: 32, smemPerBlock: s16, blockSize: 256 });
+export const o32 = occupancy(a100, { regsPerThread: 32, smemPerBlock: s32, blockSize: 1024 });
+
+Multiply two 1024 x 1024 float matrices the obvious way, one thread per output
+element, and each thread reads a row of A and a column of B: 2,048 loads. Over
+the whole grid that is {fmt(big.globalWithout)} loads, {mb(4 * big.globalWithout)}
+of requests, for inputs that hold {mb(inputBytes)}. Every element of A and B
+is asked for 1,024 times.
+
+The threads that ask for the same element are often in the same block. This
+chapter shows how they can load it once, keep it on chip in **shared memory**,
+and read it from there: the tiled kernel below issues {fmt(big.globalWith)}
+global loads for the same product, 16 times fewer.
+
+## What shared memory is
+
+Shared memory is a small memory inside each SM. A kernel declares it, every
+block that runs gets its own copy, and all threads of the block can read and
+write it. It exists only while the block runs, so a block must fill it before
+reading it and cannot leave anything in it for the next block. The
+CUDA Programming Guide puts the reason to use it plainly: "Because it is
+on-chip, shared memory has much higher bandwidth and much lower latency than
+local or global memory."
+
+It is carved from the same on-chip storage as the L1 cache, which chapter 1
+showed in each SM. How much of that storage a kernel can use:
+
+<table>
+	<thead>
+		<tr>
+			<th></th>
+			{GPUS.map((g) => <th scope="col">{g.name}</th>)}
+		</tr>
+	</thead>
+	<tbody>
+		<tr><th scope="row">L1 and shared memory per SM</th>{GPUS.map((g) => <td>{g.l1SharedKbPerSm} KB</td>)}</tr>
+		<tr><th scope="row">Shared memory per SM, at most</th>{GPUS.map((g) => <td>{g.maxSharedKbPerSm} KB</td>)}</tr>
+		<tr><th scope="row">Shared memory per block, at most</th>{GPUS.map((g) => <td>{g.maxSharedKbPerBlock} KB</td>)}</tr>
+	</tbody>
+</table>
+
+Compare that with the {a100.memoryGb} GB of device memory on the same A100.
+Shared memory holds tiles, not arrays: a block brings in the part of the data
+it is about to reuse, works on it, and moves on.
+
+## Declaring it
+
+In CUDA C++, `__shared__` in front of a variable inside a kernel puts it in
+shared memory:
+
+```cpp
+__shared__ float As[16][16];   // 1 KB per block, size fixed at compile time
+```
+
+When the size is only known at launch, declare an unsized `extern` array and
+pass the byte count as the third launch parameter:
+
+```cpp
+extern __shared__ float buf[];
+kernel<<<blocks, threads, bytes>>>(...);
+```
+
+The Programming Guide limits statically sized shared memory to 48 KB per
+block. A block that needs more must use the `extern` form and opt in with
+`cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes)`,
+as chapter 5 noted. Shared memory per block also counts against occupancy,
+which chapter 5 worked out in detail.
+
+In Numba, `cuda.shared.array(shape, dtype)` inside a kernel does the same. The
+shape must be a constant the compiler can see, such as a global like `TILE`.
+`cuda.shared.array(0, dtype)` declares the dynamic form, and the byte count
+goes in the fourth slot of the launch configuration,
+`kernel[blocks, threads, 0, bytes]`.
+
+## Waiting for each other: `__syncthreads()`
+
+Threads in a block do not run in step. They are split into warps, and each
+warp's scheduler runs it whenever its next instruction is ready, as chapter 4
+showed. So when thread 5 writes `As[0][5]` and thread 40 reads it, nothing
+says the write has happened yet.
+
+`__syncthreads()` is a barrier for the whole block. No thread passes it until
+every thread of the block has reached it, and every shared memory and global
+memory write made before it is visible to every thread of the block after it.
+A kernel that shares data through shared memory needs it in two places:
+
+1. **After writing, before reading.** Otherwise a thread can read a slot
+   another thread has not written yet.
+2. **After reading, before overwriting.** Otherwise a fast thread can start
+   the next round and overwrite a value a slow thread still needs.
+
+Every thread of the block must reach the same barrier. The guide allows
+`__syncthreads()` in conditional code "only if the conditional evaluates
+identically across the entire thread block, otherwise the code execution is
+likely to hang or produce unintended side effects." In Numba the call is
+`cuda.syncthreads()`, with the same rule.
+
+## Tiling a matrix multiply
+
+Take `C = A x B`, with `n x n` matrices and blocks of `TILE x TILE` threads.
+Thread `(ty, tx)` of a block computes one element `C[row][col]`, the dot
+product of row `row` of A and column `col` of B. The `TILE` threads in one row
+of the block all need the same row of A, and the `TILE` threads in one column
+all need the same column of B.
+
+The tiled kernel walks along that row and column one tile at a time. In each
+of the `n / TILE` **phases**:
+
+1. Every thread loads one element of a `TILE x TILE` tile of A into `As` and one
+   element of a tile of B into `Bs`. The block loads each element of the two
+   tiles exactly once.
+2. `__syncthreads()`, so both tiles are complete.
+3. Every thread adds `TILE` terms to its sum, reading `As[ty][k]` and
+   `Bs[k][tx]` from shared memory for `k = 0 .. TILE - 1`.
+4. `__syncthreads()`, so no one starts loading the next tiles too early.
+
+Each thread now issues `2n / TILE` global loads instead of `2n`. It still
+reads `2n` values, but most of them come from shared memory. This is the
+example the CUDA Programming Guide uses to introduce shared memory, and the
+same idea is behind every fast matrix multiply, which chapter 20 builds up
+step by step.
+
+Step through one block below. Start with **Without shared memory** and watch
+the counts in A and B climb to `TILE`: each is one element loaded by `TILE`
+different threads. Before you switch to **With shared memory**, predict the
+block's total. Then try every tile size.
+
+<TileLoader />
+
+## Reading the counts
+
+The block sizes the simulation offers make the pattern clear:
+
+- Without shared memory, a block of `TILE x TILE` threads issues
+  `TILE² x 2n` global loads. With shared memory it issues `(n / TILE)` phases of
+  `2 TILE²` loads, `2n x TILE`. The ratio is `TILE`.
+- For the whole grid of `(n / TILE)²` blocks, that is `2n³` loads without shared
+  memory and `2n³ / TILE` with it.
+- The number of reads does not change: every thread still reads `2n` values.
+  What changes is where they come from. Each element in shared memory is read
+  `TILE` times per phase, the numbers in `As` and `Bs`.
+
+So a larger tile saves more. Two things cap it. The two tiles take
+`2 x TILE² x 4` bytes of shared memory per block, {fmt(s16)} bytes at `TILE = 16`
+and {fmt(s32)} at `TILE = 32`. And with one thread per output, a block of
+`TILE x TILE` threads may not exceed {a100.maxThreadsPerBlock}, so `TILE` stops at
+32. Exercise 4 looks at what that means for occupancy, and chapter 20 shows how
+one thread can compute several outputs to go further.
+
+Why not let the caches do this? Some of the repeated loads in the naive kernel
+do hit in L1 or L2, and the simulation does not model that (chapter 9 covers
+the caches). But a cache keeps what it decides to keep, shared among every block
+on the SM. Shared memory keeps exactly what the block put there until the block
+overwrites it, and the code says when that is.
+
+The order in which threads touch global memory and shared memory also matters.
+For global loads, that is coalescing, chapter 6. For shared memory, it is bank
+conflicts, chapter 8. The kernels here are written so neither gets in the way,
+and chapter 11 puts all three ideas together in a matrix transpose.
+
+## The code
+
+The CUDA and Numba versions below are the two kernels from the simulation, with
+two changes for real input: blocks are 16 x 16, and threads past the edge of the
+matrix load zeros instead of skipping the load, so `n` need not be a multiple
+of 16. They never return early, because each thread must still reach both
+barriers.
+
+<CodeTabs
+	cuda={cuda}
+	numba={numba}
+	triton={triton}
+	titles={{ cuda: 'cuda/matmul.cu', numba: 'numba/matmul.py', triton: 'triton/matmul.py' }}
+>
+	<div slot="triton-note">
+		Triton has no `__shared__` and no barrier. A program loads a whole 32 x 32 tile of A and of B as block values
+		with `tl.load`, multiplies them with `tl.dot` and adds the result to its accumulator. Where those tiles live is
+		the compiler's choice. For the operands of `tl.dot` it allocates shared memory buffers, copies the tiles into
+		them, inserts the barriers and keeps the next tiles' copies running while the current ones are multiplied. The
+		listing under these tabs shows what it produced for this kernel.
+	</div>
+</CodeTabs>
+
+`test_correctness.py` checks all six kernels against NumPy for sizes from 1 to
+256, including sizes that are not multiples of the tile.
+
+## What the compilers made of it
+
+`generate.py` compiles the tiled Numba kernel and the Triton kernel for an
+A100 (sm_80), without a GPU, and keeps the lines that touch shared memory:
+
+<Code code={sharedOps} lang="txt" title="generated/shared_ops.txt" />
+
+The Numba kernel's PTX has the two 1 KB arrays (`.shared ... [1024]`), one
+`st.shared` per tile, a `bar.sync` for each `cuda.syncthreads()` and 32 shared
+loads from the unrolled inner loop, 16 from each tile. The Triton kernel asked
+for none of this. Its TTGIR, the GPU-specific stage of Triton's compiler
+(chapter 0.2), shows `ttg.local_alloc` making two 32 x 32 buffers for A and two
+for B, 16 KB in all, `async_copy_global_to_local` filling them and `local_load`
+reading them for the dot product. Two buffers per matrix let the copy for one
+iteration run while the other is used; `num_stages`, from chapter 5, controls
+that pipelining.
+
+## Measure it yourself
+
+On a GPU, run the three programs and profile the CUDA one:
+
+```sh
+cd kernels/ch07-shared-memory
+make -C cuda run
+python numba/matmul.py
+python triton/matmul.py
+ncu --section MemoryWorkloadAnalysis_Chart ./cuda/matmul 1024
+```
+
+Things to look for:
+
+- The time each kernel takes, printed by `./cuda/matmul`. The program
+  measures it on your GPU; this course does not quote a speedup.
+- In Nsight Compute's memory chart, the number of global load instructions for
+  `matmul_naive` against `matmul_tiled`. The tiled kernel should issue about
+  16 times fewer; the shared memory loads appear as their own entry.
+- The bytes moved between L1, L2 and device memory for each kernel. For the
+  naive kernel the caches catch part of the repeated loads, so the gap there is
+  smaller than the gap in load instructions.
+
+## What the model leaves out
+
+The simulation counts element loads the kernel issues. It leaves out the L1
+and L2 caches, which serve some repeated global loads; how loads are grouped
+into memory transactions (chapter 6); bank conflicts in shared memory
+(chapter 8); and time. It runs every thread of the block in lockstep, one
+statement per step, which real warps do not do; that is why the barriers
+matter. Its code assumes `n` is a multiple of `TILE`.
+
+## Exercises
+
+**1. Count the loads.** Two 2048 x 2048 float matrices are multiplied with
+16 x 16 blocks. How many global loads do the naive and the tiled kernel issue in
+total, and how many per output element?
+
+<details>
+<summary>Answer</summary>
+
+Naive: 2n per output, 4,096, and 2n³ = {fmt(ex1.globalWithout)} in total. Tiled:
+2n / 16 = 256 per output, and 2n³ / 16 = {fmt(ex1.globalWith)} in total. There are
+(2048 / 16)² = {fmt(ex1.blocks)} blocks.
+
+</details>
+
+**2. The missing barrier.** Someone deletes the second `__syncthreads()`, the
+one after the inner loop, and the test passes on their GPU for n = 16 but fails
+for n = 1024. Why does it fail, and why can it pass for n = 16?
+
+<details>
+<summary>Answer</summary>
+
+Without the second barrier, a warp that finishes its inner loop goes straight
+on to the next phase and overwrites `As` and `Bs` while other warps of the
+block may still be reading the old tiles. Those warps then add terms from the
+wrong tile. For n = 16 there is only one phase, so there is no next tile to
+overwrite with. A test that passes without the barrier proves nothing in
+general; the timing that hides the bug can change from run to run and GPU to
+GPU.
+
+</details>
+
+**3. The early return.** A tiled kernel starts with
+`if (row >= n || col >= n) return;` to skip threads past the edge. What can go
+wrong when n = 50?
+
+<details>
+<summary>Answer</summary>
+
+With 16 x 16 blocks, the blocks on the right and bottom edge have threads
+past n = 50, and those threads return. Two things break. The barriers are no
+longer reached by every thread of the block, which the guide says is likely to
+hang or produce unintended side effects. And the returned threads never write
+their slots of `As` and `Bs`, so the threads that stay read whatever was in
+those slots. That is why the kernels here keep every thread in the loop and
+load zeros past the edge.
+
+</details>
+
+**4. Bigger tiles.** On an {a100.name}, assume registers do not limit
+occupancy. What is the theoretical occupancy of the tiled kernel with
+`TILE = 16` and with `TILE = 32`? Why can `TILE` not be 64?
+
+<details>
+<summary>Answer</summary>
+
+`TILE = 16`: 256 threads and {fmt(s16)} bytes of shared memory per block, plus the
+1 KB reserved per block. Warps allow 64 / 8 = 8 blocks and shared memory far
+more, so {o16.blocks} blocks fit: {pct(o16.occupancy)}. `TILE = 32`: 1,024 threads
+and {fmt(s32)} bytes; warps allow 64 / 32 = {o32.blocks} blocks:
+{pct(o32.occupancy)}. Shared memory is not the limit for either. `TILE = 64` would
+need 4,096 threads per block, more than the {a100.maxThreadsPerBlock} allowed,
+even though its 32 KB of tiles would fit. Going further needs each thread to
+compute more than one output.
+
+</details>
+
+## Further reading
+
+- [CUDA C++ Programming Guide 12.4: Shared Memory](https://docs.nvidia.com/cuda/archive/12.4.0/cuda-c-programming-guide/index.html#shared-memory), the tiled matrix multiply this chapter follows, and [Synchronization Functions](https://docs.nvidia.com/cuda/archive/12.4.0/cuda-c-programming-guide/index.html#synchronization-functions) for `__syncthreads()` and the conditional code rule.
+- [CUDA C++ Programming Guide 12.4: Device Memory Accesses](https://docs.nvidia.com/cuda/archive/12.4.0/cuda-c-programming-guide/index.html#device-memory-accesses), the source of the bandwidth and latency quote.
+- [CUDA C++ Best Practices Guide: Shared Memory in Matrix Multiplication](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#shared-memory-in-matrix-multiplication-c-ab), the same kernel analysed for global load efficiency.
+- [Mark Harris, Using Shared Memory in CUDA C/C++](https://developer.nvidia.com/blog/using-shared-memory-cuda-cc/), NVIDIA's introduction with static and dynamic shared memory examples.
+- [Numba CUDA: Shared memory and thread synchronization](https://nvidia.github.io/numba-cuda/user/memory.html#shared-memory-and-thread-synchronization), for `cuda.shared.array`, dynamic shared memory and `cuda.syncthreads()`.
+- [Triton tutorial: Matrix Multiplication](https://triton-lang.org/main/getting-started/tutorials/03-matrix-multiplication.html), a full blocked matmul with autotuned tile sizes.
+- [Nsight Compute Profiling Guide: Memory Chart](https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#memory-chart), how to read the chart used above.
