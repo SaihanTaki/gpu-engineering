@@ -1,0 +1,120 @@
+---
+import SimFrame from '@components/SimFrame.astro';
+import { CODE, FORMAT_IDS, FORMAT_NAMES, KERNEL_IDS, KERNEL_NAMES, kernelFormat, PRESET_IDS, PRESET_NAMES, type KernelId, type PresetId } from './model';
+
+interface Props {
+	preset?: PresetId;
+	kernel?: KernelId;
+}
+
+const { preset = 'power-law', kernel = 'scalar' } = Astro.props;
+const format = kernelFormat(kernel);
+const variants = KERNEL_IDS.map((id) => ({ name: id, code: CODE[id], lang: 'cpp' }));
+// SimFrame shows the first variant until the script runs, so put the starting one first.
+variants.sort((a, b) => Number(b.name === kernel) - Number(a.name === kernel));
+---
+
+<SimFrame title="Sparse formats: who does which row" sim="sparse-formats" code={variants} config={{ preset, kernel, format }}>
+	<Fragment slot="params">
+		<label class="sim-field">
+			<span>Matrix</span>
+			<select name="preset">
+				{PRESET_IDS.map((p) => <option value={p} selected={p === preset}>{PRESET_NAMES[p]}</option>)}
+			</select>
+		</label>
+		<label class="sim-field">
+			<span>Kernel</span>
+			<select name="kernel">
+				{KERNEL_IDS.map((k) => <option value={k} selected={k === kernel}>{KERNEL_NAMES[k]}</option>)}
+			</select>
+		</label>
+		<label class="sim-field">
+			<span>Arrays shown</span>
+			<select name="format">
+				{FORMAT_IDS.map((f) => <option value={f} selected={f === format}>{FORMAT_NAMES[f]}</option>)}
+			</select>
+		</label>
+	</Fragment>
+
+	<div class="sim-canvas" data-canvas>
+		<svg role="img" aria-label="The matrix with its nonzeros, a work bar per row showing the loop iterations or lanes it uses, and the arrays of the chosen format with the entries read at this step highlighted"></svg>
+	</div>
+	<ul class="sp-legend" aria-label="Legend">
+		<li><span class="sp-swatch is-now"></span>read at this step</li>
+		<li><span class="sp-swatch is-done"></span>read earlier</li>
+		<li><span class="sp-swatch is-idle"></span>idle: the thread or lane has no entry</li>
+		<li><span class="sp-swatch is-pad"></span>ELL padding: loaded and multiplied by 0</li>
+	</ul>
+	<ul class="sp-totals" data-totals aria-label="Totals for this matrix, all three kernels"></ul>
+
+	<Fragment slot="caption">
+		Model, not a measurement. One step is one loop iteration of every thread, or one shuffle. All 12 rows of the scalar
+		and ELL kernels fit in one warp; the vector kernel gives each row its own warp of 32 lanes. Sectors count the col
+		array's reads, 4-byte entries in 32-byte sectors from a sector-aligned start, one request per warp per step; val is
+		read at the same addresses. It leaves out row_ptr, the gather from x, caches and the time a step takes.
+	</Fragment>
+</SimFrame>
+
+<script>
+	import { Stepper } from '@sim-core/stepper';
+	import { bindControls } from '@sim-core/controls';
+	import { highlightLines, showVariant } from '@sim-core/code-sync';
+	import { describe, KERNEL_IDS, KERNEL_NAMES, kernelFormat, lastStep, lineAt, pct, totals, type FormatId, type KernelId, type PresetId } from './model';
+	import { render } from './view';
+
+	function mount(frame: HTMLElement) {
+		const config: { preset: PresetId; kernel: KernelId; format: FormatId } = JSON.parse(frame.dataset.config!);
+		const stepper = new Stepper(lastStep(config.kernel, config.preset), 900);
+		const canvas = frame.querySelector<HTMLElement>('[data-canvas]')!;
+		const svgEl = canvas.querySelector('svg')!;
+		const totalsEl = frame.querySelector<HTMLElement>('[data-totals]')!;
+		const field = (name: string) => frame.querySelector<HTMLSelectElement>(`[name="${name}"]`)!;
+		let code = showVariant(frame, config.kernel);
+
+		const drawTotals = () => {
+			totalsEl.replaceChildren(
+				...KERNEL_IDS.map((k) => {
+					const t = totals(k, config.preset);
+					const li = document.createElement('li');
+					li.classList.toggle('is-current', k === config.kernel);
+					const name = document.createElement('strong');
+					name.textContent = `${KERNEL_NAMES[k]}:`;
+					const waste = k === 'ell' ? `${t.padding} padding` : `${t.idle} idle`;
+					li.append(name, ` ${t.steps} steps, ${t.useful} of ${t.slots} slots useful (${pct(t.useful, t.slots)}%), ${waste}, ${t.sectors} col sectors.`);
+					return li;
+				}),
+			);
+		};
+
+		const draw = () => {
+			render(svgEl, config, stepper.step, Math.max(280, canvas.clientWidth));
+			const line = lineAt(config.kernel, config.preset, stepper.step);
+			highlightLines(code, line === null ? [] : [line]);
+		};
+
+		frame.querySelector('.sim-params')!.addEventListener('change', (event) => {
+			const changed = (event.target as HTMLSelectElement).name;
+			config.preset = field('preset').value as PresetId;
+			config.kernel = field('kernel').value as KernelId;
+			// A new kernel shows its own format; the reader can still pick another.
+			if (changed === 'kernel') field('format').value = kernelFormat(config.kernel);
+			config.format = field('format').value as FormatId;
+			code = showVariant(frame, config.kernel);
+			drawTotals();
+			// Only the arrays shown changed: keep the step.
+			if (changed === 'format') {
+				draw();
+				return;
+			}
+			stepper.setLast(lastStep(config.kernel, config.preset));
+		});
+
+		bindControls(frame, stepper, (step) => describe(config.kernel, config.preset, step));
+		stepper.onChange(draw);
+		new ResizeObserver(draw).observe(canvas);
+		drawTotals();
+		draw();
+	}
+
+	document.querySelectorAll<HTMLElement>('[data-sim="sparse-formats"]').forEach(mount);
+</script>
