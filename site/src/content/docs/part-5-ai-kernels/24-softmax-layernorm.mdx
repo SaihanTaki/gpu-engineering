@@ -1,0 +1,415 @@
+---
+title: 24. Softmax and LayerNorm
+description: Why exp overflows and how subtracting the max fixes it, how the online softmax finds the max and the sum in one pass and merges partial results, and how LayerNorm computes mean and variance with Welford's algorithm in one fused kernel.
+sidebar:
+  order: 24
+banner:
+  content: Draft chapter. If something is wrong or unclear, use the edit link at the bottom of the page.
+---
+
+import OnlineSoftmax from '@sims/online-softmax/OnlineSoftmax.astro';
+import CodeTabs from '@components/CodeTabs.astro';
+import { gpuById } from '@sim-core/gpu-specs';
+import { expLimit, fmt, inputs, mergePair, steps, welford, welfordMerge } from '@sims/online-softmax/model';
+import cuda from '@kernels/ch24-softmax/cuda/softmax_kernels.cuh?raw';
+import numba from '@kernels/ch24-softmax/numba/softmax.py?raw';
+import triton from '@kernels/ch24-softmax/triton/softmax.py?raw';
+
+export const a100 = gpuById('a100');
+export const lim32 = expLimit('fp32').toFixed(2);
+export const lim16 = expLimit('fp16').toFixed(2);
+export const inc = steps({ mode: 'online', preset: 'increasing', chunk: 4, format: 'fp32' }).filter((s) => s.kind === 'stats');
+export const huge = steps({ mode: 'online', preset: 'huge', chunk: 4, format: 'fp32' }).filter((s) => s.kind === 'stats');
+export const ex1 = mergePair({ m: 2, d: 1.5 }, { m: 5, d: 1.2 });
+export const wa = welford([1, 2, 3]);
+export const wb = welford([4, 5]);
+export const wab = welfordMerge(wa, wb);
+export const mib = (accesses) => (4096 * 1024 * 4 * accesses) / 2 ** 20;
+export const us = (accesses) => ((4096 * 1024 * 4 * accesses) / (a100.memoryGbPerS * 1e9) * 1e6).toFixed(1);
+
+Every transformer layer ends its attention scores with a softmax and wraps
+its sublayers in a normalization, usually LayerNorm. Neither does much
+arithmetic. Both read a whole row before they can write a single output,
+and both break in float32 if you type the textbook formula straight into a
+kernel. Feed this row to `exp(x) / sum(exp(x))`:
+
+```python
+x = np.array([1.0, 2.0, 1000.0], dtype=np.float32)
+```
+
+`exp(1000)` does not fit in float32, so it becomes `inf`, the sum becomes
+`inf`, and the output is `[0, 0, nan]`. The correct answer is `[0, 0, 1]`.
+This chapter fixes that, then cuts the number of times the kernel has to read
+the row, which is what decides its speed.
+
+## Softmax and why exp overflows
+
+The softmax turns a row of scores x<sub>1</sub>, ..., x<sub>n</sub> into
+probabilities:
+
+y<sub>i</sub> = e<sup>x<sub>i</sub></sup> / (e<sup>x<sub>1</sub></sup> + ... + e<sup>x<sub>n</sub></sup>)
+
+Every y<sub>i</sub> is positive and they add up to 1. The largest score gets
+the largest share, which is why attention uses it to weigh values.
+
+The trouble is `exp`. The largest finite float32 is about 3.4 x 10<sup>38</sup>,
+so `expf(x)` overflows to infinity for x above ln(3.4 x 10<sup>38</sup>) = {lim32}.
+In FP16 the largest finite value is 65504, and `exp(x)` overflows from
+x = {lim16}: a score of 12 is enough. Once one `exp` is infinite the sum is infinite and `inf / inf` is NaN. At the other end, a row
+of very negative scores makes every `exp` underflow to 0, and `0 / 0` is NaN
+too.
+
+### Subtract the max
+
+Multiplying the top and bottom of the fraction by the same number e<sup>-m</sup>
+leaves y unchanged:
+
+y<sub>i</sub> = e<sup>x<sub>i</sub> - m</sup> / (e<sup>x<sub>1</sub> - m</sup> + ... + e<sup>x<sub>n</sub> - m</sup>)
+
+Pick m = max x<sub>j</sub>. Then every exponent is at most 0, so every `exp`
+is at most 1 and nothing overflows. The largest term is exactly e<sup>0</sup> = 1,
+so the sum is at least 1 and nothing divides by zero. Small terms may still
+underflow to 0, but only when they are less than about 10<sup>-45</sup> times
+the largest, where 0 is the right answer to float32 precision. This is called the
+safe softmax; the Triton tutorial's kernel and every kernel in this chapter
+compute it.
+
+## Three passes, two passes, one
+
+Written for one row, the safe softmax is three loops over memory:
+
+1. Read the row to find the max m.
+2. Read it again to sum d = Σ e<sup>x<sub>j</sub> - m</sup>.
+3. Read it a third time and write y<sub>i</sub> = e<sup>x<sub>i</sub> - m</sup> / d.
+
+That is three reads and one write per element. The naive version without the
+max is two reads and one write. Maxim Milakov and Natalia Gimelshein count
+it the same way in *Online normalizer calculation for softmax* (2018): four
+memory accesses per element for the safe softmax against three for the naive
+one. A softmax does a handful of operations per element, so like the kernels
+in chapter 12 it is memory-bound (chapter 19). The extra pass costs time
+directly.
+
+### The online softmax
+
+The paper's fix is to find the max and the sum in the same pass. Keep a
+running max m and a running sum d of e<sup>x<sub>j</sub> - m</sup> over the
+elements seen so far. When the next element x arrives:
+
+- m<sub>new</sub> = max(m, x)
+- d<sub>new</sub> = d · e<sup>m - m<sub>new</sub></sup> + e<sup>x - m<sub>new</sub></sup>
+
+The second line is the whole idea. d was a sum of terms shifted by the old
+max. Multiplying it by e<sup>m - m<sub>new</sub></sup> shifts every one of
+those terms to the new max at once, without reading them again. If the max did
+not change, the factor is e<sup>0</sup> = 1. If it grew, the factor is less
+than 1 and the old terms shrink, exactly as they would have if we had known
+the true max from the start. After the last element, m is the max of the row
+and d is the safe softmax's sum. One more pass writes the output.
+
+That is two reads and one write per element: the naive softmax's traffic with
+the safe softmax's stability. The paper measured up to 1.3x faster softmax on
+a Tesla V100 for vectors of about 4000 elements in large batches, close to the 4 / 3 ratio of
+memory accesses. That figure is theirs; the chapter's kernels let you measure
+your own.
+
+### Merging two partial results
+
+The update above takes one element at a time. The paper also writes it as an
+operation on pairs. Let a chunk of the row be summarized by [m, d]: its max,
+and the sum of e<sup>x - m</sup> over it. Two chunks combine as
+
+[m<sub>1</sub>, d<sub>1</sub>] ⊕ [m<sub>2</sub>, d<sub>2</sub>] = [m, d<sub>1</sub> e<sup>m<sub>1</sub> - m</sup> + d<sub>2</sub> e<sup>m<sub>2</sub> - m</sup>], with m = max(m<sub>1</sub>, m<sub>2</sub>).
+
+Each sum is rescaled to the larger max, then they are added. The paper shows
+that ⊕ is associative and commutative, which is what a parallel reduction
+needs (chapter 13): threads can summarize their own elements, then merge the
+pairs in a tree, in any grouping. One element x is the pair [x, 1].
+
+FlashAttention (chapter 25) is built on this merge. It computes softmax over
+a row of attention scores that is never stored whole: each tile of scores
+gives a partial [m, d], and the partial output computed with the old max is
+rescaled by the same e<sup>m<sub>old</sub> - m<sub>new</sub></sup> factor when
+a new tile raises the max.
+
+## One row, chunk by chunk
+
+The simulation runs one row of 16 values through the three methods, a chunk
+at a time. A chunk stands for what one block loads at once. Each dot under an
+element is one read of it; the bars below are the probabilities as they are
+written. For the online method the panel shows the running m and d and the
+rescale factor of each chunk. Pick a method and an input, and before you step,
+predict whether the output will be finite and how many dots each element
+will end up with.
+
+<OnlineSoftmax />
+
+Things to try:
+
+- **Online, increasing input, chunk 4.** The max grows with every chunk, so
+  every chunk after the first rescales the old sum, by e<sup>-3.2</sup> =
+  {fmt(inc[1].rescale)} each time. The final m is {fmt(inc.at(-1).m)}.
+- **Online, one 100, chunk 4.** The third chunk holds the 100. Its rescale
+  factor is e<sup>3.9 - 100</sup> = {fmt(huge[2].rescale)}: everything
+  before it is now negligible, and the 100 ends up with probability 1.
+- **Naive, one 100, FP32.** `exp(100)` overflows, d becomes inf and the
+  output has a NaN where the 100 was and zeros everywhere else. Safe and
+  online get it right with the same input.
+- **Naive, increasing, FP16.** The row tops out at 12, past FP16's limit of
+  {lim16}, so the last two `exp` values overflow. In FP32 the same row is fine.
+- **Chunk size.** It changes the number of steps and the rescale factors, but
+  not the result or the number of reads: online always reads each element
+  twice, safe three times.
+
+The sim computes in double precision and models only the range of each
+format: values above its largest finite number become inf, values below its
+smallest become 0. It does not model rounding, caches, or the threads inside
+a chunk.
+
+## Mapping rows to threads
+
+A softmax over a `[rows, cols]` matrix is independent per row, and each row
+is one reduction (for the max and sum) followed by a map (the normalize). The
+usual mapping is **one block per row**. The block's threads stride over the
+row with `i += blockDim.x`, so consecutive threads read consecutive elements
+and every load is coalesced (chapter 6). Each thread keeps its own [m, d]
+pair. Then the block merges the 256 pairs with the reduction from chapter 13:
+five `__shfl_xor_sync` steps inside each warp, one pair per warp through
+shared memory, and five more steps. With `xor` instead of `down`, every lane
+ends with the result, so no broadcast is needed afterwards. The merge only
+replaces `+` with ⊕, so the shuffles carry two floats instead of one.
+
+For short rows, one block is too much. A row of 64 floats on a 256-thread
+block leaves 192 threads with nothing to load. **One warp per row** fits
+better: the 32 lanes cover the row, the merge is five shuffles, and there is
+no shared memory and no `__syncthreads()` at all. `softmax_online_warp` puts
+four rows in each block this way. Very long rows go the other way: several
+blocks per row, each producing an [m, d] pair that a second step merges.
+
+### What fusion buys
+
+Count the traffic in PyTorch-style eager code, where every operation is its
+own kernel (chapter 12). The Triton softmax tutorial does this for
+`x - x.max(dim=1)`, `exp`, `sum` and the divide, and finds that it reads
+5MN + 2M elements and writes 3MN + 2M for an M x N matrix. One fused kernel
+that reads the row, keeps it on chip and writes the result moves MN of each.
+The tutorial's Triton kernel does exactly that: one program per row, the
+whole row loaded into registers as one block, max, `exp`, sum and divide on
+chip, one store. On a row that fits, it reads each element once.
+
+Per float32 element, the kernels in this chapter move:
+
+| Kernel | Reads | Writes | Bytes |
+|---|---|---|---|
+| `softmax_safe`, three passes | 3 | 1 | 16 |
+| `softmax_online`, two passes | 2 | 1 | 12 |
+| Triton `softmax_kernel`, row on chip | 1 | 1 | 8 |
+
+For a 4096 x 1024 matrix those are {mib(4)}, {mib(3)} and {mib(2)} MiB of
+traffic. At the {a100.name}'s {a100.memoryGbPerS} GB/s that would take
+{us(4)}, {us(3)} and {us(2)} µs if every access went to DRAM: a model
+estimate, not a measurement. In practice a 4 KB row read three times in a row
+by the same block is likely to hit in L1 or L2 (chapter 9), so the second and
+third reads may never reach DRAM. Measure the difference rather than assume
+it. Keeping the row in registers stops working when it does not fit; then the
+online two-pass kernel is the best a single launch can do.
+
+## LayerNorm
+
+LayerNorm (Ba, Kiros and Hinton, 2016) normalizes each row of H values to
+mean 0 and variance 1, then applies a learned scale γ and shift β per column:
+
+y<sub>i</sub> = (x<sub>i</sub> - μ) / √(σ<sup>2</sup> + ε) · γ<sub>i</sub> + β<sub>i</sub>
+
+with μ the mean of the row and σ<sup>2</sup> = (1/H) Σ (x<sub>j</sub> - μ)<sup>2</sup>,
+the population variance (PyTorch uses this biased estimator too). ε, by
+default 10<sup>-5</sup> in `torch.nn.LayerNorm`, keeps the division finite
+when a row is constant and σ<sup>2</sup> is 0.
+
+It has the same shape as softmax: a reduction over the row, then a map. And
+it has its own numerical trap.
+
+### Variance in one pass, the wrong way and the right way
+
+The two-pass variance reads the row once for μ and once more for the squared
+deviations. The tempting one-pass formula, σ<sup>2</sup> = E[x<sup>2</sup>] -
+E[x]<sup>2</sup>, accumulates Σx and Σx<sup>2</sup> together. It subtracts
+two large, nearly equal numbers: for values near 1000 with a spread of 1,
+E[x<sup>2</sup>] is about 10<sup>6</sup>, and float32 keeps about 7 decimal
+digits, so most of the variance's digits are gone before the subtraction. The
+test `test_naive_variance_cancels` shows an error of more than 1% on such a
+row.
+
+**Welford's algorithm** (1962) updates a count n, the running mean and M2,
+the running sum of squared deviations from the mean, one value at a time:
+
+- n ← n + 1
+- δ = x - mean
+- mean ← mean + δ / n
+- M2 ← M2 + δ · (x - mean)
+
+with σ<sup>2</sup> = M2 / n at the end. It only ever adds deviations from
+the current mean, which are small, so it does not cancel.
+
+For a GPU, each thread runs Welford over its own elements, and the block
+merges the partial results. Chan, Golub and LeVeque (1979) give the merge of
+two sets A and B:
+
+- n = n<sub>A</sub> + n<sub>B</sub>
+- δ = mean<sub>B</sub> - mean<sub>A</sub>
+- mean = mean<sub>A</sub> + δ · n<sub>B</sub> / n
+- M2 = M2<sub>A</sub> + M2<sub>B</sub> + δ<sup>2</sup> · n<sub>A</sub> n<sub>B</sub> / n
+
+It is the same pattern as the softmax's ⊕: a small summary per chunk, and a
+merge that fixes up one summary when the other's reference point differs.
+`layernorm_welford` shuffles the three floats through the same warp and
+block reduction as the softmax.
+
+### Why one kernel
+
+Written as separate eager operations, LayerNorm is a chain: a mean, a
+subtract, a square, another mean, an add of ε and a reciprocal square root,
+a multiply, then a multiply by γ and an add of β. Each step reads and writes
+a full-size array, the pattern chapter 12 removes. Fused, the kernel reads
+the row for the statistics, reads it again to normalize, scales and shifts in
+registers, and writes once: two reads and a write, or one read and a write
+when the row stays on chip as in the Triton version. The kernel also writes
+μ and 1/√(σ<sup>2</sup> + ε) for each row, two floats, because the backward
+pass needs them.
+
+The Triton kernel uses the two-pass formula instead of Welford: with the row
+already in registers, the second pass over it costs no memory traffic, and
+the two-pass variance is accurate.
+
+## The code
+
+<CodeTabs
+	cuda={cuda}
+	numba={numba}
+	triton={triton}
+	titles={{ cuda: 'cuda/softmax_kernels.cuh', numba: 'numba/softmax.py', triton: 'triton/softmax.py' }}
+>
+	<div slot="triton-note">
+		Triton programs a whole block of data at once, so there is no thread-level reduction to write. `softmax_kernel` is
+		the fused softmax from the Triton tutorial: one program per row, `BLOCK` the next power of two above the row
+		length, padding loaded as `-inf` so it never wins `tl.max` and its `exp` is 0. `tl.max` and `tl.sum` build the
+		reductions. `layernorm_kernel` does the same for LayerNorm and uses the two-pass variance, because the row is
+		already on chip. Both need the row to fit in one block; longer rows need a loop, as in the CUDA kernels.
+	</div>
+</CodeTabs>
+
+The CUDA kernels are in a header with no host code, so the tests can compile
+them with NVRTC on a machine without `nvcc`. `cuda/softmax.cu` runs each one
+on a matrix whose row 0 holds a 1000 and whose row 1 has a mean of 1000,
+checks it against a CPU reference in double precision and times it. The
+Numba kernels reduce through a shared memory tree instead of shuffles, so the
+tests can run them on Numba's simulator, which has no shuffles. All kernels
+use `expf`, the accurate library function; CUDA also has `__expf`, a faster
+intrinsic with lower accuracy (CUDA Programming Guide, Mathematical Functions
+appendix). The Triton tutorial notes that `tl.exp` is fast but approximate,
+like `__expf`.
+
+## Measure it yourself
+
+On a GPU, from `kernels/ch24-softmax`:
+
+```sh
+make -C cuda run
+python numba/softmax.py
+python triton/softmax.py
+ncu --kernel-name regex:softmax_ --metrics dram__bytes_read.sum,dram__bytes_write.sum,gpu__time_duration.sum ./cuda/softmax
+```
+
+Each program prints the mean time per launch and an effective bandwidth that
+counts the matrix read once and written once. Things to look for:
+
+- `dram__bytes_read.sum` for `softmax_safe` against `softmax_online`. If the
+  rows stay in cache between passes, both read about the matrix size from
+  DRAM and their times are close. Make the rows longer, `./cuda/softmax 512 65536`,
+  and see whether the gap opens.
+- `softmax_online_warp` against `softmax_online` for short rows, such as
+  `./cuda/softmax 65536 64`, where most threads of a 256-thread block have no
+  element.
+- How close the effective bandwidth comes to your GPU's memory bandwidth.
+
+## Exercises
+
+**1. Merge by hand.** Two chunks of a row are summarized by [2, 1.5] and
+[5, 1.2]. What is the merged pair?
+
+<details>
+<summary>Answer</summary>
+
+The larger max is 5. The first sum is rescaled by e<sup>2 - 5</sup> =
+e<sup>-3</sup> ≈ 0.0498, the second by e<sup>0</sup> = 1. The pair is
+[{ex1.m}, 1.5 · 0.0498 + 1.2] = [{ex1.m}, {fmt(ex1.d)}].
+
+</details>
+
+**2. Where does FP16 break?** What is the largest score for which `exp`
+stays finite in FP16, and in FP32? Which presets in the simulation make the
+naive method fail in each?
+
+<details>
+<summary>Answer</summary>
+
+ln(65504) = {lim16} for FP16 and ln(3.4 x 10<sup>38</sup>) = {lim32} for
+FP32. The increasing row reaches 12, which fails only in FP16 (its last two
+values, 11.2 and 12, overflow). The row with a 100 fails in both. The random
+row stays below 4 and works in both.
+
+</details>
+
+**3. Merge two Welford results.** Thread A has seen 1, 2 and 3; thread B
+has seen 4 and 5. Give each thread's (n, mean, M2) and merge them.
+
+<details>
+<summary>Answer</summary>
+
+A: n = {wa.n}, mean = {wa.mean}, M2 = (1 - 2)<sup>2</sup> + 0 + (3 - 2)<sup>2</sup> = {wa.m2}.
+B: n = {wb.n}, mean = {wb.mean}, M2 = 0.25 + 0.25 = {wb.m2}.
+δ = 4.5 - 2 = 2.5, n = 5, mean = 2 + 2.5 · 2 / 5 = {wab.mean},
+M2 = 2 + 0.5 + 6.25 · 3 · 2 / 5 = {wab.m2}. The variance is {wab.m2} / 5 =
+{wab.m2 / wab.n}, the population variance of 1 to 5.
+
+</details>
+
+**4. Fix the bug.** Someone writes the online update as
+`d = d + expf(x - m_new)` and updates `m` as before. On which inputs is the
+result still right, and what goes wrong otherwise?
+
+<details>
+<summary>Answer</summary>
+
+It is right only when the max never changes after the first element, that
+is when x[0] is already the row's max. Otherwise the terms added before the
+max grew are still scaled to the old, smaller max, so they are too large by a
+factor e<sup>m<sub>new</sub> - m<sub>old</sub></sup> each time. The sum comes
+out too big and the probabilities too small. On the increasing row every
+chunk raises the max, so the error is largest there.
+
+</details>
+
+**5. Pick the mapping.** A model applies softmax to a 65536 x 64 matrix of
+attention scores. How many threads of a 256-thread block have an element to
+load with one block per row, and what would you use instead?
+
+<details>
+<summary>Answer</summary>
+
+64 of 256: the other 192 threads, three quarters of the block, take part in
+the reduction but load nothing. One warp per row gives each lane two
+elements, needs no shared memory and no barrier, and puts four rows in each
+256-thread block. That is `softmax_online_warp`.
+
+</details>
+
+## Further reading
+
+- [Maxim Milakov and Natalia Gimelshein, Online normalizer calculation for softmax](https://arxiv.org/abs/1805.02867) (arXiv, 2018): the naive, safe and online algorithms, their memory access counts, the ⊕ merge in Section 3.1, and the fusion with top-k. Benchmarks on a Tesla V100.
+- [Triton tutorial: Fused Softmax](https://triton-lang.org/main/getting-started/tutorials/02-fused-softmax.html), the traffic count of the eager version and the one-program-per-row kernel.
+- [Triton tutorial: Layer Normalization](https://triton-lang.org/main/getting-started/tutorials/05-layer-norm.html), forward and backward kernels.
+- [Jimmy Lei Ba, Jamie Ryan Kiros and Geoffrey E. Hinton, Layer Normalization](https://arxiv.org/abs/1607.06450) (arXiv, 2016).
+- [Algorithms for calculating variance](https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance) (Wikipedia), with Welford's update, the parallel merge of Chan, Golub and LeVeque (Stanford report STAN-CS-79-773, 1979) and an example of the naive formula failing. Welford's paper is B. P. Welford, "Note on a method for calculating corrected sums of squares and products", *Technometrics* 4(3), 1962.
+- [PyTorch: torch.nn.LayerNorm](https://docs.pytorch.org/docs/main/generated/torch.nn.LayerNorm.html), the default ε and the biased variance.
+- [CUDA C++ Programming Guide 12.4: mathematical functions](https://docs.nvidia.com/cuda/archive/12.4.0/cuda-c-programming-guide/index.html#mathematical-functions-appendix), the accuracy of `expf` and `__expf`, and [warp shuffle functions](https://docs.nvidia.com/cuda/archive/12.4.0/cuda-c-programming-guide/index.html#warp-shuffle-functions).

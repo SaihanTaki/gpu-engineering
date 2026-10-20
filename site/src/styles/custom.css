@@ -2614,3 +2614,137 @@
 .rc-swatch.is-future {
 	border: 1px dashed var(--sim-muted);
 }
+
+/* Online softmax sim (chapter 24) */
+.os-cell {
+	stroke: var(--sim-line);
+}
+.os-cell.is-a {
+	fill: var(--sim-block-a);
+}
+.os-cell.is-b {
+	fill: var(--sim-block-b);
+}
+.os-cell.is-reading {
+	stroke: var(--sim-active);
+	stroke-width: 2.5;
+}
+/* Overflow: amber fill plus a dashed edge, so the signal does not rely on hue. */
+.os-cell.is-overflow {
+	fill: var(--sim-warn-fill);
+	stroke: var(--sim-warn);
+	stroke-width: 2;
+	stroke-dasharray: 3 2;
+}
+.os-value,
+.os-yvalue {
+	font: 10px var(--sl-font-mono);
+	fill: var(--sim-text);
+	pointer-events: none;
+}
+.os-value.is-tight,
+.os-yvalue.is-tight {
+	font-size: 9px;
+}
+.os-yvalue.is-nan {
+	fill: var(--sim-warn);
+	font-weight: 600;
+}
+.os-dot {
+	fill: var(--sim-active);
+}
+.os-slot {
+	fill: transparent;
+	stroke: var(--sim-line);
+}
+.os-slot.is-empty {
+	stroke-dasharray: 3 3;
+}
+.os-slot.is-nan {
+	fill: var(--sim-warn-fill);
+	stroke: var(--sim-warn);
+	stroke-dasharray: 3 2;
+}
+.os-bar {
+	fill: var(--sim-active);
+}
+.os-state {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.25rem 1.5rem;
+	margin: 0.5rem 0 0;
+	font-size: var(--sl-text-sm);
+}
+.os-state div {
+	display: flex;
+	gap: 0.4rem;
+	align-items: baseline;
+}
+.os-state dt {
+	color: var(--sim-muted);
+}
+.os-state dd {
+	margin: 0;
+	font-family: var(--sl-font-mono);
+	color: var(--sim-text);
+}
+.os-totals {
+	display: grid;
+	gap: 0.35rem;
+	margin: 0.5rem 0 0;
+	padding: 0;
+	list-style: none;
+	font-size: var(--sl-text-sm);
+}
+.os-totals li {
+	padding-inline-start: 0.6rem;
+	border-inline-start: 3px solid var(--sim-line);
+}
+.os-totals li.is-current {
+	border-inline-start-color: var(--sim-active);
+}
+[data-sim='online-softmax'] .expressive-code .copy button {
+	width: 44px;
+	height: 44px;
+}
+[data-sim='online-softmax'] input[type='range'] {
+	min-height: 44px;
+}
+.os-legend {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.25rem 1.25rem;
+	margin: 0.5rem 0 0;
+	padding: 0;
+	list-style: none;
+	font-size: var(--sl-text-xs);
+}
+.os-legend li {
+	display: flex;
+	align-items: center;
+	gap: 0.4rem;
+}
+.os-swatch {
+	flex-shrink: 0;
+	width: 1rem;
+	height: 1rem;
+	border-radius: 2px;
+}
+.os-swatch.is-reading {
+	background: var(--sim-block-a);
+	border: 2.5px solid var(--sim-active);
+}
+.os-swatch.is-dot {
+	width: 0.4rem;
+	height: 0.4rem;
+	border-radius: 50%;
+	background: var(--sim-active);
+}
+.os-swatch.is-overflow {
+	background: var(--sim-warn-fill);
+	border: 2px dashed var(--sim-warn);
+}
+.os-swatch.is-bar {
+	width: 0.6rem;
+	background: var(--sim-active);
+}
