@@ -1,0 +1,309 @@
+---
+title: 12. Map and elementwise fusion
+description: Why three elementwise kernels in a row are limited by DRAM traffic and launch cost, and how fusing them into one kernel removes the intermediate arrays.
+sidebar:
+  order: 12
+banner:
+  content: Draft chapter. If something is wrong or unclear, use the edit link at the bottom of the page.
+---
+
+import { Code } from '@astrojs/starlight/components';
+import Fusion from '@sims/fusion/Fusion.astro';
+import CodeTabs from '@components/CodeTabs.astro';
+import { gpuById } from '@sim-core/gpu-specs';
+import { PEAK_FP32_TFLOPS } from '@sims/transpose/model';
+import { arrayBytes, DEFAULT_LAUNCH_US, final, fmt, fmtBytes, fmtUs, speedup } from '@sims/fusion/model';
+import cuda from '@kernels/ch12-fusion/cuda/fusion_kernels.cuh?raw';
+import numba from '@kernels/ch12-fusion/numba/fusion.py?raw';
+import triton from '@kernels/ch12-fusion/triton/fusion.py?raw';
+import summary from '@kernels/ch12-fusion/generated/summary.txt?raw';
+import fusedPtx from '@kernels/ch12-fusion/generated/fused_sm80.ptx?raw';
+
+export const a100 = gpuById('a100');
+export const t4 = gpuById('t4');
+export const h100 = gpuById('h100');
+export const cfg = { gpu: 'a100', log2n: 24, launchUs: DEFAULT_LAUNCH_US };
+export const big = { u: final(cfg, 'unfused'), f: final(cfg, 'fused') };
+export const small = { ...cfg, log2n: 10 };
+export const ex1 = { ...cfg, log2n: 20 };
+export const opsPerByte = 3 / 12;
+export const machineBalance = (g) => (PEAK_FP32_TFLOPS[g.id] * 1e12) / (g.memoryGbPerS * 1e9);
+export const crossover = Math.round((a100.memoryGbPerS * 1e3 * DEFAULT_LAUNCH_US) / 12);
+export const x2 = (c) => speedup(c).toFixed(2);
+
+A common line of model code:
+
+```python
+out = torch.relu(a * x + y)
+```
+
+Run eagerly, PyTorch executes it as three operations, and each one is a
+separate GPU kernel: one multiplies, one adds, one clamps. Each kernel reads
+its inputs from DRAM and writes its result back to DRAM, so the two results in
+the middle make a full round trip through memory that nobody needed. For
+{fmt(2 ** 24)} floats, the three kernels move {fmtBytes(big.u.bytes)}. One
+kernel that does all three steps moves {fmtBytes(big.f.bytes)}.
+
+This chapter is about that difference: why kernels like these are limited by
+memory traffic, not arithmetic, and what fusing them buys.
+
+## Map: one thread per element
+
+A **map** applies the same function to every element of an array, and each
+output element depends only on the input elements at the same index. Vector
+add in chapter 3 is a map. So are scaling, adding a bias, ReLU, casting to
+another type and most activation functions. Maps are also called elementwise
+or pointwise operations.
+
+A map needs no cooperation between threads: thread `i` reads element `i`,
+computes, writes element `i`. That makes it the easiest pattern to write on a
+GPU and the easiest to get right. With consecutive threads on consecutive
+elements, every load and store is coalesced (chapter 6).
+
+## Memory-bound kernels
+
+Take the fused version of the line above. Per element it reads `x[i]` and
+`y[i]` and writes `out[i]`: 12 bytes. It does a multiply, an add and a
+compare, 3 operations. That is {opsPerByte} operations per byte.
+
+The {a100.name} can do {PEAK_FP32_TFLOPS.a100} TFLOPS of FP32 arithmetic and
+move {fmt(a100.memoryGbPerS)} GB/s to and from its {a100.memory}. To keep the
+arithmetic units busy, a kernel would need about
+{machineBalance(a100).toFixed(1)} FP32 operations for every byte it moves. At
+{opsPerByte}, the arithmetic units wait on memory almost all the time. A
+kernel like this is **memory-bound**: its time is set by the bytes it moves,
+and doing less arithmetic would not make it faster. Chapter 19 turns this
+ratio into the roofline model.
+
+For a memory-bound kernel, the way to go faster is to move fewer bytes.
+
+## Counting the bytes
+
+Written as three kernels, `out = relu(a * x + y)` needs two intermediate
+arrays, `t` and `u`:
+
+| Kernel | Computes | Reads | Writes | Arrays moved |
+|---|---|---|---|---|
+| `scale` | `t = a * x` | `x` | `t` | 2 |
+| `add` | `u = t + y` | `t`, `y` | `u` | 3 |
+| `relu` | `out = max(u, 0)` | `u` | `out` | 2 |
+| `fused` | `out = max(a * x + y, 0)` | `x`, `y` | `out` | 3 |
+
+The three kernels move 7 arrays' worth of bytes; the fused kernel moves 3.
+`t` is written once and read once, and so is `u`: 4 of the 7 arrays are
+traffic for values that exist only to be passed to the next kernel. The fused
+kernel computes `a * x[i] + y[i]` into a register, clamps it in the register
+and stores only `out[i]`. The intermediates never reach DRAM, and they are
+never allocated: at {fmt(2 ** 24)} elements that is {fmtBytes(2 * arrayBytes(2 ** 24))}
+of GPU memory saved too.
+
+For any chain of maps the count works the same way. If every kernel in the
+chain reads its inputs from DRAM and writes its output there, each
+intermediate costs one write and one read. Fusing the chain leaves only the
+original inputs and the final output.
+
+## Launch overhead
+
+Bytes are not the only cost. Every kernel launch has a fixed cost: the CPU
+puts the launch into the driver's queue, the GPU starts the grid, and at the
+end the last blocks finish while most SMs already sit idle. When kernels run
+back to back, some of this overlaps with the previous kernel, but not all.
+
+How large the cost is depends on the GPU, driver, CPU and launch path, and
+NVIDIA does not publish one figure. One measurement: in NVIDIA's CUDA Graphs
+post, a kernel that ran for 2.9 µs on a Tesla V100 took 3.8 µs per kernel when
+launched many times back to back, and 9.6 µs when the host synchronized after
+each launch. The simulation below makes the cost a slider you set, with a
+default of {DEFAULT_LAUNCH_US} µs, rounded from the 0.9 µs gap in that
+measurement. The CUDA program in this chapter prints the cost of launching an
+empty kernel on your machine, so you can put your own number in.
+
+The fixed cost matters when the kernels are short. For the fused kernel on the
+{a100.name}, {fmt(crossover)} elements take as long to move as one
+{DEFAULT_LAUNCH_US} µs launch. Below that, launches dominate; above it, bytes do.
+Chapter 21 shows CUDA Graphs, which cut the launch cost without fusing.
+
+## Three kernels against one
+
+The simulation runs both versions side by side, one kernel per step. For each
+array it shows whether the current kernel reads it, writes it, or never has
+it. The traffic bar counts bytes to and from DRAM. The time bar is a model
+estimate: those bytes at the GPU's peak memory bandwidth, plus the launch
+cost you set for every kernel. Before you step, guess how many bytes each
+version moves.
+
+<Fusion />
+
+Things to try:
+
+- **The default, 2<sup>24</sup> elements on the {a100.name}.** Bytes dominate.
+  The model gives {fmtUs(big.u.timeUs)} against {fmtUs(big.f.timeUs)}, a ratio of
+  {x2(cfg)}, just above the 7 / 3 = 2.33 traffic ratio.
+- **The smallest size, 2<sup>10</sup>.** Each array is {fmtBytes(arrayBytes(2 ** 10))}.
+  Moving it takes nanoseconds, so the launches are nearly all of the time, and
+  the ratio is {x2(small)}, close to 3 launches against 1.
+- **Launch cost 0.** The ratio is exactly 7 / 3 at every size: the model is
+  then pure traffic.
+- **The {t4.name}.** With {fmt(t4.memoryGbPerS)} GB/s, the same bytes take
+  longer, so launches matter only at smaller sizes than on the {h100.name}.
+
+## What the model leaves out
+
+- **The L2 cache.** The model sends every byte to DRAM. If `t` fits in L2, the
+  `add` kernel can read some of it back from L2 instead. The {a100.name} has
+  {a100.l2Mb} MB of L2, so at 2<sup>20</sup> elements (4 MiB per array) a
+  measured unfused run can beat the model. Chapter 9 covers L2.
+- **Bandwidth at small sizes.** A kernel that moves a few kilobytes never
+  reaches peak bandwidth; there are too few warps in flight to hide the latency
+  of DRAM. The model charges peak bandwidth at every size.
+- **Overlap between kernels.** The model adds the launch cost in full for
+  every kernel. Real back-to-back launches hide part of it.
+- **Arithmetic time.** For these kernels it is tiny next to the memory time,
+  so the model counts none.
+
+## The code
+
+All three languages have the same four kernels: `scale`, `add` and `relu`
+launched one after another, and `fused`.
+
+<CodeTabs
+	cuda={cuda}
+	numba={numba}
+	triton={triton}
+	titles={{ cuda: 'cuda/fusion_kernels.cuh', numba: 'numba/fusion.py', triton: 'triton/fusion.py' }}
+>
+	<div slot="triton-note">
+		In Triton a program handles a block of 1,024 elements, and `v` is a block-sized tensor that the compiler keeps
+		in registers. You rarely have to write a fused elementwise kernel like this by hand: `torch.compile` with its
+		default TorchInductor backend generates Triton kernels, and the PyTorch documentation calls fusion the most
+		important optimization it performs. Writing it yourself shows what that generated code does.
+	</div>
+</CodeTabs>
+
+The CUDA kernels are in a header with no host code, so the tests can compile
+them with NVRTC on a machine without `nvcc`. `cuda/fusion.cu` times the three
+kernels together and the fused kernel, checks both against a CPU loop, and
+times back-to-back launches of an empty kernel.
+
+The PTX shows the count from the table. `generate.py` compiles the header for
+`sm_80` with NVRTC and counts the global loads and stores in each kernel:
+
+<Code code={summary} lang="text" title="generated/summary.txt" />
+
+Here is the fused kernel's PTX. Two `ld.global.f32`, one `fma.rn.f32`, one
+`max.f32` and one `st.global.f32`: nothing in between touches memory.
+
+<Code code={fusedPtx} lang="text" title="generated/fused_sm80.ptx" />
+
+The `fma.rn.f32` is a detail worth knowing. `nvcc` and NVRTC contract a
+multiply followed by an add into one fused multiply-add by default
+(`--fmad=true`), which rounds once instead of twice. The unfused `scale`
+kernel stores `a * x` to memory, rounded, before `add` sees it, so the two
+versions can differ in the last bit. That is why the tests compare with a
+small tolerance instead of exact equality.
+
+## Measure it yourself
+
+On a GPU, from `kernels/ch12-fusion`:
+
+```sh
+make -C cuda run
+python numba/fusion.py
+python triton/fusion.py
+nsys profile --stats=true ./cuda/fusion
+ncu --metrics dram__bytes_read.sum,dram__bytes_write.sum ./cuda/fusion
+```
+
+Each program prints the time of one unfused pass and one fused pass, the bytes
+the model counts and the effective bandwidth. Try a small size too, such as
+`./cuda/fusion 4096`. Things to look for:
+
+- The ratio of the two times at 2<sup>24</sup> elements and at 4,096, and how
+  close each is to the model's estimate with your measured empty-kernel launch
+  cost.
+- In the Nsight Systems timeline, three kernels per unfused pass and the gaps
+  between them.
+- In Nsight Compute, the DRAM bytes read and written by each kernel. For large
+  arrays they should be close to the table above. For arrays that fit in L2,
+  `add` and `relu` read less from DRAM than the table says.
+
+## Exercises
+
+**1. Count the bytes.** For n = 2<sup>20</sup> floats, how many bytes do the
+three kernels move, and how many does the fused kernel move?
+
+<details>
+<summary>Answer</summary>
+
+Each array is 2<sup>20</sup> x 4 bytes = {fmtBytes(arrayBytes(2 ** 20))}. The
+three kernels move 7 arrays: {fmtBytes(final(ex1, 'unfused').bytes)}. The fused
+kernel moves 3: {fmtBytes(final(ex1, 'fused').bytes)}.
+
+</details>
+
+**2. One more step.** The model code becomes `out = c * torch.relu(a * x + y)`
+with a scalar `c`, so the unfused version gets a fourth kernel. What is the
+new traffic ratio between unfused and fused?
+
+<details>
+<summary>Answer</summary>
+
+The fourth kernel reads the ReLU result and writes the scaled one: 2 more
+arrays, so 9 in total. The fused kernel still reads `x` and `y` and writes one
+output: 3 arrays. The ratio grows from 7 / 3 to 9 / 3 = 3. Every extra map in
+the chain adds 2 arrays to the unfused count and nothing to the fused one.
+
+</details>
+
+**3. Where launches take over.** In the model, on the {a100.name} with
+{DEFAULT_LAUNCH_US} µs per launch, at what n does the fused kernel's memory time
+equal its launch cost?
+
+<details>
+<summary>Answer</summary>
+
+The fused kernel moves 12 bytes per element. 12 n / ({fmt(a100.memoryGbPerS)} x
+10<sup>9</sup>) s = 10<sup>-6</sup> s gives n = {fmt(crossover)}, between
+2<sup>17</sup> and 2<sup>18</sup>. Below that, most of the modeled time is the
+launch. Set n to 2<sup>17</sup> and then 2<sup>18</sup> and watch the launch
+and memory parts of the fused time bar swap which is longer.
+
+</details>
+
+**4. Can this be fused?** Someone wants one elementwise kernel for
+`out = x - x.mean()`. Why does that not work the way `relu(a * x + y)` did?
+
+<details>
+<summary>Answer</summary>
+
+`out[i]` depends on every element of `x`, not only `x[i]`, so it is not a map.
+No thread can finish its element until the mean of the whole array is known,
+and threads in different blocks cannot wait for each other inside one normal
+launch. The mean is a reduction (chapter 13). The usual plan is a reduction
+kernel and then a map that subtracts; the map part can still be fused with
+any maps that follow it.
+
+</details>
+
+**5. Fewer bytes than the model.** Someone measures the unfused version at
+2<sup>20</sup> elements on an {a100.name} and finds less DRAM traffic than the
+{fmtBytes(final(ex1, 'unfused').bytes)} the model counts. What explains it?
+
+<details>
+<summary>Answer</summary>
+
+`t` and `u` are 4 MiB each, much less than the {a100.l2Mb} MB L2. When `scale`
+writes `t`, much of it can still be in L2 when `add` reads it, so those reads
+never go to DRAM. The model sends every access to DRAM. At 2<sup>24</sup>
+elements, each array is 64 MiB, larger than L2, and the counts come close to
+the model. Fusion still saves the launches and the L2 traffic.
+
+</details>
+
+## Further reading
+
+- [Alan Gray, Getting Started with CUDA Graphs](https://developer.nvidia.com/blog/cuda-graphs/) (NVIDIA Technical Blog, 2019): the launch overhead measurement quoted above, on a Tesla V100 with CUDA 10.1.
+- [Triton tutorial: Fused Softmax](https://triton-lang.org/main/getting-started/tutorials/02-fused-softmax.html), which counts the DRAM reads and writes of an unfused softmax and the benefit of fusion for bandwidth-bound operations.
+- [PyTorch: Getting Started with torch.compile](https://docs.pytorch.org/docs/2.14/user_guide/torch_compiler/torch.compiler_get_started.html), on TorchInductor generating fused Triton kernels and how to inspect them with `TORCH_COMPILE_DEBUG=1`.
+- [NVCC documentation: --fmad](https://docs.nvidia.com/cuda/cuda-compiler-driver-nvcc/index.html#fmad-true-false-fmad), the default contraction of multiplies and adds into FMA.
+- [Nsight Compute Profiling Guide](https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html), for the DRAM metrics.

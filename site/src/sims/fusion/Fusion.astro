@@ -1,0 +1,135 @@
+---
+import SimFrame from '@components/SimFrame.astro';
+import { GPUS } from '@sim-core/gpu-specs';
+import {
+	CODE,
+	DEFAULT_LAUNCH_US,
+	DEFAULT_LOG2N,
+	LAUNCH_US_MAX,
+	LOG2N_MAX,
+	LOG2N_MIN,
+	PIPELINE_IDS,
+	PIPELINE_NAMES,
+	fmt,
+	fmtBytes,
+	type Config,
+	type PipelineId,
+} from './model';
+
+interface Props {
+	gpu?: Config['gpu'];
+	log2n?: number;
+	launchUs?: number;
+	code?: PipelineId;
+}
+
+const { gpu = 'a100', log2n = DEFAULT_LOG2N, launchUs = DEFAULT_LAUNCH_US, code = 'unfused' } = Astro.props;
+const variants = PIPELINE_IDS.map((id) => ({ name: id, code: CODE[id], lang: 'cpp' }));
+// SimFrame shows the first variant until the script runs, so put the starting one first.
+variants.sort((a, b) => Number(b.name === code) - Number(a.name === code));
+const sizeText = (k: number) => `${fmt(2 ** k)} floats, ${fmtBytes(2 ** k * 4)} per array`;
+---
+
+<SimFrame title="Fusion: three kernels or one" sim="fusion" code={variants} config={{ gpu, log2n, launchUs, code }}>
+	<Fragment slot="params">
+		<label class="sim-field">
+			<span>GPU (for the estimate)</span>
+			<select name="gpu">
+				{GPUS.map((g) => <option value={g.id} selected={g.id === gpu}>{g.name}, {g.memoryGbPerS.toLocaleString('en-US')} GB/s</option>)}
+			</select>
+		</label>
+		<label class="sim-field">
+			<span>Elements n = 2<sup data-out="log2n">{log2n}</sup></span>
+			<input type="range" name="log2n" min={LOG2N_MIN} max={LOG2N_MAX} value={log2n} aria-valuetext={sizeText(log2n)} />
+			<span class="fu-hint" data-out="size">{sizeText(log2n)}</span>
+		</label>
+		<label class="sim-field">
+			<span>Assumed cost per launch <output data-out="launch">{launchUs} µs</output></span>
+			<input type="range" name="launchUs" min="0" max={LAUNCH_US_MAX} step="0.5" value={launchUs} aria-valuetext={`${launchUs} microseconds`} />
+		</label>
+		<label class="sim-field">
+			<span>Code panel</span>
+			<select name="code">
+				{PIPELINE_IDS.map((id) => <option value={id} selected={id === code}>{PIPELINE_NAMES[id]}</option>)}
+			</select>
+		</label>
+	</Fragment>
+
+	<div class="sim-canvas" data-canvas>
+		<svg role="img" aria-label="For each version, the DRAM arrays the current kernel reads and writes, a DRAM traffic bar and a modeled time bar split into launch cost and memory time"></svg>
+	</div>
+	<ul class="fu-legend" aria-label="Legend">
+		<li><span class="fu-swatch is-read"></span>array read from DRAM</li>
+		<li><span class="fu-swatch is-write"></span>array written to DRAM</li>
+		<li><span class="fu-swatch is-absent"></span>never allocated</li>
+		<li><span class="fu-swatch is-launch"></span>launch cost (assumed)</li>
+		<li><span class="fu-swatch is-mem"></span>memory time at peak bandwidth</li>
+	</ul>
+	<ul class="fu-totals" data-totals aria-label="Running totals"></ul>
+
+	<Fragment slot="caption">
+		Model, not a measurement. Each kernel reads and writes every element of its arrays once, at the GPU's peak memory
+		bandwidth from the spec sheet, and each launch adds the fixed cost you set; kernels run one after another with no
+		overlap. It leaves out the L2 cache, which can keep small intermediates out of DRAM, partial bandwidth for small
+		arrays, and the time for the arithmetic, which is tiny next to the memory traffic for these kernels.
+	</Fragment>
+</SimFrame>
+
+<script>
+	import { Stepper } from '@sim-core/stepper';
+	import { bindControls } from '@sim-core/controls';
+	import { highlightLines, showVariant } from '@sim-core/code-sync';
+	import { describe, fmt, fmtBytes, fmtUs, LAST_STEP, linesAt, PIPELINE_IDS, PIPELINE_NAMES, totalsAt, type Config, type PipelineId } from './model';
+	import { render } from './view';
+
+	function mount(frame: HTMLElement) {
+		const config: Config & { code: PipelineId } = JSON.parse(frame.dataset.config!);
+		const stepper = new Stepper(LAST_STEP, 1200);
+		const canvas = frame.querySelector<HTMLElement>('[data-canvas]')!;
+		const svgEl = canvas.querySelector('svg')!;
+		const totalsEl = frame.querySelector<HTMLElement>('[data-totals]')!;
+		const field = <T extends HTMLElement>(name: string) => frame.querySelector<T>(`[name="${name}"]`)!;
+		const out = (name: string) => frame.querySelector<HTMLElement>(`[data-out="${name}"]`)!;
+		let code = showVariant(frame, config.code);
+
+		const draw = () => {
+			const step = stepper.step;
+			render(svgEl, config, step, Math.max(260, canvas.clientWidth));
+			highlightLines(code, linesAt(config.code, step));
+			totalsEl.replaceChildren(
+				...PIPELINE_IDS.map((p) => {
+					const t = totalsAt(config, p, step);
+					const li = document.createElement('li');
+					const name = document.createElement('strong');
+					name.textContent = `${PIPELINE_NAMES[p]}:`;
+					li.append(name, ` ${t.launches} ${t.launches === 1 ? 'launch' : 'launches'}, ${fmtBytes(t.readBytes)} read + ${fmtBytes(t.writeBytes)} written, model estimate ${fmtUs(t.timeUs)}.`);
+					return li;
+				}),
+			);
+		};
+
+		frame.querySelector('.sim-params')!.addEventListener('input', () => {
+			config.gpu = field<HTMLSelectElement>('gpu').value as Config['gpu'];
+			config.log2n = Number(field<HTMLInputElement>('log2n').value);
+			config.launchUs = Number(field<HTMLInputElement>('launchUs').value);
+			config.code = field<HTMLSelectElement>('code').value as PipelineId;
+			const size = `${fmt(2 ** config.log2n)} floats, ${fmtBytes(2 ** config.log2n * 4)} per array`;
+			out('log2n').textContent = String(config.log2n);
+			out('size').textContent = size;
+			field<HTMLInputElement>('log2n').setAttribute('aria-valuetext', size);
+			out('launch').textContent = `${config.launchUs} µs`;
+			field<HTMLInputElement>('launchUs').setAttribute('aria-valuetext', `${config.launchUs} microseconds`);
+			code = showVariant(frame, config.code);
+			// The step stays put so a change is compared at the same point; the status must follow it.
+			sync(stepper.step);
+			draw();
+		});
+
+		const sync = bindControls(frame, stepper, (step) => describe(config, step));
+		stepper.onChange(draw);
+		new ResizeObserver(draw).observe(canvas);
+		draw();
+	}
+
+	document.querySelectorAll<HTMLElement>('[data-sim="fusion"]').forEach(mount);
+</script>
