@@ -1,0 +1,448 @@
+---
+title: 25. FlashAttention
+description: Why standard attention is limited by the N x N score matrix in HBM, and how FlashAttention tiles Q, K and V through on-chip memory with an online softmax so that matrix is never written.
+sidebar:
+  order: 25
+banner:
+  content: Draft chapter. If something is wrong or unclear, use the edit link at the bottom of the page.
+---
+
+import AttentionTiler from '@sims/attention-tiler/AttentionTiler.astro';
+import CodeTabs from '@components/CodeTabs.astro';
+import { gpuById } from '@sim-core/gpu-specs';
+import { ridge, fmtNum } from '@sims/roofline/model';
+import { attentionFlops, flashTraffic, fmt, fmtBytes, naiveTraffic, onChip, REAL_CONFIG } from '@sims/attention-tiler/model';
+import cuda from '@kernels/ch25-flash-attention/cuda/flash_attention_kernels.cuh?raw';
+import triton from '@kernels/ch25-flash-attention/triton/flash_attention.py?raw';
+
+export const a100 = gpuById('a100');
+export const h100 = gpuById('h100');
+export const real = REAL_CONFIG;
+export const total = (t) => t.read + t.written;
+export const nv = naiveTraffic(real);
+export const fl = flashTraffic(real);
+export const once = 4 * real.n * real.d * 2;
+export const ai = (bytes) => fmtNum(attentionFlops(real) / bytes);
+export const br64 = { ...real, br: 64 };
+export const causal = { ...real, causal: true };
+export const tiles = (c) => Math.ceil(c.n / c.br) * Math.ceil(c.n / c.bc);
+export const numbaNote = `# There is no Numba version of this chapter.
+#
+# numba-cuda has no API for tensor core (WMMA or MMA)
+# instructions, so a kernel written with it would look
+# like the FP32 CUDA C++ tab: one thread per row,
+# shared-memory tiles for K and V, and the same online
+# softmax. The Triton tab is the version to study.`;
+
+A transformer layer with sequence length 4,096 and head dimension 64 computes,
+for every head, a score matrix with 4,096 x 4,096 = {fmt(real.n * real.n)}
+entries. In FP16 that is {fmtBytes(real.n * real.n * 2)}, sixteen times the
+size of Q, K, V and O together. The standard implementation writes this matrix to
+GPU memory, reads it back for the softmax, writes the probabilities, and reads
+those back for the final product. Almost all of its memory traffic is for a
+matrix nobody keeps.
+
+FlashAttention (Dao et al., 2022) computes exactly the same result without
+ever writing that matrix. It is the same trick as kernel fusion in chapter 12,
+the online softmax from chapter 24 and the tiling of chapter 20, combined in
+one kernel. This last chapter puts them together.
+
+## Attention in three products
+
+Given Q, K and V, each an N x d matrix (N tokens, head dimension d), attention is
+
+```
+S = Q Kᵀ / √d          N x N   scores
+P = softmax(S)         N x N   softmax of each row
+O = P V                N x d   output
+```
+
+Row i of O is a weighted average of the rows of V, weighted by how well query
+i matches each key. A **causal** mask, used in language models, sets
+S<sub>ij</sub> to -∞ for j > i, so token i only sees tokens 0 to i.
+
+The FLOPs are in the two products: 2N<sup>2</sup>d each, 4N<sup>2</sup>d in
+total, the count the FlashAttention-2 paper uses. The softmax adds a few
+operations per entry of S. For N = {fmt(real.n)} and d = {real.d} that is
+{fmtNum(attentionFlops(real) / 1e9)} GFLOPs per head.
+
+## Counting the bytes of standard attention
+
+Algorithm 0 in the FlashAttention paper is the standard implementation: three
+kernels with S and P stored in HBM between them. Count the elements each step
+moves, assuming every matrix multiply reads its inputs exactly once:
+
+| Step | Reads | Writes |
+|---|---|---|
+| S = QKᵀ | Q, K: 2Nd | S: N<sup>2</sup> |
+| P = softmax(S) | S: N<sup>2</sup> | P: N<sup>2</sup> |
+| O = PV | P: N<sup>2</sup>, V: Nd | O: Nd |
+| Total | 3Nd + 2N<sup>2</sup> | 2N<sup>2</sup> + Nd |
+
+The N<sup>2</sup> terms win as soon as N is larger than d, which it is by a
+lot: GPT-2 has N = 1,024 and d = 64. At N = {fmt(real.n)}, d = {real.d} in FP16,
+one head moves {fmtBytes(total(nv))}, and {fmtBytes(2 * nv.scoreBytes)} of that
+is S and P being written and read back. A causal mask does not help: S and P
+are still full N x N matrices, with -∞ and 0 above the diagonal.
+
+Attention also has a memory footprint problem. Storing S and P for every head
+of a batch is what limits the sequence length a GPU can train on, and the
+backward pass usually wants P kept around.
+
+## IO-awareness
+
+Chapter 19 put kernels on the roofline. The FLOPs above against the bytes
+above give standard attention an arithmetic intensity of
+{ai(total(nv))} FLOP/byte at this size. The {a100.name}'s ridge point for FP16
+tensor cores is {fmtNum(ridge(a100, 'fp16'))} FLOP/byte
+({a100.peakFp16TensorTflops} TFLOPS over {fmtNum(a100.memoryGbPerS)} GB/s). So
+standard attention is memory-bound: its time is set by the trips through HBM,
+and the softmax kernel in the middle does almost no arithmetic at all.
+
+The FlashAttention paper calls the fix **IO-awareness**: design the algorithm
+around the reads and writes between HBM and on-chip SRAM (shared memory and
+registers), not around the FLOPs. The question becomes: can the whole chain
+S, P, O run on chip, one tile at a time, so that only Q, K, V and O cross to HBM?
+
+Two things seem to stand in the way. The softmax of a row needs the whole
+row: its maximum and its sum. And O = PV needs the whole row of P before any
+output is final. Both are solved by the online softmax.
+
+## Tiling with an online softmax
+
+Split Q into T<sub>r</sub> = ⌈N / B<sub>r</sub>⌉ blocks of B<sub>r</sub> rows,
+and K and V into T<sub>c</sub> = ⌈N / B<sub>c</sub>⌉ blocks of B<sub>c</sub>
+rows. A block Q<sub>i</sub> and a block K<sub>j</sub> give one tile of scores,
+S<sub>ij</sub> = Q<sub>i</sub>K<sub>j</sub>ᵀ / √d, B<sub>r</sub> x B<sub>c</sub>,
+small enough for registers and shared memory.
+
+Chapter 24 showed how to take a softmax over a row in chunks: keep a running
+maximum m and a running sum l of exp(x - m), and when a new chunk raises the
+maximum, multiply the old sum by exp(m<sub>old</sub> - m<sub>new</sub>) before
+adding the new terms. FlashAttention applies the same correction to the output.
+Keep, for each row of the Q block, an accumulator acc for the unnormalized
+output. For each K/V block j:
+
+```
+m_new = max(m, rowmax(S_ij))
+alpha = exp(m - m_new)              rescale everything summed so far
+p     = exp(S_ij - m_new)           B_r x B_c, on chip
+l     = alpha * l + rowsum(p)
+acc   = alpha * acc + p V_j
+m     = m_new
+```
+
+After the last block, O<sub>i</sub> = acc / l. Every term in acc and l was
+scaled to the same final maximum, so the result is exactly softmax(S) V, not
+an approximation. Theorem 1 of the paper states it: the algorithm returns
+O = softmax(QKᵀ)V with O(N<sup>2</sup>d) FLOPs and needs O(N) additional
+memory beyond inputs and output, for m and l.
+
+Dividing by l once at the end is one of the FlashAttention-2 changes. The
+original algorithm normalized O<sub>i</sub> after every block, which costs a
+division per element per block. FlashAttention-2 keeps acc unscaled and divides
+once, because on an A100 the paper counts 312 TFLOPS of FP16 matrix multiply
+against 19.5 TFLOPS of FP32 non-matmul arithmetic: "each non-matmul FLOP is
+16× more expensive than a matmul FLOP."
+
+### Loop order
+
+FlashAttention-2 puts the loop over Q blocks outside and the loop over K/V
+blocks inside: Q<sub>i</sub>, m, l and acc stay on chip for the whole inner
+loop, and O<sub>i</sub> is written once. The outer iterations do not depend on
+each other, so each runs as its own thread block, in parallel. The original
+FlashAttention had the loops the other way round: K<sub>j</sub> and V<sub>j</sub>
+outside, and each inner step read O<sub>i</sub>, m<sub>i</sub> and
+l<sub>i</sub> from HBM, updated them and wrote them back. The FlashAttention-2
+paper credits the swapped order, and parallelizing over the sequence, to Phil
+Tillet's Triton implementation.
+
+## The attention tiler
+
+The simulation runs the FlashAttention-2 forward pass on a small problem, one
+tile per step. Q is on the left, Kᵀ above and Vᵀ below the score matrix (both
+transposed so that column j of S lines up with row j of K and V), and O on the
+right. Highlighted tiles are the ones on chip in the current step. The table
+under the drawing shows m, l, the rescale factor and the first column of acc
+for every row of the current Q block, with real numbers. The counters compare
+the HBM bytes moved so far with standard attention's whole pass. Before you
+step, guess how many bytes the tiled version moves.
+
+<AttentionTiler />
+
+Things to try:
+
+- **The default, n = 12, B<sub>r</sub> = B<sub>c</sub> = 4.** Watch row 0 in
+  the second tile: its maximum rises, so its earlier l and acc shrink by the
+  rescale factor before the new tile's terms are added. At the end, compare
+  O with the reference column.
+- **n = 16, d = 8, B<sub>r</sub> = B<sub>c</sub> = 2.** Tiny blocks: K and V
+  are read once per Q block, 8 times, and the tiled version moves more bytes
+  than standard attention. FlashAttention only wins when B<sub>r</sub> is
+  large compared with d, which is what the SRAM size buys.
+- **B<sub>r</sub> = 8.** With n = 12 that is 2 Q blocks instead of 3, so K and
+  V are read twice instead of three times. Then
+  look at the on-chip line: the score tile and accumulator grow with B<sub>r</sub>.
+- **Causal mask.** Tiles entirely above the diagonal are crossed out and never
+  visited; tiles on the diagonal are visited with the upper part masked.
+  With B<sub>r</sub> = 8 and B<sub>c</sub> = 2, count how many K/V blocks
+  each Q block visits.
+
+## How much traffic is left
+
+The tiled pass reads Q once, K and V once per Q block, and writes O once:
+
+```
+reads  = Nd + T_r · 2Nd     writes = Nd       (elements)
+```
+
+At N = {fmt(real.n)}, d = {real.d}, B<sub>r</sub> = {real.br},
+B<sub>c</sub> = {real.bc} (FlashAttention-2 typically picks 64 or 128
+for each), that is {fmtBytes(total(fl))} per head against
+{fmtBytes(total(nv))} for standard attention, and nothing of size N x N is
+ever stored. These are the sim's formulas, the "same formulas" line in its
+counters.
+
+The K/V term is 2N<sup>2</sup>d / B<sub>r</sub>. B<sub>r</sub> is limited by
+on-chip memory: a Q block, a K and V block and a score tile must fit in the
+SRAM size M, so B<sub>r</sub> and B<sub>c</sub> are about M / d. Put that in
+and the traffic is about N<sup>2</sup>d<sup>2</sup> / M. That is the paper's
+result:
+
+> **Theorem 2.** Let N be the sequence length, d be the head dimension, and M
+> be size of SRAM with d ≤ M ≤ Nd. Standard attention (Algorithm 0) requires
+> Θ(Nd + N<sup>2</sup>) HBM accesses, while FlashAttention (Algorithm 1)
+> requires Θ(N<sup>2</sup>d<sup>2</sup>M<sup>-1</sup>) HBM accesses.
+
+For d of 64 to 128 and M around 100 KB, the paper notes, d<sup>2</sup> is many
+times smaller than M. It also proves that the tiling cannot be beaten in
+general:
+
+> **Proposition 3.** Let N be the sequence length, d be the head dimension,
+> and M be size of SRAM with d ≤ M ≤ Nd. There does not exist an algorithm to
+> compute exact attention with o(N<sup>2</sup>d<sup>2</sup>M<sup>-1</sup>) HBM
+> accesses for all M in the range [d, Nd].
+
+On the roofline, the tiled pass at this size has an intensity of
+{ai(total(fl))} FLOP/byte by the formula above, close to the
+{a100.name}'s FP16 ridge of {fmtNum(ridge(a100, 'fp16'))}. The repeated K/V
+reads are the same {fmtBytes(2 * real.n * real.d * 2)} per head over and over,
+which fits in L2 (chapter 9), so on a real GPU much of that traffic never
+reaches DRAM. If L2 served every repeat, DRAM traffic would drop to Q, K, V and
+O once, {fmtBytes(once)}, and the intensity to {ai(once)} FLOP/byte: firmly
+compute-bound. That is why the arithmetic in the kernel has to run on tensor
+cores (chapter 23), and why FlashAttention-2 counts non-matmul FLOPs at all.
+
+### Causal masking
+
+With a causal mask, every tile whose first column is past the Q block's last
+row is all -∞: it contributes nothing to m, l or acc, so the inner loop stops
+before it. For B<sub>r</sub> = {causal.br} and B<sub>c</sub> = {causal.bc} at
+N = {fmt(causal.n)}, the loop visits {fmt(flashTraffic(causal).tiles)} of
+{fmt(tiles(causal))} tiles. Only tiles that cross the diagonal need the mask
+applied element by element; the others run unmasked. The FlashAttention-2
+paper reports that skipping the masked blocks gives around 1.7 to 1.8 times
+speedup compared with attention without the mask; it does not name the GPU for
+that figure, and its benchmarks ran on an A100. The Triton tutorial's
+kernel splits the inner loop into an unmasked part and a diagonal part for this
+reason.
+
+## The code
+
+All versions are the FlashAttention-2 forward pass: one program or thread block
+per block of Q rows, the K/V loop inside, the online softmax, and one division
+by l at the end.
+
+<CodeTabs
+	cuda={cuda}
+	numba={numbaNote}
+	triton={triton}
+	titles={{ cuda: 'cuda/flash_attention_kernels.cuh', numba: 'numba (none)', triton: 'triton/flash_attention.py' }}
+>
+	<div slot="triton-note">
+		The grid is (Q blocks, batch x heads): `tl.program_id(0)` picks the Q block and `tl.program_id(1)` the head,
+		which is FlashAttention-2's parallelism over the sequence. Both products are `tl.dot`, so FP16 inputs run on
+		tensor cores; `p` is cast to FP16 before the second one, while `m`, `l` and `acc` stay in FP32. With
+		`CAUSAL`, the loop bound `hi` stops at the block's last row, so fully masked tiles are never loaded. The
+		Triton tutorial version uses `exp2` with log<sub>2</sub>(e) folded into the scale, which saves a multiply per
+		score.
+	</div>
+</CodeTabs>
+
+The CUDA kernel is the same loop written at the thread level, in FP32 and
+without tensor cores: each thread owns one row of Q, keeps that row and its
+accumulator in registers (d is fixed at 64 so the arrays can stay there), and
+the block loads 32 rows of K and V into shared memory per step. It shows where
+everything lives, not how fast attention can be; a production kernel splits the
+work across warps with MMA instructions (chapter 23) and pipelines the tile
+loads. `cuda/flash_attention.cu` runs 8 heads, checks two against a CPU
+reference in double precision and prints the time.
+
+The tests in `kernels/ch25-flash-attention/test_correctness.py` check the
+Triton kernel against NumPy softmax attention for N from 1 to 64, causal and
+not, in FP32 and FP16, with equal and unequal block sizes; without a GPU they
+run under `TRITON_INTERPRET=1`. They compile the CUDA header with NVRTC for
+`sm_75`, `sm_80` and `sm_90` and check its PTX: K and V go through shared
+memory, there is no `mma` instruction and no local memory, and the only global stores are the 64
+output values of each row, so S never reaches memory. The CUDA program runs
+when `nvcc` is present.
+
+## Measure it yourself
+
+On a GPU, from `kernels/ch25-flash-attention`:
+
+```sh
+python triton/flash_attention.py 4096
+make -C cuda run
+ncu --metrics dram__bytes_read.sum,dram__bytes_write.sum python triton/flash_attention.py 1024
+```
+
+The Triton script times the naive version, this chapter's kernel and PyTorch's
+`scaled_dot_product_attention`, which can dispatch to a FlashAttention-2
+kernel on CUDA. Things to look for:
+
+- The rate in TFLOPS of each version, against the FP16 tensor peak of your
+  GPU from chapter 19.
+- How the naive time grows with N compared with the tiled kernel, and when the
+  naive version runs out of memory.
+- In Nsight Compute, the DRAM bytes of the tiled kernel against the formula
+  above. The difference is the K/V re-reads served from L2.
+
+For scale, here is what the papers measured, on their hardware. The
+FlashAttention paper (Figure 2) ran GPT-2 medium attention (N = 1,024, d = 64,
+16 heads, batch 64, forward and backward) on an A100: standard attention moved
+40.3 GB through HBM in 41.7 ms, FlashAttention 4.4 GB in 7.3 ms. The
+FlashAttention-2 paper reports, on an A100 80GB SXM4, around 2 times the speed
+of FlashAttention and up to 230 TFLOPS, 73% of the theoretical maximum.
+
+## Beyond the forward pass
+
+- **Backward pass.** The gradients need P, which was never stored. The
+  backward pass recomputes each tile of S and P on chip from Q, K and the saved
+  row statistics (FlashAttention-2 saves only the logsumexp L = m + log l), a
+  trade of extra FLOPs for fewer bytes. The paper proves the same
+  Θ(N<sup>2</sup>d<sup>2</sup>M<sup>-1</sup>) bound for it (Theorem 5). This
+  course does not implement it.
+- **Inside the block.** FlashAttention-2 also changes how warps share a block:
+  it splits Q across 4 warps, each with all of K and V, instead of splitting K
+  and V and summing partial results through shared memory.
+- **FlashAttention-3** (Shah et al., 2024) targets the H100 with Hopper-only
+  features: the Tensor Memory Accelerator for asynchronous tile copies,
+  asynchronous `wgmma` tensor core instructions, warp specialization, and
+  FP8. Its paper reports 1.5 to 2.0 times the speed of FlashAttention-2 in FP16
+  on the H100, up to 740 TFLOPS. Those features are outside this course.
+
+## Exercises
+
+**1. Count the naive bytes.** For one head with N = {fmt(real.n)}, d = {real.d}
+in FP16, how many bytes does standard attention read and write, and what share
+of it is S and P?
+
+<details>
+<summary>Answer</summary>
+
+Reads are 3Nd + 2N<sup>2</sup> elements, writes 2N<sup>2</sup> + Nd, at 2
+bytes each: {fmtBytes(nv.read)} read and {fmtBytes(nv.written)} written,
+{fmtBytes(total(nv))} in total. S and P are written once and read once each,
+4N<sup>2</sup> elements: {fmtBytes(2 * nv.scoreBytes)}, or
+{fmtNum((100 * 2 * nv.scoreBytes) / total(nv))}% of the traffic.
+
+</details>
+
+**2. Smaller Q blocks.** Same head, tiled with B<sub>r</sub> = 64 instead of
+{real.br} (B<sub>c</sub> = {real.bc}). How much HBM traffic now, and why would
+anyone pick the smaller block?
+
+<details>
+<summary>Answer</summary>
+
+T<sub>r</sub> doubles from {Math.ceil(real.n / real.br)} to
+{Math.ceil(real.n / 64)}, so K and V are read twice as often:
+{fmtBytes(total(flashTraffic(br64)))} instead of {fmtBytes(total(fl))}. The
+smaller block needs less on chip, {fmtBytes(onChip(br64).total)} instead of
+{fmtBytes(onChip(real).total)} by the sim's count, which can let more blocks
+run per SM (chapter 5) and gives twice as many blocks to spread over the SMs
+when batch x heads is small.
+
+</details>
+
+**3. Causal tiles.** With N = {fmt(causal.n)}, B<sub>r</sub> = {causal.br},
+B<sub>c</sub> = {causal.bc} and a causal mask, how many tiles does the inner
+loop visit, and how many of those need the element-wise mask?
+
+<details>
+<summary>Answer</summary>
+
+Q block i covers rows 128i to 128i + 127. Tile j starts at column 64j, so it is
+visited while 64j ≤ 128i + 127, which is j ≤ 2i + 1: 2i + 2 tiles. Summed over
+i = 0 to 31 that is {fmt(flashTraffic(causal).tiles)} of {fmt(tiles(causal))},
+just over half. Tiles 2i and 2i + 1 cross the diagonal, so 2 per Q block,
+64 in all, need the mask; the rest run unmasked.
+
+</details>
+
+**4. Predict the rescale.** A row has m = 1.0 and l = 2.0 after one tile. The
+next tile's largest score in that row is 3.0, and its exponentials
+exp(s - 3.0) sum to 1.5. What are the new m and l?
+
+<details>
+<summary>Answer</summary>
+
+m = max(1.0, 3.0) = 3.0. The old sum is rescaled by exp(1.0 - 3.0) = 0.135:
+l = 2.0 x 0.135 + 1.5 = 1.77. The accumulator is multiplied by the same 0.135.
+Step the sim to a tile where a row's maximum rises and check the same
+arithmetic in the table.
+
+</details>
+
+**5. Find the bug.** Someone writes the inner loop as
+
+```python
+m_new = tl.maximum(m_i, tl.max(s, 1))
+p = tl.exp(s - m_new[:, None])
+l_i = l_i * tl.exp(m_i - m_new) + tl.sum(p, 1)
+acc = acc + tl.dot(p.to(v.dtype), v)
+m_i = m_new
+```
+
+The test passes for some inputs and fails for others. Which inputs pass?
+
+<details>
+<summary>Answer</summary>
+
+acc is never multiplied by exp(m_old - m_new), so terms added before a rise of
+the maximum keep their old, larger scale while l was corrected. A row comes out
+right only if its maximum never rises after the first K/V block: when every
+row's largest score is in the first block, or when there is only one K/V block
+(N ≤ B<sub>c</sub>). Inputs with N = 1 or a single tile always pass, which is
+why tests need several blocks and a ragged end.
+
+</details>
+
+## Where to go next
+
+The course ends here. These topics build on it and are out of scope:
+
+- **Quantization and low precision.** FP8 and integer formats beyond chapter 23:
+  [PyTorch torchao](https://docs.pytorch.org/ao/stable/index.html) for
+  quantized training and inference in PyTorch.
+- **Multi-GPU communication.** All-reduce, all-gather and friends for data and
+  tensor parallelism: the [NCCL User Guide](https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/index.html).
+- **CUTLASS and CuTe.** NVIDIA's C++ templates for GEMM, attention and the
+  layouts behind them: [CUTLASS documentation](https://docs.nvidia.com/cutlass/)
+  and the [CUTLASS repository](https://github.com/NVIDIA/cutlass).
+- **Hopper features: TMA, wgmma, clusters.** The
+  [Hopper Tuning Guide](https://docs.nvidia.com/cuda/hopper-tuning-guide/index.html)
+  covers the Tensor Memory Accelerator and thread block clusters; the
+  [PTX ISA](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html)
+  documents the asynchronous `wgmma` instructions.
+
+## Further reading
+
+- [Tri Dao, Daniel Y. Fu, Stefano Ermon, Atri Rudra, Christopher Ré, FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness](https://arxiv.org/abs/2205.14135) (2022): Algorithm 0 and 1, Theorems 1 and 2, Proposition 3, and the A100 measurements quoted above.
+- [Tri Dao, FlashAttention-2: Faster Attention with Better Parallelism and Work Partitioning](https://arxiv.org/abs/2307.08691) (2023): the loop order, the fewer non-matmul FLOPs, causal block skipping and the warp partitioning.
+- [Jay Shah et al., FlashAttention-3: Fast and Accurate Attention with Asynchrony and Low-precision](https://arxiv.org/abs/2407.08608) (2024), for Hopper.
+- [Maxim Milakov, Natalia Gimelshein, Online normalizer calculation for softmax](https://arxiv.org/abs/1805.02867) (2018), the online softmax.
+- [Triton tutorial: Fused Attention](https://triton-lang.org/main/getting-started/tutorials/06-fused-attention.html), a tuned FlashAttention-2 forward and backward pass in Triton.
+- [Dao-AILab/flash-attention](https://github.com/Dao-AILab/flash-attention), the reference CUDA implementation.
+- [PyTorch: scaled_dot_product_attention](https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html), which lists FlashAttention-2 among its implementations and how to select one.
