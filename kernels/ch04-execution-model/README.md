@@ -16,6 +16,6 @@ python triton/divergence.py
 pytest
 ```
 
-`./cuda/divergence` takes an optional element count; the default is 2<sup>20</sup>. With random signs nearly every warp diverges. After sorting, only the one warp that holds the change of sign does.
+`./cuda/divergence` takes an optional element count; the default is 2<sup>20</sup>. With random signs nearly every warp diverges. After sorting, at most one warp diverges: the one where the values change sign.
 
 Without a GPU, `pytest` sets `NUMBA_ENABLE_CUDASIM=1` and `TRITON_INTERPRET=1` and skips the CUDA test when `nvcc` is missing.
