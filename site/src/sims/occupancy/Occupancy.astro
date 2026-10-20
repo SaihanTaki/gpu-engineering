@@ -1,0 +1,158 @@
+---
+import SimFrame from '@components/SimFrame.astro';
+import { GPUS, gpuById } from '@sim-core/gpu-specs';
+
+interface Props {
+	gpu?: (typeof GPUS)[number]['id'];
+	regs?: number;
+	/** Shared memory per block in KB. */
+	smemKb?: number;
+	blockSize?: number;
+}
+
+const { gpu = 'a100', regs = 32, smemKb = 0, blockSize = 256 } = Astro.props;
+const spec = gpuById(gpu);
+const presets = [
+	{ label: '33 registers', regs: 33, smemKb: 0, blockSize: 256 },
+	{ label: '32-thread blocks', regs: 32, smemKb: 0, blockSize: 32 },
+	{ label: '48 KB shared, 128 threads', regs: 32, smemKb: 48, blockSize: 128 },
+	{ label: '1024 threads, 65 registers', regs: 65, smemKb: 0, blockSize: 1024 },
+];
+---
+
+<SimFrame title="Occupancy calculator: how many blocks fit on one SM?" sim="occupancy" config={{ gpu, regs, smemKb, blockSize }}>
+	<Fragment slot="params">
+		<label class="sim-field">
+			<span>GPU</span>
+			<select name="gpu">
+				{GPUS.map((g) => <option value={g.id} selected={g.id === gpu}>{g.name} (compute capability {g.computeCapability})</option>)}
+			</select>
+		</label>
+		<label class="sim-field">
+			<span>Registers per thread <output data-out="regs">{regs}</output></span>
+			<input type="range" name="regs" min="1" max={spec.maxRegsPerThread} value={regs} />
+		</label>
+		<label class="sim-field">
+			<span>Shared memory per block <output data-out="smemKb">{smemKb} KB</output></span>
+			<input type="range" name="smemKb" min="0" max={spec.maxSharedKbPerBlock} value={smemKb} />
+		</label>
+		<label class="sim-field">
+			<span>Threads per block <output data-out="blockSize">{blockSize}</output></span>
+			<input type="range" name="blockSize" min="32" max={spec.maxThreadsPerBlock} step="32" value={blockSize} />
+		</label>
+	</Fragment>
+
+	<div class="occ-presets" role="group" aria-label="Try these">
+		{presets.map((p) => <button type="button" data-preset={JSON.stringify(p)}>{p.label}</button>)}
+	</div>
+
+	<p class="occ-result" data-result aria-live="polite"></p>
+	<div class="sim-canvas" data-canvas>
+		<svg role="img" aria-label="One SM's warp slots, register file in four partitions, shared memory and block slots, filled by resident blocks"></svg>
+	</div>
+	<ul class="occ-limits" data-limits aria-label="Blocks per SM allowed by each resource"></ul>
+
+	<Fragment slot="caption">
+		Follows the rules of NVIDIA's occupancy calculator (cuda_occupancy.h): registers go to warps in units of 256 and
+		are split over four partitions, shared memory is rounded to 256 bytes (Turing) or 128 bytes (Ampere, Hopper) with
+		1 KB reserved per block on Ampere and Hopper. It assumes the largest shared memory carveout and that the kernel
+		opted in to more than 48 KB. It leaves out barrier limits, thread block clusters and partitioned caching. Which
+		partition each warp lands in is drawn in turn; the hardware's placement is not documented.
+	</Fragment>
+</SimFrame>
+
+<script>
+	import { Stepper } from '@sim-core/stepper';
+	import { bindControls } from '@sim-core/controls';
+	import { gpuById } from '@sim-core/gpu-specs';
+	import { cap, describe, fmt, kb, lastStep, occupancy, pct, plural, RESOURCE_NAMES, RESOURCES, type Kernel } from './model';
+	import { render } from './view';
+
+	function mount(frame: HTMLElement) {
+		const config = JSON.parse(frame.dataset.config!);
+		let gpu = gpuById(config.gpu);
+		const k: Kernel = { regsPerThread: config.regs, smemPerBlock: config.smemKb * 1024, blockSize: config.blockSize };
+		let o = occupancy(gpu, k);
+		const stepper = new Stepper(lastStep(o), 700);
+		const canvas = frame.querySelector<HTMLElement>('[data-canvas]')!;
+		const svgEl = canvas.querySelector('svg')!;
+		const result = frame.querySelector<HTMLElement>('[data-result]')!;
+		const limitsEl = frame.querySelector<HTMLElement>('[data-limits]')!;
+		const input = (name: string) => frame.querySelector<HTMLInputElement>(`[name="${name}"]`)!;
+		const out = (name: string) => frame.querySelector<HTMLElement>(`[data-out="${name}"]`)!;
+
+		const howMany = (n: number) => (n === Infinity ? 'no limit' : `${n} block${n === 1 ? '' : 's'}`);
+		const limitText = (r: (typeof RESOURCES)[number]) => {
+			switch (r) {
+				case 'warps':
+					return `${o.warpsPerBlock} warp${o.warpsPerBlock === 1 ? '' : 's'} per block, ${gpu.maxWarpsPerSm} slots per SM`;
+				case 'registers':
+					return `${k.regsPerThread} x 32 = ${fmt(k.regsPerThread * 32)}, rounded up to ${fmt(o.regsPerWarp)} per warp. ${o.warpsPerPartition === Infinity ? 'Any number' : o.warpsPerPartition} of those fit in each partition's ${fmt(o.regsPerPartition)}`;
+				case 'shared':
+					return o.smemPerBlock
+						? `${kb(o.smemPerBlock)} per block${gpu.reservedSmemPerBlock ? ' with the 1 KB reserved' : ''}, ${gpu.maxSharedKbPerSm} KB per SM`
+						: 'nothing used';
+				case 'blocks':
+					return `at most ${gpu.maxBlocksPerSm} resident blocks per SM`;
+			}
+		};
+
+		const draw = () => {
+			render(svgEl, gpu, o, stepper.step, Math.max(280, canvas.clientWidth));
+			result.textContent = o.error
+				? `Cannot launch. ${o.error}`
+				: `${plural(o.blocks, 'block')} x ${plural(o.warpsPerBlock, 'warp')} = ${o.activeWarps} of ${gpu.maxWarpsPerSm} warps: theoretical occupancy ${pct(o.occupancy)}, limited by ${o.limiting.map((r) => RESOURCE_NAMES[r]).join(' and ')}.`;
+			result.classList.toggle('is-warning', !!o.error);
+			limitsEl.replaceChildren(
+				...RESOURCES.map((r) => {
+					const li = document.createElement('li');
+					const limiting = o.limiting.includes(r);
+					li.classList.toggle('is-limit', limiting);
+					const name = document.createElement('strong');
+					name.textContent = `${cap(RESOURCE_NAMES[r])}: ${howMany(o.limits[r])}${limiting ? ' (limit)' : ''}.`;
+					li.append(name, ` ${limitText(r)}.`);
+					return li;
+				}),
+			);
+		};
+
+		const recompute = () => {
+			o = occupancy(gpu, k);
+			out('regs').textContent = String(k.regsPerThread);
+			out('smemKb').textContent = `${k.smemPerBlock / 1024} KB`;
+			out('blockSize').textContent = String(k.blockSize);
+			// Show the answer right away; Reset goes back to the empty SM.
+			stepper.setLast(lastStep(o));
+			stepper.goTo(stepper.last);
+			draw();
+		};
+
+		const fromInputs = () => {
+			gpu = gpuById(frame.querySelector<HTMLSelectElement>('select[name="gpu"]')!.value);
+			const smem = input('smemKb');
+			smem.max = String(gpu.maxSharedKbPerBlock);
+			k.regsPerThread = Number(input('regs').value);
+			k.smemPerBlock = Math.min(Number(smem.value), gpu.maxSharedKbPerBlock) * 1024;
+			k.blockSize = Number(input('blockSize').value);
+			recompute();
+		};
+		frame.querySelector('.sim-params')!.addEventListener('input', fromInputs);
+
+		frame.querySelectorAll<HTMLButtonElement>('[data-preset]').forEach((b) =>
+			b.addEventListener('click', () => {
+				const p = JSON.parse(b.dataset.preset!);
+				input('regs').value = String(p.regs);
+				input('smemKb').value = String(p.smemKb);
+				input('blockSize').value = String(p.blockSize);
+				fromInputs();
+			}),
+		);
+
+		bindControls(frame, stepper, (step) => describe(gpu, k, step));
+		stepper.onChange(draw);
+		new ResizeObserver(draw).observe(canvas);
+		draw();
+	}
+
+	document.querySelectorAll<HTMLElement>('[data-sim="occupancy"]').forEach(mount);
+</script>
