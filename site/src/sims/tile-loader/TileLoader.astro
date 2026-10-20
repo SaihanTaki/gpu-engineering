@@ -82,7 +82,7 @@ code.sort((a, b) => Number(b.name === mode) - Number(a.name === mode));
 			stats.textContent =
 				`This block so far: ${fmt(st.globalReads)} global loads, ${fmt(st.sharedReads)} shared reads. ` +
 				`Per block in total: ${fmt(b.globalWithout)} without shared memory, ${fmt(b.globalWith)} with. ` +
-				`All ${g.blocks} blocks: ${fmt(g.globalWithout)} and ${fmt(g.globalWith)}.`;
+				`Whole grid of ${g.blocks} block${g.blocks === 1 ? '' : 's'}: ${fmt(g.globalWithout)} and ${fmt(g.globalWith)}.`;
 		};
 
 		frame.querySelector('.sim-params')!.addEventListener('change', () => {

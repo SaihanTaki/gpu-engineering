@@ -209,7 +209,7 @@ export function describe(c: Config, step: number): string {
 		case 'store': {
 			const ratio = b.globalWithout / b.globalWith;
 			return c.mode === 'global'
-				? `Every thread writes its sum to C. Done: ${fmt(st.globalReads)} global loads for ${b.threads} outputs, ${2 * c.n} per thread. Switch to shared memory to compare.`
+				? `Every thread writes its sum to C. Done: ${fmt(st.globalReads)} global loads for ${b.threads} outputs, ${2 * c.n} per output. Switch to shared memory to compare.`
 				: `Every thread writes its sum to C. Done: ${fmt(st.globalReads)} global loads instead of ${fmt(b.globalWithout)}, ${ratio} times fewer, plus ${fmt(st.sharedReads)} shared memory reads.`;
 		}
 	}
