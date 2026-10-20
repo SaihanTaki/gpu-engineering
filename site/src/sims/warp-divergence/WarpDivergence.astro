@@ -1,0 +1,90 @@
+---
+import SimFrame from '@components/SimFrame.astro';
+import { codeFor, COND_IDS, CONDITIONS, type CondId } from './model';
+
+interface Props {
+	cond?: CondId;
+	warp?: 0 | 1;
+}
+
+const { cond = 'parity', warp = 0 } = Astro.props;
+const code = COND_IDS.map((id) => ({ name: id, code: codeFor(id), lang: 'cpp' }));
+// SimFrame shows the first variant until the script runs, so put the starting one first.
+code.sort((a, b) => Number(b.name === cond) - Number(a.name === cond));
+---
+
+<SimFrame title="Divergence: 32 lanes through an if/else" sim="warp-divergence" code={code} config={{ cond, warp }}>
+	<Fragment slot="params">
+		<label class="sim-field">
+			<span>Condition</span>
+			<select name="cond">
+				{COND_IDS.map((id) => <option value={id} selected={id === cond}>{CONDITIONS[id].label}</option>)}
+			</select>
+		</label>
+		<label class="sim-field">
+			<span>Warp of a 64-thread block</span>
+			<select name="warp">
+				<option value="0" selected={warp === 0}>Warp 0, threads 0 to 31</option>
+				<option value="1" selected={warp === 1}>Warp 1, threads 32 to 63</option>
+			</select>
+		</label>
+	</Fragment>
+
+	<p class="sim-launch" data-stats></p>
+	<div class="sim-canvas" data-canvas>
+		<svg role="img" aria-label="The 32 lanes of one warp, active or masked off, above one bar per issued instruction"></svg>
+	</div>
+	<ul class="ws-legend" aria-label="Legend">
+		<li><span class="sim-swatch is-lane"></span>lane runs this instruction</li>
+		<li><span class="sim-swatch is-waiting"></span>lane masked off</li>
+		<li><span class="sim-swatch is-plain">T</span>condition true for this lane</li>
+	</ul>
+
+	<Fragment slot="caption">
+		One step is one instruction issued for the warp; each source line is drawn as one instruction. The if path runs first
+		here. Since Volta the hardware may interleave the two paths, but each instruction still runs for only one path's
+		lanes. For a body this short the compiler may predicate it instead of branching; the lane count is the same. The
+		data condition uses fixed example values of x.
+	</Fragment>
+</SimFrame>
+
+<script>
+	import { Stepper } from '@sim-core/stepper';
+	import { bindControls } from '@sim-core/controls';
+	import { highlightLines, showVariant } from '@sim-core/code-sync';
+	import { describe, lastStep, stateAt, WARP, type Config } from './model';
+	import { render } from './view';
+
+	function mount(frame: HTMLElement) {
+		const config: Config = JSON.parse(frame.dataset.config!);
+		const stepper = new Stepper(lastStep(config), 1100);
+		const canvas = frame.querySelector<HTMLElement>('[data-canvas]')!;
+		const svgEl = canvas.querySelector('svg')!;
+		const stats = frame.querySelector<HTMLElement>('[data-stats]')!;
+		let code = showVariant(frame, config.cond);
+
+		const draw = () => {
+			const st = stateAt(config, stepper.step);
+			render(svgEl, config, st, Math.max(260, canvas.clientWidth));
+			highlightLines(code, st.instr ? [st.instr.line] : []);
+			const slots = st.issued.length * WARP;
+			stats.textContent = slots
+				? `${st.issued.length} instruction${st.issued.length === 1 ? '' : 's'} issued, ${st.usedSlots} of ${slots} lane slots used (${((100 * st.usedSlots) / slots).toFixed(1)}%).`
+				: 'No instructions issued yet.';
+		};
+
+		frame.querySelector('.sim-params')!.addEventListener('change', () => {
+			config.cond = frame.querySelector<HTMLSelectElement>('select[name="cond"]')!.value as Config['cond'];
+			config.warp = Number(frame.querySelector<HTMLSelectElement>('select[name="warp"]')!.value) as Config['warp'];
+			code = showVariant(frame, config.cond);
+			stepper.setLast(lastStep(config));
+		});
+
+		bindControls(frame, stepper, (step) => describe(config, step));
+		stepper.onChange(draw);
+		new ResizeObserver(draw).observe(canvas);
+		draw();
+	}
+
+	document.querySelectorAll<HTMLElement>('[data-sim="warp-divergence"]').forEach(mount);
+</script>
