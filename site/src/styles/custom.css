@@ -1379,3 +1379,97 @@
 .sim-swatch.pm-seg-kernel {
 	background: var(--sim-active);
 }
+
+/* Transpose sim (chapter 11) */
+[data-sim='transpose'] select {
+	width: 100%;
+	max-width: 100%;
+}
+[data-sim='transpose'] input[type='range'] {
+	min-height: 44px;
+}
+[data-sim='transpose'] .expressive-code .copy button {
+	width: 44px;
+	height: 44px;
+}
+.tr-sector {
+	fill: none;
+	stroke: var(--sim-muted);
+}
+.tr-word {
+	fill: var(--sim-active);
+}
+.tr-bank {
+	fill: none;
+	stroke: var(--sim-line);
+}
+.tr-bank-fill {
+	fill: var(--sim-active);
+}
+.tr-bank-fill.is-conflict {
+	fill: var(--sim-warn-fill);
+	stroke: var(--sim-warn);
+}
+.tr-costly {
+	fill: var(--sim-warn);
+}
+.tr-rule {
+	stroke: var(--sim-line);
+}
+.tr-bar-label {
+	fill: var(--sim-text);
+}
+.tr-bar-track {
+	fill: none;
+	stroke: var(--sim-line);
+}
+.tr-bar {
+	fill: var(--sim-active);
+}
+.tr-legend,
+.tr-totals {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.25rem 1.25rem;
+	margin: 0.5rem 0 0;
+	padding: 0;
+	list-style: none;
+	font-size: var(--sl-text-xs);
+}
+.tr-legend li {
+	display: flex;
+	align-items: center;
+	gap: 0.4rem;
+}
+.tr-swatch {
+	flex-shrink: 0;
+	width: 1.25rem;
+	height: 0.75rem;
+	border: 1px solid var(--sim-muted);
+	border-radius: 2px;
+}
+.tr-swatch.is-sector span {
+	display: block;
+	width: 25%;
+	height: 100%;
+	background: var(--sim-active);
+}
+.tr-swatch.is-bank {
+	width: 0.5rem;
+	background: var(--sim-active);
+	border-color: var(--sim-active);
+}
+.tr-swatch.is-conflict {
+	width: 0.5rem;
+	background: var(--sim-warn-fill);
+	border-color: var(--sim-warn);
+}
+.tr-totals {
+	display: grid;
+	gap: 0.35rem;
+	font-size: var(--sl-text-sm);
+}
+.tr-totals li {
+	padding-inline-start: 0.6rem;
+	border-inline-start: 3px solid var(--sim-line);
+}
