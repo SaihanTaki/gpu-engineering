@@ -42,12 +42,12 @@ at the till. Which shop is better depends on how many customers there are.
 
 ## Two designs
 
-A CPU is built for latency. Each core spends much of its silicon on making one
-thread fast: large caches keep data close, branch predictors guess which way
-the code will go, and out-of-order logic finds other instructions to run while
-one waits for memory. The CUDA Programming Guide puts it this way: a CPU runs
-a serial sequence of operations as fast as possible and can run "a few tens"
-of these threads in parallel.
+A CPU is built for latency. The CUDA Programming Guide puts it this way: a
+CPU is designed to run a serial sequence of operations, a thread, as fast as
+possible, and can run "a few tens" of these threads in parallel. To do that,
+CPUs "dedicate more transistors to data caching and flow control": caches keep
+data close to the core, and control logic keeps one thread's instructions
+moving.
 
 A GPU is built for throughput. It spends its silicon on many simple arithmetic
 lanes instead, and runs thousands of threads at once. Each thread is slower
@@ -99,7 +99,7 @@ Before you press Play, predict which of the first two teams finishes first at
 
 <CpuVsGpu />
 
-The table shows Amdahl's law for each team, with `N` set to the team's number
+The table shows Amdahl's law for the CPU and GPU teams, with `N` set to the team's number
 of workers. The speedup the race reaches can be a little lower than the
 formula, because the last round of parallel work takes a full round even when
 only some workers have a unit left.
@@ -122,8 +122,8 @@ launches work. The GPU, called the **device**, runs the parallel parts as
 The simulation leaves out one cost that real programs pay: the data has to
 move between the CPU's memory and the GPU's memory, and that copy takes time.
 A job with little arithmetic per element can spend longer copying than
-computing. The code below measures both, so you can see this on your own
-machine.
+computing. The code below times the copy as well as the computation, so you
+can see this on your own machine.
 
 ## The code
 
@@ -132,9 +132,21 @@ The name comes from the BLAS library: single precision, a times x plus y.
 Every element is independent of the others, so `p` is close to 1. It is the
 smallest kernel that is still useful, and later chapters build on it.
 
-Each file runs SAXPY once on the CPU and once on the GPU, checks that the two
-results match, and prints the time each one took. The tests in
-`kernels/ch0-1-cpu-vs-gpu/` check every version against NumPy.
+Each file runs SAXPY on the CPU and on the GPU, checks that the results
+match, and prints the times:
+
+- `cuda/saxpy.cu` runs twice, first with 1000 elements and then with the
+  default 2<sup>24</sup> + 3 (or the count you pass). Each run does one
+  untimed warm-up launch, then times the CPU loop, the copy of `x` and `y` to
+  the GPU, and the kernel. Copying the result back is not timed. The program
+  checks the GPU result against its own CPU loop and exits with 1 on a
+  mismatch.
+- `numba/saxpy.py` and `triton/saxpy.py` call each version twice and time the
+  second call. Their GPU time is one number: copy in, kernel, and copy out.
+
+The tests in `kernels/ch0-1-cpu-vs-gpu/` check the Numba and Triton versions
+against NumPy. The CUDA test builds and runs `saxpy.cu` and checks that it
+exits cleanly and prints `OK`.
 
 <CodeTabs
 	cuda={cuda}
@@ -145,12 +157,17 @@ results match, and prints the time each one took. The tests in
 
 What to notice:
 
-- The CPU version is a loop over every element, run by one thread.
-- The GPU version has no loop. Each GPU thread handles one element, finds it
-  with `blockIdx.x * blockDim.x + threadIdx.x`, and skips the store if that
-  index is past the end. Chapter 2 explains both lines in detail.
-- The number of blocks is rounded up with `(n + threads - 1) / threads`, so a
-  size like 1000 that is not a multiple of 256 is still covered.
+- In the CUDA and Numba files, the CPU version is a loop over every element,
+  run by one thread. The Triton file compares against NumPy's `2.0 * x + y`.
+- The GPU version has no loop. In the CUDA tab, each GPU thread handles one
+  element, finds it with `blockIdx.x * blockDim.x + threadIdx.x`, and skips
+  the store if that index is past the end. The number of blocks is rounded up
+  with `(n + threads - 1) / threads`, so 1000 elements with 256 threads per
+  block still get covered. Chapter 2 explains both lines in detail.
+- Numba does the same with `cuda.grid(1)` and `(n + threads - 1) // threads`.
+  Triton gives each program a block of `BLOCK = 1024` offsets,
+  `tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)`, rounds the grid up with
+  `triton.cdiv`, and masks the loads and the store.
 - The first GPU launch is not timed. It includes one-time setup work, such as
   loading the kernel onto the GPU or, in Numba and Triton, compiling it.
 
@@ -169,15 +186,19 @@ python triton/saxpy.py
 
 Things to look for:
 
-- Compare the GPU kernel time alone with the CPU loop time. Then add the copy
-  time and compare again. Which one decides the winner?
-- Run with a small size, for example `./cuda/saxpy 1000`. Does the GPU still
-  win?
-- The Numba and Triton times include copying the data in and out. Run them
-  twice and check how much the numbers move between runs.
+- In the CUDA output, compare the kernel time alone with the CPU loop time.
+  Then add the time to copy `x` and `y` in and compare again. Which one
+  decides the winner? The copy back is not timed, so the real total is higher.
+- The CUDA output starts with a block for n = 1000. Does the GPU still win at
+  that size?
+- The Numba and Triton GPU times include copying the data in and out. Run the
+  scripts twice and check how much the numbers move between runs.
 
-On a machine without an NVIDIA GPU, the Python versions run on the CPU in a
-simulator, so their GPU times say nothing about real hardware.
+On a machine without an NVIDIA GPU, the Python scripts need
+`NUMBA_ENABLE_CUDASIM=1` (Numba) or `TRITON_INTERPRET=1` (Triton) to run on
+the CPU, and a small count such as `python numba/saxpy.py 5000`, because the
+default is 2<sup>24</sup> + 3 elements. `pytest` sets both variables for you.
+In that mode the GPU times say nothing about real hardware.
 
 ## Exercises
 
@@ -239,8 +260,9 @@ workers it still takes one round, so it still finishes at 44 ticks, and now
 </details>
 
 **5. Run it.** Run `pytest kernels/ch0-1-cpu-vs-gpu`, then run the CUDA
-version on a GPU with the default size and with `./cuda/saxpy 1000`. For each
-size, which is larger: the copy time or the kernel time?
+version on a GPU with `make -C cuda run`. It prints a block for 1000
+elements and one for the default size. For each size, which is larger: the
+time to copy `x` and `y` in, or the kernel time?
 
 <details>
 <summary>Answer</summary>
