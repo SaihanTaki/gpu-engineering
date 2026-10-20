@@ -2,6 +2,6 @@
 torch==2.14.1
 triton==3.8.0
 numba-cuda==0.30.4
-numpy==2.5.4
+numpy==2.4.6  # numba-cuda 0.30.4 calls np.row_stack, removed in NumPy 2.5
 pytest==9.1.1
 jupyterlab==4.6.4

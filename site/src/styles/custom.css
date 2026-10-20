@@ -523,4 +523,81 @@
 }
 .sim-race-table td {
 	font-family: var(--sl-font-mono);
+
+/* Compile pipeline sim */
+.pipe-box {
+	fill: var(--sim-block-b);
+	stroke: var(--sim-line);
+}
+.pipe-stage {
+	cursor: pointer;
+}
+.pipe-stage.is-done .pipe-box {
+	stroke: var(--sim-muted);
+}
+.pipe-stage.is-current .pipe-box {
+	fill: var(--sim-block-a);
+	stroke: var(--sim-active);
+	stroke-width: 2;
+}
+.pipe-stage.is-command .pipe-box {
+	stroke-dasharray: 5 3;
+}
+.pipe-link {
+	fill: none;
+	stroke: var(--sim-muted);
+	stroke-width: 1.5;
+}
+.pipe-link.is-done {
+	stroke: var(--sim-active);
+}
+.pipe-arrowhead {
+	fill: var(--sim-muted);
+}
+.pipe-detail {
+	display: grid;
+	gap: 0.5rem;
+	margin: 0.75rem 0 0;
+	font-size: var(--sl-text-sm);
+}
+.pipe-detail div {
+	display: grid;
+	grid-template-columns: minmax(0, 5.5rem) minmax(0, 1fr);
+	gap: 0.75rem;
+}
+.pipe-detail dt {
+	font-weight: 600;
+	color: var(--sim-muted);
+}
+.pipe-detail dd {
+	margin: 0;
+	overflow-wrap: anywhere;
+}
+.pipe-listing {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 0 1.25rem;
+	margin-top: 0.75rem;
+	padding-top: 0.5rem;
+	border-top: 1px solid var(--sim-line);
+}
+.pipe-listing-note {
+	flex: 1 1 16rem;
+	margin: 0;
+	font-family: var(--sl-font-mono);
+	font-size: var(--sl-text-xs);
+	color: var(--sim-muted);
+	overflow-wrap: anywhere;
+}
+.pipe-listing .sim-check[hidden] {
+	display: none;
+}
+[data-sim='compile-pipeline'] .sim-code pre {
+	max-height: 26rem;
+	overflow: auto;
+}
+[data-sim='compile-pipeline'] .expressive-code .copy button {
+	width: 44px;
+	height: 44px;
 }
