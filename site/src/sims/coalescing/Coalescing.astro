@@ -1,0 +1,133 @@
+---
+import SimFrame from '@components/SimFrame.astro';
+import { codeFor, ELEM_BYTES, PATTERN_IDS, PATTERNS, TYPE_NAMES, type Config } from './model';
+
+type Props = Partial<Config>;
+
+const { pattern = 'strided', elemBytes = 4, stride = 1, offset = 0, fields = 3 } = Astro.props;
+const code = PATTERN_IDS.map((id) => ({ name: id, code: codeFor(id), lang: 'cpp' }));
+// SimFrame shows the first variant until the script runs, so put the starting one first.
+code.sort((a, b) => Number(b.name === pattern) - Number(a.name === pattern));
+const presets: { label: string; set: Partial<Config> }[] = [
+	{ label: 'Consecutive floats', set: { pattern: 'strided', elemBytes: 4, stride: 1, offset: 0 } },
+	{ label: 'Offset by 1', set: { pattern: 'strided', elemBytes: 4, stride: 1, offset: 1 } },
+	{ label: 'Stride 2', set: { pattern: 'strided', elemBytes: 4, stride: 2, offset: 0 } },
+	{ label: 'Stride 32', set: { pattern: 'strided', elemBytes: 4, stride: 32, offset: 0 } },
+	{ label: 'AoS, 3 floats', set: { pattern: 'aos', elemBytes: 4, fields: 3 } },
+	{ label: 'SoA, 3 floats', set: { pattern: 'soa', elemBytes: 4, fields: 3 } },
+	{ label: 'float4 per lane', set: { pattern: 'strided', elemBytes: 16, stride: 1, offset: 0 } },
+];
+---
+
+<SimFrame title="Coalescing: one warp's load, sector by sector" sim="coalescing" code={code} config={{ pattern, elemBytes, stride, offset, fields }}>
+	<Fragment slot="params">
+		<label class="sim-field">
+			<span>Access pattern</span>
+			<select name="pattern">
+				{PATTERN_IDS.map((id) => <option value={id} selected={id === pattern}>{PATTERNS[id]}</option>)}
+			</select>
+		</label>
+		<label class="sim-field">
+			<span>Element type T</span>
+			<select name="elemBytes">
+				{ELEM_BYTES.map((b) => <option value={b} selected={b === elemBytes}>{TYPE_NAMES[b]}, {b} byte{b === 1 ? '' : 's'}</option>)}
+			</select>
+		</label>
+		<label class="sim-field" data-for="strided">
+			<span>STRIDE in elements <output data-out="stride">{stride}</output></span>
+			<input type="range" name="stride" min="1" max="32" value={stride} />
+		</label>
+		<label class="sim-field" data-for="strided">
+			<span>OFFSET in elements <output data-out="offset">{offset}</output></span>
+			<input type="range" name="offset" min="0" max="32" value={offset} />
+		</label>
+		<label class="sim-field" data-for="struct" hidden>
+			<span>Fields per struct <output data-out="fields">{fields}</output></span>
+			<input type="range" name="fields" min="2" max="8" value={fields} />
+		</label>
+	</Fragment>
+
+	<div class="co-presets" role="group" aria-label="Try these">
+		{presets.map((p) => <button type="button" data-preset={JSON.stringify(p.set)}>{p.label}</button>)}
+	</div>
+
+	<p class="sim-launch" data-stats></p>
+	<div class="sim-canvas" data-canvas>
+		<svg role="img" aria-label="The 32 lanes of a warp with the sector each one reads, above the 128-byte lines of memory the warp touches, split into four 32-byte sectors"></svg>
+	</div>
+	<ul class="co-legend" aria-label="Legend">
+		<li><span class="sim-swatch is-used"></span>bytes a lane asked for</li>
+		<li><span class="sim-swatch is-fetched"></span>sector fetched</li>
+		<li><span class="sim-swatch is-idle"></span>sector not needed</li>
+	</ul>
+
+	<Fragment slot="caption">
+		One step places one lane; the hardware handles all 32 addresses of the instruction at once. A sector is an aligned
+		32-byte piece of memory and the unit global memory is accessed in; four sectors make a 128-byte cache line. The
+		array starts at address 0, as cudaMalloc returns memory aligned to at least 256 bytes. The count is for one warp
+		and one instruction. Caches are left out: a sector one warp fetched but did not use may still be in L1 or L2 when
+		another warp asks for it.
+	</Fragment>
+</SimFrame>
+
+<script>
+	import { Stepper } from '@sim-core/stepper';
+	import { bindControls } from '@sim-core/controls';
+	import { highlightLines, showVariant } from '@sim-core/code-sync';
+	import { describe, lastStep, LOAD_LINE, patternText, stateAt, summary, type Config } from './model';
+	import { render } from './view';
+
+	function mount(frame: HTMLElement) {
+		const config: Config = JSON.parse(frame.dataset.config!);
+		const stepper = new Stepper(lastStep(), 500);
+		const canvas = frame.querySelector<HTMLElement>('[data-canvas]')!;
+		const svgEl = canvas.querySelector('svg')!;
+		const stats = frame.querySelector<HTMLElement>('[data-stats]')!;
+		const field = <T extends HTMLElement>(name: string) => frame.querySelector<T>(`[name="${name}"]`)!;
+		const out = (name: string) => frame.querySelector<HTMLElement>(`[data-out="${name}"]`)!;
+		let code = showVariant(frame, config.pattern);
+
+		const draw = () => {
+			const st = stateAt(config, stepper.step);
+			render(svgEl, config, st, Math.max(280, canvas.clientWidth));
+			highlightLines(code, st.current ? [LOAD_LINE] : []);
+			stats.textContent = st.step === lastStep() ? `Result: ${summary(st.full)}` : patternText(config);
+		};
+
+		const sync = () => {
+			field<HTMLSelectElement>('pattern').value = config.pattern;
+			field<HTMLSelectElement>('elemBytes').value = String(config.elemBytes);
+			for (const k of ['stride', 'offset', 'fields'] as const) {
+				field<HTMLInputElement>(k).value = String(config[k]);
+				out(k).textContent = String(config[k]);
+			}
+			const strided = config.pattern === 'strided';
+			frame.querySelectorAll<HTMLElement>('[data-for="strided"]').forEach((el) => (el.hidden = !strided));
+			frame.querySelectorAll<HTMLElement>('[data-for="struct"]').forEach((el) => (el.hidden = strided));
+			code = showVariant(frame, config.pattern);
+			stepper.setLast(lastStep());
+			draw();
+		};
+
+		frame.querySelector('.sim-params')!.addEventListener('input', () => {
+			config.pattern = field<HTMLSelectElement>('pattern').value as Config['pattern'];
+			config.elemBytes = Number(field<HTMLSelectElement>('elemBytes').value) as Config['elemBytes'];
+			for (const k of ['stride', 'offset', 'fields'] as const) config[k] = Number(field<HTMLInputElement>(k).value);
+			sync();
+		});
+
+		frame.querySelectorAll<HTMLButtonElement>('[data-preset]').forEach((b) =>
+			b.addEventListener('click', () => {
+				Object.assign(config, JSON.parse(b.dataset.preset!));
+				sync();
+			}),
+		);
+
+		bindControls(frame, stepper, (step) => describe(config, step));
+		stepper.onChange(draw);
+		new ResizeObserver(draw).observe(canvas);
+		sync();
+	}
+
+	document.querySelectorAll<HTMLElement>('[data-sim="coalescing"]').forEach(mount);
+</script>

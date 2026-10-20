@@ -1,0 +1,323 @@
+---
+title: 6. Global memory and coalescing
+description: How the 32 addresses of one warp's load turn into 32-byte sector transactions, and why offsets, strides and array-of-structs layouts make a kernel fetch bytes it never uses.
+sidebar:
+  order: 6
+banner:
+  content: Draft chapter. If something is wrong or unclear, use the edit link at the bottom of the page.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import Coalescing from '@sims/coalescing/Coalescing.astro';
+import CodeTabs from '@components/CodeTabs.astro';
+import { analyze, pct } from '@sims/coalescing/model';
+import cuda from '@kernels/ch06-coalescing/cuda/coalescing.cu?raw';
+import numba from '@kernels/ch06-coalescing/numba/coalescing.py?raw';
+import triton from '@kernels/ch06-coalescing/triton/coalescing.py?raw';
+
+export const at = (o) => analyze({ pattern: 'strided', elemBytes: 4, stride: 1, offset: 0, fields: 3, ...o });
+export const seq = at({});
+export const off1 = at({ offset: 1 });
+export const s2 = at({ stride: 2 });
+export const s32 = at({ stride: 32 });
+export const aos3 = at({ pattern: 'aos', fields: 3 });
+export const soa3 = at({ pattern: 'soa', fields: 3 });
+export const f4 = at({ elemBytes: 16 });
+export const e1a = at({ elemBytes: 8 });
+export const e1b = at({ elemBytes: 8, offset: 1 });
+export const e2 = at({ stride: 4 });
+export const e3 = at({ pattern: 'aos', fields: 4 });
+
+Two kernels each copy a million floats into a contiguous output array. The
+first reads `in[i]`, the second `in[i * 32]`. Each thread reads one float in
+both, so both kernels ask for the same number of bytes. For every warp, the
+first one makes the memory system deliver {seq.fetchedBytes} bytes; the
+second makes it deliver {s32.fetchedBytes}. Only {pct(s32.efficiency)} of
+what the second kernel fetches is used.
+
+Whether the threads of a warp read neighbouring addresses decides how much
+of the GPU's memory bandwidth turns into useful data. Combining a warp's
+accesses into as few memory transactions as possible is called
+**coalescing**. This chapter shows how the hardware counts those
+transactions, and which access patterns waste them.
+
+## Memory transactions and sectors
+
+Global memory is the memory `cudaMalloc` returns: the GPU's DRAM, with the
+L2 and L1 caches in front of it. A thread never fetches one float from it
+on its own. When a warp executes a load, the 32 addresses of its lanes are
+gathered and served by **transactions** of a fixed size. The CUDA
+Programming Guide puts it in one sentence: "Global memory is accessed via
+32-byte memory transactions."
+
+Those 32 bytes are aligned: a transaction covers bytes 0 to 31, or 32 to 63,
+never 20 to 51. Nsight Compute calls such an aligned 32-byte piece a
+**sector**, and groups four of them into a **cache line**: "An L1 or L2
+cache line is four sectors, i.e. 128 bytes." The Best Practices Guide states
+the rule for compute capability 6.0 and later, which covers every GPU this
+course uses:
+
+> the concurrent accesses of the threads of a warp will coalesce into a
+> number of transactions equal to the number of 32-byte transactions
+> necessary to service all of the threads of the warp.
+
+So the cost of one warp's load is the number of distinct sectors its 32
+addresses fall into. The best case for 4-byte floats is 32 x 4 = 128 bytes in
+4 sectors, all of them used. The worst case is one sector per lane: 32
+sectors, 1,024 bytes moved for 128 bytes used.
+
+Since compute capability 6.0, global loads are cached in L1 by default, but
+the guide adds that "the data access unit is 32-byte regardless of whether
+global loads are cached in L1 or not." Lines matter for the caches, sectors
+for the count.
+
+## One warp, sector by sector
+
+The simulation places the 32 lanes of one load instruction, one lane per
+step, and fills in the sector each lane's element falls in. Below the lanes
+are the 128-byte lines the whole warp touches, each split into its four
+sectors. Bytes a lane asked for are filled; the rest of a fetched sector is
+data the warp pays for and does not use. Before you press Play, predict the
+number of sectors. Then try the presets, the element type and the stride
+and offset sliders.
+
+<Coalescing />
+
+## Misaligned access
+
+`cudaMalloc` returns memory "aligned to at least 256 bytes", so `in[0]` sits
+at the start of a sector. Shift the warp by one float and lane 0 reads bytes
+4 to 7. The first 7 lanes land in sector 0, the next 8 in sector 1, and so on,
+and lane 31 spills into a fifth sector. Offset by one, the warp needs
+{off1.sectors.length} sectors in {off1.lines.length} lines and uses
+{pct(off1.efficiency)} of what it fetches.
+
+The Best Practices Guide shows the same: offsets that are a multiple of 8
+words (32 bytes) take four sectors, all others take five. A misaligned copy
+is not much worse than an aligned one, but it is common: a convolution that
+reads `in[i + k]` for several `k`, or an array that starts partway into a
+buffer.
+
+## Strided access
+
+A stride spreads the lanes out. With `in[i * 2]`, neighbouring lanes are
+8 bytes apart, the warp spans 256 bytes, and it fetches
+{s2.sectors.length} sectors for {pct(s2.efficiency)} efficiency. The Best
+Practices Guide: "A stride of 2 results in a 50% of load/store efficiency
+since half the elements in the transaction are not used."
+
+The efficiency halves again at stride 4 and reaches its floor at stride 8,
+where lanes are 32 bytes apart and each needs its own sector. Any larger
+stride costs the same {s32.sectors.length} sectors, only spread over more
+lines. Strided access shows up whenever threads walk the wrong dimension of
+a matrix: in a row-major matrix, a warp that reads one column reads with a
+stride of the row length. Chapter 11 works through a case where one of the
+two dimensions has to be read that way.
+
+## Element size
+
+A warp that loads 8-byte doubles asks for 256 bytes and needs 8 sectors; 16-byte
+`float4` loads need {f4.sectors.length} sectors in {f4.lines.length} lines.
+Each is still 100% efficient, because every byte fetched is used. Nsight
+Compute's documentation gives the same optimum per request for full warps:
+4 sectors for 32-bit accesses, 8 for 64-bit and 16 for 128-bit.
+
+Element size matters in a second way. The 12.4 Programming Guide states that
+an access compiles to a single global memory instruction "if and only if the
+size of the data type is 1, 2, 4, 8, or 16 bytes and the data is naturally
+aligned". A 12-byte struct of three floats is neither, so reading the whole
+struct takes several instructions. Declaring it with `__align__(16)` pads it
+to 16 bytes and lets one 16-byte load fetch it.
+
+## Array of structs and struct of arrays
+
+A particle with a position is often written as an **array of structs**
+(AoS):
+
+```cpp
+struct Particle { float x, y, z; };
+Particle *p;          // p[i].x, p[i].y, p[i].z sit next to each other
+```
+
+A kernel that only needs `x` reads `p[i].x`, which is a stride-3 load: the
+warp touches {aos3.sectors.length} sectors, {aos3.fetchedBytes} bytes, to
+use {aos3.usedBytes}. The **struct of arrays** (SoA) layout keeps each field
+in its own array:
+
+```cpp
+struct Particles { float *x, *y, *z; };
+Particles p;          // p.x[i] for neighbouring i are neighbours in memory
+```
+
+Now `p.x[i]` is a contiguous load: {soa3.sectors.length} sectors, 100%
+efficiency. Use the AoS and SoA presets and change the number of fields;
+with AoS the cost grows with the struct size, with SoA it does not.
+
+AoS is not always worse. A kernel that reads every field of each particle
+uses all the bytes of the sectors it fetches, and if the struct is 16 bytes
+and aligned, each lane can read it with one load. SoA wins when a kernel
+reads some fields and not others, which is common: an update of positions
+does not need to read masses.
+
+## The code
+
+The chapter's kernels are four copies that differ only in where they read:
+`copy_offset` reads `in[i + offset]`, `copy_strided` reads `in[i * stride]`,
+`get_x_aos` reads `p[i].x` from an array of 12-byte particles, and
+`get_x_soa` reads `x[i]`. Every one writes `out[i]`, a contiguous store. The
+CUDA program checks each kernel against a CPU loop and prints its time and
+useful bandwidth; the tests in `kernels/ch06-coalescing/` check every version
+against NumPy.
+
+<CodeTabs
+	cuda={cuda}
+	numba={numba}
+	triton={triton}
+	titles={{ cuda: 'cuda/coalescing.cu', numba: 'numba/coalescing.py', triton: 'triton/coalescing.py' }}
+>
+	<div slot="triton-note">
+		Triton decides which thread loads which element of a block, and it arranges them so that neighbouring threads
+		load neighbouring addresses when the offsets let it. It cannot change the addresses themselves:
+		`tl.load(src_ptr + offs * stride)` with `stride` 2 still touches twice the sectors of a contiguous load.
+		`copy_strided_kernel` shows this with plain pointer arithmetic. `get_x_aos_kernel` describes the AoS array to
+		Triton as an `n x 3` matrix with `tl.make_block_ptr`, giving its shape, strides and which dimension is
+		contiguous (`order`), and loads a `BLOCK x 1` block of it: one field of `BLOCK` particles, still a stride-3
+		read. Triton 3.8 marks `make_block_ptr` deprecated in favour of tensor descriptors
+		(`tl.make_tensor_descriptor`), whose documentation requires the last dimension to be contiguous and the other
+		strides to be multiples of 16 bytes. A 12-byte struct does not meet that, which is one more reason to store
+		fields as separate arrays. When the compiler cannot prove that offsets are contiguous, for example after
+		arithmetic on loaded indices, `tl.max_contiguous` and `tl.multiple_of` let you state it.
+	</div>
+</CodeTabs>
+
+What changes between the languages:
+
+- **CUDA C++** uses a real `struct Particle`. `copy_strided` computes the
+  index as `size_t` so that `i * stride` cannot overflow `int` for large
+  arrays.
+- **Numba** stores the particles as an `n x 3` float32 array. Row `i` is
+  particle `i`, which is the same bytes in the same order as the CUDA
+  struct, so `p[i, 0]` is the same stride-3 load.
+- **Triton** has the strided copy and the AoS read. Each program covers
+  1,024 elements, but the fraction of fetched bytes that is used depends only
+  on the stride, as in the other two.
+
+<Aside type="caution">
+The writes in these kernels are contiguous on purpose, so that only the loads
+change. Stores follow the same 32-byte rule; a strided store is as wasteful
+as a strided load.
+</Aside>
+
+## Measure it yourself
+
+On a machine with an NVIDIA GPU, build and run the CUDA program, then look
+at its loads in Nsight Compute:
+
+```sh
+make -C kernels/ch06-coalescing/cuda
+./kernels/ch06-coalescing/cuda/coalescing
+ncu --section MemoryWorkloadAnalysis_Tables kernels/ch06-coalescing/cuda/coalescing 65536
+```
+
+- The program prints the useful bandwidth of each kernel. Compare the offset
+  copies with each other and the strides 1, 2, 4, 8 and 32. Put the
+  simulation's efficiency next to each number.
+- In the L1/TEX cache table of the Memory Workload Analysis section, the
+  **Sectors/Req** column for global loads is the simulation's sector count
+  per warp. Expect 4 for the aligned copy, close to 5 with an offset of 1,
+  and 32 from stride 8 on.
+- The stride-32 copy reads 32 times as much input as the stride-1 copy, so
+  the L2 hit rate and DRAM traffic differ as well as the sector count.
+
+No measured numbers are quoted here, because they depend on the GPU, its
+clocks and the array size.
+
+## What the model leaves out
+
+The simulation counts the sectors one warp's load instruction touches. It
+leaves out the caches: a sector fetched and not used by one warp may still be
+in L1 or L2 when a neighbouring warp asks for it, so a strided kernel over a
+small array can cost less DRAM traffic than its sector count suggests. It
+also leaves out how the hardware splits 8- and 16-byte loads of a warp into
+several requests, inactive lanes, stores, and the DRAM side: ECC, which the
+Best Practices Guide notes makes scattered accesses more expensive on GDDR
+memory, and how DRAM pages are opened. The sector count is the part you
+control through your indexing.
+
+## Exercises
+
+**1. Doubles off by one.** A warp reads `double`s with `in[i]`. How many
+sectors and lines does it touch? And with `in[i + 1]`?
+
+<details>
+<summary>Answer</summary>
+
+32 x 8 = 256 bytes, which is {e1a.sectors.length} sectors in
+{e1a.lines.length} lines, all used. With `in[i + 1]` the warp reads bytes 8
+to 263: sectors 0 to 8, which is {e1b.sectors.length} sectors in
+{e1b.lines.length} lines, and {pct(e1b.efficiency)} efficiency. For doubles,
+only offsets that are a multiple of 4 elements keep the count at 8.
+
+</details>
+
+**2. Predict the stride.** A warp reads floats with `in[i * 4]`. How many
+sectors does it need, and what fraction of the fetched bytes is used? Check
+your answer in the simulation.
+
+<details>
+<summary>Answer</summary>
+
+Lanes are 16 bytes apart, so two lanes share each sector:
+{e2.sectors.length} sectors, {e2.fetchedBytes} bytes fetched for
+{e2.usedBytes} used, {pct(e2.efficiency)}. The warp spans
+{e2.lines.length} lines.
+
+</details>
+
+**3. Pad the struct.** A particle becomes `struct { float x, y, z, w; }`, 16
+bytes. A kernel reads only `x`. How many sectors does one warp touch? What
+would make the same kernel touch 4?
+
+<details>
+<summary>Answer</summary>
+
+A stride of 4 floats: {e3.sectors.length} sectors, {pct(e3.efficiency)}
+efficiency. Keeping `x` in its own array (SoA) brings it down to 4 sectors.
+Padding to 16 bytes does help a kernel that reads all four fields: it can
+load each particle as one `float4`, 16 sectors per warp, all used.
+
+</details>
+
+**4. Fix the bug.** A kernel scales a row-major `rows x cols` float matrix,
+with `cols` = 1,024, using a 2D grid:
+
+```cpp
+int r = blockIdx.x * blockDim.x + threadIdx.x;
+int c = blockIdx.y * blockDim.y + threadIdx.y;
+if (r < rows && c < cols) a[r * cols + c] *= s;
+```
+
+With blocks of 32 x 8 threads, how many sectors does one warp's load touch?
+Fix it.
+
+<details>
+<summary>Answer</summary>
+
+A warp is 32 consecutive `threadIdx.x` values, so its lanes have
+consecutive `r` and the same `c`. Neighbouring lanes are `cols` floats, 4 KB,
+apart: 32 sectors, 12.5% efficiency, for the load and again for the store.
+Swap the roles so that `threadIdx.x` walks the contiguous dimension:
+`c = blockIdx.x * blockDim.x + threadIdx.x` and
+`r = blockIdx.y * blockDim.y + threadIdx.y`, with the grid dimensions
+swapped to match. Each warp then reads 32 neighbouring floats in 4 sectors.
+
+</details>
+
+## Further reading
+
+- [CUDA Programming Guide: coalesced global memory access](https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/writing-cuda-kernels.html#coalesced-global-memory-access), the 32-byte transaction rule with figures of the best and worst case.
+- [CUDA C++ Best Practices Guide: coalesced access to global memory](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#coalesced-access-to-global-memory), with the [misaligned](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#effects-of-misaligned-accesses) and [strided](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#strided-accesses) copy kernels this chapter follows.
+- [CUDA C++ Programming Guide 12.4: device memory accesses](https://docs.nvidia.com/cuda/archive/12.4.0/cuda-c-programming-guide/index.html#device-memory-accesses), on natural alignment, the 1 to 16 byte access sizes and `__align__`.
+- [Nsight Compute Profiling Guide: quantities](https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#quantities) for the definition of sectors and lines, and [L1 memory tables](https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#memory-tables-l1) for Sectors/Req.
+- [Mark Harris, How to Access Global Memory Efficiently in CUDA C/C++ Kernels](https://developer.nvidia.com/blog/how-access-global-memory-efficiently-cuda-c-kernels/), NVIDIA's 2013 blog post with offset and stride copy measurements on Tesla GPUs of compute capability 1.0 to 2.0, whose rules were stricter than today's.
+- [Triton: tl.make_tensor_descriptor](https://triton-lang.org/main/python-api/generated/triton.language.make_tensor_descriptor.html) and [tl.max_contiguous](https://triton-lang.org/main/python-api/generated/triton.language.max_contiguous.html).
