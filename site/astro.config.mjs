@@ -30,6 +30,7 @@ export default defineConfig({
 				{ label: 'Part 0: Why GPUs?', items: [{ autogenerate: { directory: 'part-0-why-gpus' } }] },
 				{ label: 'Part 1: Foundations', items: [{ autogenerate: { directory: 'part-1-foundations' } }] },
 				{ label: 'Part 2: Memory hierarchy', items: [{ autogenerate: { directory: 'part-2-memory-hierarchy' } }] },
+				{ label: 'Part 3: Parallel patterns', items: [{ autogenerate: { directory: 'part-3-parallel-patterns' } }] },
 			],
 		}),
 	],
