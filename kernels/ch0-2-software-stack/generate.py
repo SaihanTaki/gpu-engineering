@@ -29,11 +29,6 @@ os.environ["TRITON_CACHE_DIR"] = tempfile.mkdtemp(prefix="triton-cache-")
 
 import numpy as np
 
-# numba-cuda 0.30.4 registers an overload for np.row_stack, which NumPy 2.5
-# removed. Its CUDA target fails to import without this alias.
-if not hasattr(np, "row_stack"):
-    np.row_stack = np.vstack
-
 import triton
 from numba import cuda, float32
 from numba.cuda.compiler import _compile_pyfunc_with_fixup
