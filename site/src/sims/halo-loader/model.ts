@@ -209,7 +209,7 @@ export function describe(c: Config, step: number): string {
 	switch (x.kind) {
 		case 'start':
 			return (
-				`A block of ${T} x ${T} = ${fmt(threads(c))} threads computes a ${T} x ${T} output tile with a ${k} x ${k} filter. ` +
+				`A block of ${T} x ${T} = ${fmt(threads(c))} threads computes one ${T} x ${T} output tile with a ${k} x ${k} filter. ` +
 				`Each output needs the pixels within ${R} of it, so the block needs a ${sd} x ${sd} input tile: its own ${fmt(threads(c))} pixels plus a halo of ${fmt(haloCells(c))}. ` +
 				`Predict: how many global loads per output does the tiled kernel issue, and how many does the naive one? Then press Next.`
 			);
