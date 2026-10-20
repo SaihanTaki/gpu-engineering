@@ -1,0 +1,135 @@
+---
+import SimFrame from '@components/SimFrame.astro';
+import { CPU_TICKS_PER_UNIT, GPU_TICKS_PER_UNIT } from './model';
+
+interface Props {
+	p?: number;
+	work?: number;
+	cpuWorkers?: number;
+	gpuWorkers?: number;
+}
+
+const { p = 90, work = 10000, cpuWorkers = 8, gpuWorkers = 1000 } = Astro.props;
+const fmt = (n: number) => n.toLocaleString('en-US');
+---
+
+<SimFrame title="A race: few fast workers or many slow ones?" sim="cpu-vs-gpu" config={{ p, work, cpuWorkers, gpuWorkers }}>
+	<Fragment slot="params">
+		<label class="sim-field">
+			<span>Parallel fraction <code>p</code> <output data-out="p">{p}%</output></span>
+			<input type="range" name="p" min="0" max="100" value={p} />
+		</label>
+		<label class="sim-field">
+			<span>Job size <output data-out="work">{fmt(work)} units</output></span>
+			<input type="range" name="work" min="1000" max="50000" step="1000" value={work} />
+		</label>
+		<label class="sim-field">
+			<span>CPU workers, {CPU_TICKS_PER_UNIT} tick per unit <output data-out="cpuWorkers">{cpuWorkers}</output></span>
+			<input type="range" name="cpuWorkers" min="1" max="32" value={cpuWorkers} />
+		</label>
+		<label class="sim-field">
+			<span>GPU workers, {GPU_TICKS_PER_UNIT} ticks per unit <output data-out="gpuWorkers">{fmt(gpuWorkers)}</output></span>
+			<input type="range" name="gpuWorkers" min="100" max="2000" step="100" value={gpuWorkers} />
+		</label>
+	</Fragment>
+
+	<div class="sim-canvas" data-canvas>
+		<svg role="img" aria-label="Progress bars and worker grids for the CPU, the GPU, and the CPU and GPU together"></svg>
+	</div>
+
+	<ul class="sim-race-legend">
+		<li><span class="sim-swatch is-serial"></span>Serial part: one worker</li>
+		<li><span class="sim-swatch is-parallel"></span>Parallel part: all workers</li>
+		<li><span class="sim-swatch is-idle"></span>Idle worker</li>
+	</ul>
+
+	<table class="sim-race-table">
+		<caption>Speedup is against one worker of the same kind. Amdahl's law: speedup = 1 / ((1 - p) + p / N)</caption>
+		<thead>
+			<tr>
+				<th scope="col">Side</th>
+				<th scope="col">Finish</th>
+				<th scope="col">Speedup</th>
+				<th scope="col">Amdahl</th>
+			</tr>
+		</thead>
+		<tbody data-results></tbody>
+	</table>
+
+	<Fragment slot="caption">
+		The worker counts and speeds are made up to show the idea; they are not measurements of any CPU or GPU. The model
+		leaves out memory, caches, and the time to copy data between the CPU and the GPU, and it runs the whole serial part
+		before the parallel part.
+	</Fragment>
+</SimFrame>
+
+<script>
+	import { Stepper } from '@sim-core/stepper';
+	import { bindControls } from '@sim-core/controls';
+	import {
+		amdahl,
+		describe,
+		fmt,
+		laneAt,
+		lanes,
+		lastStep,
+		LANE_NAMES,
+		modelSpeedup,
+		timeAt,
+		type Config,
+	} from './model';
+	import { render } from './view';
+
+	function mount(frame: HTMLElement) {
+		const config: Config = JSON.parse(frame.dataset.config!);
+		const stepper = new Stepper(lastStep, 400);
+		const canvas = frame.querySelector<HTMLElement>('[data-canvas]')!;
+		const svgEl = canvas.querySelector('svg')!;
+		const results = frame.querySelector<HTMLElement>('[data-results]')!;
+		const field = (name: string) => frame.querySelector<HTMLInputElement>(`[name="${name}"]`)!;
+		const out = (name: string, text: string) => (frame.querySelector(`[data-out="${name}"]`)!.textContent = text);
+
+		const draw = () => {
+			render(svgEl, config, stepper.step, Math.max(240, canvas.clientWidth));
+			const t = timeAt(config, stepper.step);
+			results.replaceChildren(
+				...lanes(config).map((l) => {
+					const row = document.createElement('tr');
+					const th = document.createElement('th');
+					th.scope = 'row';
+					th.textContent = LANE_NAMES[l.id];
+					const cells = [
+						laneAt(l, t).phase === 'done' ? `${fmt(l.finish)} ticks` : 'running',
+						l.id === 'split' ? `${(config.work / l.finish).toFixed(2)}x vs one CPU worker` : `${modelSpeedup(l).toFixed(2)}x`,
+						l.id === 'split' ? 'mixed speeds' : `${amdahl(config.p / 100, l.workers).toFixed(2)}x`,
+					].map((text) => {
+						const td = document.createElement('td');
+						td.textContent = text;
+						return td;
+					});
+					row.append(th, ...cells);
+					return row;
+				}),
+			);
+		};
+
+		frame.querySelector('.sim-params')!.addEventListener('input', () => {
+			config.p = Number(field('p').value);
+			config.work = Number(field('work').value);
+			config.cpuWorkers = Number(field('cpuWorkers').value);
+			config.gpuWorkers = Number(field('gpuWorkers').value);
+			out('p', `${config.p}%`);
+			out('work', `${fmt(config.work)} units`);
+			out('cpuWorkers', String(config.cpuWorkers));
+			out('gpuWorkers', fmt(config.gpuWorkers));
+			stepper.setLast(lastStep);
+		});
+
+		bindControls(frame, stepper, (step) => describe(config, step));
+		stepper.onChange(draw);
+		new ResizeObserver(draw).observe(canvas);
+		draw();
+	}
+
+	document.querySelectorAll<HTMLElement>('[data-sim="cpu-vs-gpu"]').forEach(mount);
+</script>
