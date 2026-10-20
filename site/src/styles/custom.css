@@ -698,3 +698,127 @@
 	width: 44px;
 	height: 44px;
 }
+
+/* Execution model sims: warp scheduler and warp divergence */
+.ws-hatch-bg {
+	fill: var(--sim-block-b);
+}
+.ws-hatch-line {
+	stroke: var(--sim-muted);
+	stroke-width: 1.5;
+	stroke-opacity: 0.7;
+}
+.ws-slot {
+	fill: var(--sim-block-b);
+	stroke: var(--sim-line);
+}
+.ws-slot.is-idle {
+	fill: var(--sim-warn-fill);
+	stroke: var(--sim-warn);
+}
+.ws-cell {
+	stroke: var(--sim-line);
+}
+.ws-cell.is-load {
+	fill: var(--sim-active);
+	stroke: var(--sim-active);
+}
+.ws-cell.is-alu {
+	fill: var(--sim-block-a);
+	stroke: var(--sim-active);
+}
+.ws-cell.is-ready {
+	fill: transparent;
+	stroke: var(--sim-muted);
+}
+.ws-cell-text {
+	font: 500 11px var(--sl-font-mono);
+	fill: var(--sim-text);
+	text-anchor: middle;
+}
+.ws-cell-text.is-load {
+	fill: var(--sim-panel);
+}
+.ws-now {
+	fill: none;
+	stroke: var(--sim-text);
+	stroke-width: 1.5;
+}
+.ws-legend {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.25rem 1.25rem;
+	margin: 0.5rem 0 0;
+	padding: 0;
+	list-style: none;
+	font-size: var(--sl-text-xs);
+}
+.ws-legend li {
+	display: flex;
+	align-items: center;
+	gap: 0.4rem;
+}
+.ws-legend .sim-swatch {
+	flex-shrink: 0;
+	display: inline-grid;
+	place-items: center;
+	width: 1.25rem;
+	height: 1.25rem;
+	font: 500 11px var(--sl-font-mono);
+	color: var(--sim-text);
+}
+.ws-legend .sim-swatch.is-load {
+	background: var(--sim-active);
+	border-color: var(--sim-active);
+	color: var(--sim-panel);
+}
+.ws-legend .sim-swatch:is(.is-alu, .is-lane) {
+	background: var(--sim-block-a);
+	border-color: var(--sim-active);
+}
+.ws-legend .sim-swatch.is-waiting {
+	background: repeating-linear-gradient(45deg, var(--sim-muted) 0 1.5px, var(--sim-block-b) 1.5px 4px);
+}
+.ws-legend .sim-swatch:is(.is-ready, .is-plain) {
+	background: transparent;
+	border-color: var(--sim-muted);
+}
+.ws-legend .sim-swatch.is-idle {
+	background: var(--sim-warn-fill);
+	border-color: var(--sim-warn);
+}
+.wd-lane {
+	stroke: var(--sim-muted);
+}
+.wd-lane:not(.is-masked) {
+	fill: transparent;
+}
+.wd-lane.is-active {
+	fill: var(--sim-block-a);
+	stroke: var(--sim-active);
+	stroke-width: 1.5;
+}
+.wd-lane.is-masked {
+	stroke: var(--sim-line);
+}
+.wd-outcome {
+	font: 500 12px var(--sl-font-mono);
+	fill: var(--sim-text);
+	text-anchor: middle;
+}
+.wd-outcome.is-masked {
+	fill: var(--sim-muted);
+}
+.wd-bar-track {
+	stroke: var(--sim-line);
+}
+.wd-bar {
+	fill: var(--sim-active);
+}
+:is([data-sim='warp-scheduler'], [data-sim='warp-divergence']) .expressive-code .copy button {
+	width: 44px;
+	height: 44px;
+}
+:is([data-sim='warp-scheduler'], [data-sim='warp-divergence']) input[type='range'] {
+	min-height: 44px;
+}

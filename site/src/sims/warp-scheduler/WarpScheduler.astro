@@ -1,0 +1,91 @@
+---
+import SimFrame from '@components/SimFrame.astro';
+import { CODE, LIMITS } from './model';
+
+interface Props {
+	warps?: number;
+	latency?: number;
+	alu?: number;
+}
+
+const { warps = 4, latency = 20, alu = 2 } = Astro.props;
+---
+
+<SimFrame title="Warp scheduler: hiding memory latency" sim="warp-scheduler" code={[{ name: 'kernel', code: CODE, lang: 'cpp' }]} config={{ warps, latency, alu }}>
+	<Fragment slot="params">
+		<label class="sim-field">
+			<span>Warps on this scheduler <output data-out="warps">{warps}</output></span>
+			<input type="range" name="warps" min={LIMITS.warps.min} max={LIMITS.warps.max} value={warps} />
+		</label>
+		<label class="sim-field">
+			<span>Load latency, cycles <output data-out="latency">{latency}</output></span>
+			<input type="range" name="latency" min={LIMITS.latency.min} max={LIMITS.latency.max} step="2" value={latency} />
+		</label>
+		<label class="sim-field">
+			<span>Arithmetic per load <output data-out="alu">{alu}</output></span>
+			<input type="range" name="alu" min={LIMITS.alu.min} max={LIMITS.alu.max} value={alu} />
+		</label>
+	</Fragment>
+
+	<p class="sim-launch" data-stats></p>
+	<div class="sim-canvas" data-canvas>
+		<svg role="img" aria-label="Timeline: one row for the scheduler's issue slot and one row per warp, one column per cycle"></svg>
+	</div>
+	<ul class="ws-legend" aria-label="Legend">
+		<li><span class="sim-swatch is-load">L</span>issues a load</li>
+		<li><span class="sim-swatch is-alu">A</span>issues arithmetic</li>
+		<li><span class="sim-swatch is-waiting"></span>waits for memory</li>
+		<li><span class="sim-swatch is-ready"></span>ready, not picked</li>
+		<li><span class="sim-swatch is-idle"></span>scheduler idle</li>
+	</ul>
+
+	<Fragment slot="caption">
+		One step is one clock cycle of one warp scheduler, which issues at most one instruction per cycle. It keeps issuing
+		from the same warp until that warp stalls, then picks the warp that has been ready longest; NVIDIA does not
+		document its real policy. Left out: the store, loop overhead, the few cycles that dependent arithmetic also waits,
+		and limits on memory bandwidth. Real loads from DRAM take hundreds of cycles, more than the slider allows.
+	</Fragment>
+</SimFrame>
+
+<script>
+	import { Stepper } from '@sim-core/stepper';
+	import { bindControls } from '@sim-core/controls';
+	import { highlightLines, showVariant } from '@sim-core/code-sync';
+	import { describe, lastStep, linesAt, totalsAt, warpsToHide, type Config } from './model';
+	import { render } from './view';
+
+	function mount(frame: HTMLElement) {
+		const config: Config = JSON.parse(frame.dataset.config!);
+		const stepper = new Stepper(lastStep(config), 500);
+		const canvas = frame.querySelector<HTMLElement>('[data-canvas]')!;
+		const svgEl = canvas.querySelector('svg')!;
+		const stats = frame.querySelector<HTMLElement>('[data-stats]')!;
+		const code = showVariant(frame, 'kernel');
+		const field = (name: keyof Config) => frame.querySelector<HTMLInputElement>(`[name="${name}"]`)!;
+
+		const draw = () => {
+			render(svgEl, config, stepper.step, Math.max(260, canvas.clientWidth));
+			highlightLines(code, linesAt(config, stepper.step));
+			const t = totalsAt(config, stepper.step);
+			stats.textContent =
+				`${t.cycles} cycles, ${t.issued} issued, ${t.idle} idle` +
+				(t.cycles ? `, busy ${Math.round(100 * t.busy)}%` : '') +
+				`. About ${warpsToHide(config)} warps hide this latency.`;
+		};
+
+		frame.querySelector('.sim-params')!.addEventListener('input', () => {
+			for (const name of ['warps', 'latency', 'alu'] as const) {
+				config[name] = Number(field(name).value);
+				frame.querySelector(`[data-out="${name}"]`)!.textContent = String(config[name]);
+			}
+			stepper.setLast(lastStep(config));
+		});
+
+		bindControls(frame, stepper, (step) => describe(config, step));
+		stepper.onChange(draw);
+		new ResizeObserver(draw).observe(canvas);
+		draw();
+	}
+
+	document.querySelectorAll<HTMLElement>('[data-sim="warp-scheduler"]').forEach(mount);
+</script>

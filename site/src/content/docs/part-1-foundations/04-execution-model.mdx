@@ -1,0 +1,349 @@
+---
+title: 4. Execution model
+description: How an SM runs threads in warps of 32, how its warp schedulers hide memory latency by switching between warps, and what happens when the lanes of one warp take different branches.
+sidebar:
+  order: 4
+banner:
+  content: Draft chapter. If something is wrong or unclear, use the edit link at the bottom of the page.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import WarpScheduler from '@sims/warp-scheduler/WarpScheduler.astro';
+import WarpDivergence from '@sims/warp-divergence/WarpDivergence.astro';
+import CodeTabs from '@components/CodeTabs.astro';
+import { gpuById } from '@sim-core/gpu-specs';
+import cuda from '@kernels/ch04-execution-model/cuda/divergence.cu?raw';
+import numba from '@kernels/ch04-execution-model/numba/divergence.py?raw';
+import triton from '@kernels/ch04-execution-model/triton/divergence.py?raw';
+
+export const a100 = gpuById('a100');
+export const t4 = gpuById('t4');
+export const perScheduler = (g) => g.maxWarpsPerSm / g.partitionsPerSm;
+
+A load from GPU memory takes hundreds of clock cycles to return, according to
+the CUDA Programming Guide. An arithmetic instruction takes a few. The SM
+spends its silicon on arithmetic, not on the out-of-order machinery a CPU core
+uses to find other work while it waits, and a CUDA core cannot run a program by
+itself. So who decides what runs next, and how does the SM stay busy?
+
+Chapter 1 ended at the warp scheduler. This chapter is about what it does:
+it runs threads 32 at a time, switches between groups of them every cycle, and
+pays a price when the threads of one group disagree about a branch.
+
+## Warps
+
+When an SM receives a block, it splits the block's threads into **warps** of
+32. The split is fixed: warp 0 holds threads 0 to 31, warp 1 holds threads 32
+to 63, and so on. Each thread is one **lane** of its warp, numbered 0 to 31.
+For a 1D block:
+
+```cpp
+int warp = threadIdx.x / 32;   // which warp of the block
+int lane = threadIdx.x % 32;   // which lane of that warp
+```
+
+For a 2D block of size `(Dx, Dy)`, the guide defines the thread ID as
+`x + y * Dx`, so the rows of the block are laid end to end before the split.
+A `dim3(16, 16)` block puts rows 0 and 1 in warp 0.
+
+A block always has a whole number of warps: `ceil(threads / 32)` of them. A
+block of 100 threads gets 4 warps, and the last one has 28 lanes with no thread
+in them for the whole run. That is why block sizes are usually multiples of 32.
+
+## SIMT: one instruction, 32 threads
+
+A warp executes one instruction at a time, for all of its threads together.
+NVIDIA calls this SIMT, single instruction, multiple threads. It looks like
+SIMD vector hardware, with one important difference: you write the code for
+one scalar thread. Each thread has its own registers and can branch on its own
+data. The hardware works out which lanes take part in each instruction.
+
+So the CUDA cores of a partition from chapter 1 never pick their own work.
+They carry out the lanes of whatever instruction the scheduler issued for a warp.
+
+## Hiding latency with many warps
+
+Each of the {a100.partitionsPerSm} partitions of an SM has a warp scheduler,
+and each scheduler has a pool of resident warps. On every cycle, it picks a warp
+whose next instruction is ready and issues that instruction. A warp is not
+ready when its instruction needs a value that has not arrived yet, most often
+the result of a load.
+
+Switching warps costs nothing. Every resident warp keeps its program counters
+and registers on chip for its whole lifetime, so nothing is saved or restored
+when the scheduler picks a different warp next cycle. While one warp waits for
+memory, the others keep the scheduler issuing. That is **latency hiding**, and it
+is the reason a GPU wants many more threads than it has lanes.
+
+Step through the simulation below. Each column is one clock cycle. With the
+default four warps, every warp issues its load in the first four cycles, and
+then the scheduler has nothing to do until the first result comes back. Then
+raise the number of warps and watch the idle cycles disappear.
+
+<WarpScheduler />
+
+How many warps are enough? In the simulation, a warp issues one load and
+`A` arithmetic instructions per iteration, and the load takes `L` cycles. Each
+warp can issue `1 + A` instructions every `L + A` cycles, so the scheduler stays
+busy once there are at least `(L + A) / (1 + A)` warps, rounded up. With the
+defaults, `L = 20` and `A = 2`, that is 8 warps.
+
+The formula is the sim's, but the trend it shows is the one the CUDA
+Programming Guide states for real hardware: the fewer arithmetic instructions a
+kernel does per load, the more warps it needs to hide memory latency. Two other
+things help on real GPUs. Independent instructions from the same warp can issue
+back to back, which is instruction-level parallelism. And dependent arithmetic
+also waits a few cycles (typically 4 on compute capability 7.x, per the guide),
+which the simulation leaves out.
+
+An {a100.name} SM holds at most {a100.maxWarpsPerSm} warps, so
+{perScheduler(a100)} per scheduler; a {t4.name} SM holds {t4.maxWarpsPerSm},
+so {perScheduler(t4)}. Whether a kernel gets that many depends on how many
+registers and how much shared memory each block needs. Chapter 5 works that out.
+
+## Divergence
+
+Threads in a warp share one instruction at a time, but they can disagree about
+a branch:
+
+```cpp
+if (v > 0.0f) {
+    v = v * 2.0f + 1.0f;
+} else {
+    v = v * 0.5f;
+}
+```
+
+If some lanes of a warp have `v > 0` and others do not, the warp **diverges**.
+It runs each path that any of its lanes takes, one after the other, and masks
+off the lanes that are not on the current path. A masked lane does nothing for
+that instruction. When both paths are done, the lanes reconverge and continue
+together.
+
+The cost is that the warp spends time on both paths. If half the lanes take
+each side, every instruction inside the `if` and the `else` does half the work
+it could have done. If all 32 lanes agree, the other path is skipped and there
+is no cost at all.
+
+Divergence only happens inside a warp. Two different warps can take different
+paths for free, because they are scheduled independently anyway.
+
+Step through a warp below. Try each condition, and for the last one, switch
+between warp 0 and warp 1.
+
+<WarpDivergence />
+
+The last condition, `threadIdx.x < 32`, gives the two warps of the block
+different paths, but each warp agrees with itself, so neither diverges. This
+is the main trick for avoiding divergence: make the condition the same for all
+32 threads of a warp. Branching on `threadIdx.x / 32` is always uniform within
+a warp. Branching on data is uniform only when the data is arranged so that
+neighboring threads agree, for example after sorting it.
+
+## Independent thread scheduling
+
+Before Volta (compute capability 7.0), a warp had one program counter shared by
+its 32 threads, plus a mask of which ones were active. Diverged threads of a
+warp ran one path to completion before the other, so a thread on one path
+could never wait for a thread on the other. Code that does that, such as a
+spin lock between two lanes, could deadlock.
+
+From compute capability 7.0 on, the GPU keeps a program counter and call stack
+for every thread. The CUDA Programming Guide calls this **independent thread
+scheduling**: the hardware can switch between the diverged paths of a warp
+at the granularity of single threads, and threads can diverge and reconverge
+within a warp. Two things about it are easy to get wrong:
+
+- **It does not make divergence free.** NVIDIA's Volta whitepaper says
+  execution is still SIMT: in any given cycle, the cores execute the same
+  instruction for all active threads of a warp. The two paths can now be
+  interleaved, but the lanes of the other path still sit masked off.
+- **Threads of a warp are not guaranteed to run in lockstep.** Code written for
+  older GPUs that assumed the 32 threads of a warp always execute each
+  instruction together, such as a warp-level reduction through shared memory
+  without any synchronization, is now a race. The guide says to synchronize such
+  code with `__syncwarp()`, and to use the `_sync` versions of warp intrinsics,
+  such as `__shfl_sync` and `__ballot_sync`, which name the lanes that must take
+  part.
+
+<Aside type="caution">
+  Never rely on the lanes of a warp being in step. If threads of a warp exchange data
+  through memory, put a `__syncwarp()` between the write and the read, the same way a
+  block uses `__syncthreads()`.
+</Aside>
+
+## The code
+
+The chapter's kernels compute `out = x > 0 ? 2x + 1 : x / 2` in two ways.
+`branchy` uses an `if/else`, so a warp diverges whenever its 32 inputs have
+mixed signs. `branch_free` computes both results in every lane and keeps one,
+so every lane runs the same statements. The CUDA version adds `warp_masks`,
+which uses `__ballot_sync` to record, for every warp, which lanes would take
+the `if` path, and counts the warps that diverge. It runs everything on random
+data and again after sorting it. The tests in `kernels/ch04-execution-model/`
+check every version against NumPy.
+
+<CodeTabs
+	cuda={cuda}
+	numba={numba}
+	triton={triton}
+	titles={{ cuda: 'cuda/divergence.cu', numba: 'numba/divergence.py', triton: 'triton/divergence.py' }}
+>
+	<div slot="triton-note">
+		Triton programs work on whole blocks of elements, so there is no lane that could take its own branch. An `if`
+		in a Triton kernel needs a scalar condition, one value for the whole program; the compiler rejects a block of
+		conditions. A per-element choice is written with `tl.where(cond, a, b)`, which computes both `a` and `b` for
+		every element and keeps one, the same idea as `branch_free`. Triton decides how its program maps onto warps.
+	</div>
+</CodeTabs>
+
+What changes between the languages:
+
+- **CUDA C++** is the only version with `__ballot_sync`. The mask `0xffffffff`
+  says all 32 lanes take part, which is safe because the block size is a
+  multiple of 32 and every lane, even past the end of the array, reaches the
+  call.
+- **Numba** writes the same two kernels. It has `cuda.ballot_sync` on a real
+  GPU, but the CUDA simulator the tests use without a GPU does not, so the
+  ballot kernel is left out. Numba's float32 constants (`TWO`, `HALF`) keep
+  the arithmetic in float32; a bare `2` or `0.5` would make it float64.
+- **Triton** has only the branch-free form.
+
+The two CUDA kernels compute exactly the same values. Whether `branch_free` is
+faster is not obvious: for a branch this short, the compiler may already
+replace the `if/else` with predicated instructions, and Appendix A shows how to
+check in the SASS. Divergence matters when both paths do real work.
+
+## Measure it yourself
+
+On a machine with an NVIDIA GPU, run the CUDA program under Nsight Compute
+with the three sections that describe this chapter:
+
+```sh
+make -C kernels/ch04-execution-model/cuda
+ncu --section SchedulerStats --section WarpStateStats --section SourceCounters \
+    kernels/ch04-execution-model/cuda/divergence
+```
+
+- **Scheduler Statistics** reports, per scheduler, the active warps, the
+  eligible warps (ready to issue) and how often a warp was issued. Cycles with
+  no eligible warp are skipped issue slots, the idle cells of the simulation.
+- **Warp State Statistics** shows why warps were not ready. Stall Long
+  Scoreboard is time spent waiting for a load from memory.
+- **Source Counters** reports branch efficiency and, per source line, the
+  average number of threads that executed each instruction. On divergent code
+  that number is below 32.
+
+Compare `branchy` on random and on sorted data. The program prints how many
+warps diverged in each case. Every number from these tools depends on your
+GPU, so none is quoted here.
+
+## Exercises
+
+**1. Find the lane.** A block is `dim3(16, 16)`. Which warp and lane hold the
+thread with `threadIdx.x = 3`, `threadIdx.y = 2`? How many warps does a block
+of 100 threads have, and how many lanes of the last one are empty?
+
+<details>
+<summary>Answer</summary>
+
+The thread ID is `3 + 2 * 16 = 35`, so warp `35 / 32 = 1`, lane `35 % 32 = 3`.
+A block of 100 threads has `ceil(100 / 32) = 4` warps. The last one holds
+threads 96 to 99, so 28 of its lanes are empty.
+
+</details>
+
+**2. Same split, different cost.** A block of 256 threads runs an `if` whose
+body is 10 instructions and an `else` whose body is 20. Count the instructions
+the block's warps issue for the two bodies with the condition
+`threadIdx.x % 2 == 0`, then with `threadIdx.x < 128`. In both cases half the
+threads take each path.
+
+<details>
+<summary>Answer</summary>
+
+The block has 8 warps. With `threadIdx.x % 2 == 0`, every warp has both even
+and odd lanes, so each runs both bodies: 8 * (10 + 20) = 240 instructions,
+with 16 lanes active in each, half of the 7,680 lane slots. With
+`threadIdx.x < 128`, warps 0 to 3 run only the `if` body and warps 4 to 7
+only the `else` body: 4 * 10 + 4 * 20 = 120 instructions, every one with all
+32 lanes active. The work per thread is the same; the second version issues
+half as many instructions.
+
+</details>
+
+**3. Enough warps.** In the warp scheduler simulation, set the load latency to
+24 cycles and the arithmetic per load to 3. Predict the smallest number of
+warps that never leaves the scheduler idle once the loop is running, then
+check. What happens with one warp fewer?
+
+<details>
+<summary>Answer</summary>
+
+`(24 + 3) / (1 + 3) = 6.75`, rounded up to 7. With 7 warps, the scheduler
+issues every cycle from cycle 24 until the first warp finishes. With 6 warps,
+each round of 27 cycles has only 6 * 4 = 24 instructions to issue, so 3 cycles
+of every round are idle.
+
+</details>
+
+**4. Fix the bug.** This code sums 64 values in shared memory with the first
+warp of a block. It was written for GPUs before Volta and gives wrong results
+on newer ones. Why, and what is the fix?
+
+```cpp
+if (tid < 32) {
+    s[tid] += s[tid + 32];
+    s[tid] += s[tid + 16];
+    s[tid] += s[tid + 8];
+    s[tid] += s[tid + 4];
+    s[tid] += s[tid + 2];
+    s[tid] += s[tid + 1];
+}
+```
+
+<details>
+<summary>Answer</summary>
+
+Each line has lane `tid` read `s[tid + k]`, a value another lane of the same
+warp writes on the same line. The code assumes all 32 lanes finish the read
+before any lane writes, which only held because older warps ran in lockstep.
+Since compute capability 7.0 that is not guaranteed, so a lane can read a value
+that has already been updated, or one that is not ready yet. The fix is to
+split every line into a read and a write with a `__syncwarp()` after each:
+
+```cpp
+float t = s[tid + 16];
+__syncwarp();
+s[tid] += t;
+__syncwarp();
+```
+
+The `s[tid + 32]` line reads only values that lanes 0 to 31 never write, but
+it needs a `__syncwarp()` after it for the next read. Chapter 13 replaces this
+pattern with warp shuffles, which need no shared memory.
+
+</details>
+
+**5. Run it.** Run `pytest kernels/ch04-execution-model`. On a GPU, run
+`make -C kernels/ch04-execution-model/cuda run`. Before you look, predict how
+many of the 32,768 warps diverge on random data and on sorted data.
+
+<details>
+<summary>Answer</summary>
+
+With random signs nearly every warp diverges: a warp is uniform only when its
+32 independent signs all agree, which has a probability of 2 / 2<sup>32</sup>.
+After sorting, the negative values come first and the positive ones after
+them, so at most one warp, the one where the sign changes, diverges.
+
+</details>
+
+## Further reading
+
+- [CUDA Programming Guide: warps and SIMT](https://docs.nvidia.com/cuda/cuda-programming-guide/01-introduction/programming-model.html#warps-and-simt), the short introduction with a picture of masked lanes.
+- [CUDA Programming Guide: SIMT execution model](https://docs.nvidia.com/cuda/cuda-programming-guide/03-advanced/advanced-kernel-programming.html#simt-execution-model), with the sections on [independent thread scheduling](https://docs.nvidia.com/cuda/cuda-programming-guide/03-advanced/advanced-kernel-programming.html#independent-thread-scheduling) and [hardware multithreading](https://docs.nvidia.com/cuda/cuda-programming-guide/03-advanced/advanced-kernel-programming.html#hardware-multithreading), the source for this chapter's claims about divergence, Volta and free warp switching.
+- [CUDA C++ Programming Guide 12.4: multiprocessor level](https://docs.nvidia.com/cuda/archive/12.4.0/cuda-c-programming-guide/index.html#multiprocessor-level), on how many warps it takes to hide arithmetic and memory latency.
+- [NVIDIA Tesla V100 GPU architecture whitepaper](https://images.nvidia.com/content/volta-architecture/pdf/volta-architecture-whitepaper.pdf), the section "Independent Thread Scheduling", with diagrams of divergent paths before and after Volta.
+- [Nsight Compute Profiling Guide](https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html), for the Scheduler Statistics, Warp State Statistics and Source Counters sections.
+- [Triton: tl.where](https://triton-lang.org/main/python-api/generated/triton.language.where.html), the per-element select.
