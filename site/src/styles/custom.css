@@ -2126,3 +2126,142 @@
 [data-sim='scan'] input[type='range'] {
 	min-height: 44px;
 }
+
+/* Race condition sim (chapter 22) */
+[data-sim='race-condition'] select {
+	width: 100%;
+	max-width: 100%;
+}
+[data-sim='race-condition'] .expressive-code .copy button {
+	width: 44px;
+	height: 44px;
+}
+.rc-pick {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 0.5rem;
+	margin-bottom: 0.75rem;
+	font-size: var(--sl-text-sm);
+}
+.rc-pick[hidden],
+.rc-pick button[hidden] {
+	display: none;
+}
+.rc-pick button {
+	font: inherit;
+	min-height: 44px;
+	padding: 0 0.8rem;
+	color: var(--sim-text);
+	background: transparent;
+	border: 1px solid var(--sim-muted);
+	border-radius: 4px;
+	cursor: pointer;
+}
+.rc-pick button:hover:not(:disabled) {
+	border-color: var(--sim-active);
+}
+.rc-pick button:disabled {
+	opacity: 0.45;
+	cursor: default;
+}
+.rc-mem {
+	fill: var(--sim-block-b);
+	stroke: var(--sim-muted);
+}
+.rc-mem.is-now {
+	stroke: var(--sim-active);
+	stroke-width: 2;
+}
+.rc-mem.is-lost,
+.rc-chip.is-lost {
+	fill: var(--sim-warn-fill);
+	stroke: var(--sim-warn);
+	stroke-width: 2;
+}
+.rc-value {
+	font: 600 22px var(--sl-font-mono);
+	fill: var(--sim-text);
+}
+.rc-lost-text {
+	fill: var(--sim-warn);
+}
+.rc-card {
+	fill: var(--sim-block-a);
+	stroke: var(--sim-line);
+}
+.rc-card.is-b {
+	fill: var(--sim-block-b);
+}
+.rc-card.is-now {
+	stroke: var(--sim-active);
+	stroke-width: 2;
+}
+.rc-reg {
+	fill: var(--sim-panel);
+	stroke: var(--sim-line);
+}
+.rc-ran {
+	fill: var(--sim-code-active);
+	stroke: var(--sim-active);
+}
+.rc-next {
+	fill: var(--sim-active);
+}
+.rc-op {
+	fill: var(--sim-text);
+}
+.rc-chip {
+	fill: var(--sim-block-a);
+	stroke: var(--sim-line);
+}
+.rc-chip.is-now {
+	stroke: var(--sim-active);
+	stroke-width: 2;
+}
+.rc-chip.is-future {
+	fill: none;
+	stroke: var(--sim-line);
+	stroke-dasharray: 3 3;
+}
+.rc-bar-track {
+	fill: none;
+	stroke: var(--sim-line);
+}
+.rc-bar {
+	fill: var(--sim-active);
+}
+.rc-bar.is-lost {
+	fill: var(--sim-warn);
+}
+.rc-legend {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.25rem 1.25rem;
+	margin: 0.5rem 0 0;
+	padding: 0;
+	list-style: none;
+	font-size: var(--sl-text-xs);
+}
+.rc-legend li {
+	display: flex;
+	align-items: center;
+	gap: 0.4rem;
+}
+.rc-swatch {
+	flex-shrink: 0;
+	width: 1.25rem;
+	height: 0.75rem;
+	border-radius: 2px;
+}
+.rc-swatch.is-now {
+	background: var(--sim-block-a);
+	border: 2px solid var(--sim-active);
+}
+.rc-swatch.is-lost {
+	background: var(--sim-warn-fill);
+	border: 2px solid var(--sim-warn);
+}
+.rc-swatch.is-future {
+	border: 1px dashed var(--sim-muted);
+}
