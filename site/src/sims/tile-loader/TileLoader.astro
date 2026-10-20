@@ -1,0 +1,103 @@
+---
+import SimFrame from '@components/SimFrame.astro';
+import { CODE, MODES, SIZES, TILES, type Mode } from './model';
+
+interface Props {
+	mode?: Mode;
+	n?: number;
+	tile?: number;
+}
+
+const { mode = 'shared', n = 8, tile = 4 } = Astro.props;
+const label: Record<Mode, string> = { global: 'Without shared memory', shared: 'With shared memory' };
+const code = MODES.map((m) => ({ name: m, code: CODE[m], lang: 'cpp' }));
+// SimFrame shows the first variant until the script runs, so put the starting one first.
+code.sort((a, b) => Number(b.name === mode) - Number(a.name === mode));
+---
+
+<SimFrame title="Tile loader: one block of a matrix multiply" sim="tile-loader" code={code} config={{ mode, n, tile }}>
+	<Fragment slot="params">
+		<label class="sim-field">
+			<span>Kernel</span>
+			<select name="mode">
+				{MODES.map((m) => <option value={m} selected={m === mode}>{label[m]}</option>)}
+			</select>
+		</label>
+		<label class="sim-field">
+			<span>Matrix size n</span>
+			<select name="n">
+				{SIZES.map((s) => <option value={s} selected={s === n}>{s} x {s}</option>)}
+			</select>
+		</label>
+		<label class="sim-field">
+			<span>Tile size TILE (block is TILE x TILE threads)</span>
+			<select name="tile">
+				{TILES.map((t) => <option value={t} selected={t === tile}>{t} x {t}</option>)}
+			</select>
+		</label>
+	</Fragment>
+
+	<p class="sim-launch" data-stats></p>
+	<div class="sim-canvas" data-canvas>
+		<svg role="img" aria-label="Matrices A, B and C with the elements one block loads from global memory, and the block's two shared memory tiles"></svg>
+	</div>
+	<ul class="ws-legend" aria-label="Legend">
+		<li><span class="sim-swatch tl-swatch is-strip"></span>used by this block</li>
+		<li><span class="sim-swatch tl-swatch is-read"></span>read in this step</li>
+		<li><span class="sim-swatch tl-swatch is-outline"></span>this block's tile, current phase</li>
+		<li><span class="sim-swatch is-plain">2</span>loads from global (A, B), reads (As, Bs) or terms summed (C)</li>
+	</ul>
+
+	<Fragment slot="caption">
+		One step is one statement run by every thread of the block together. Real warps run at different speeds, which is
+		why the barriers are needed. Reads count element loads the kernel issues; L1 and L2 caches can serve some repeated
+		global loads, and the model leaves them out. Numbers inside cells appear when the cells are large enough to hold them.
+	</Fragment>
+</SimFrame>
+
+<script>
+	import { Stepper } from '@sim-core/stepper';
+	import { bindControls } from '@sim-core/controls';
+	import { highlightLines, showVariant } from '@sim-core/code-sync';
+	import { blockTotals, describe, gridTotals, lastStep, stateAt, type Config } from './model';
+	import { render } from './view';
+
+	const fmt = (x: number) => x.toLocaleString('en-US');
+
+	function mount(frame: HTMLElement) {
+		const config: Config = JSON.parse(frame.dataset.config!);
+		const stepper = new Stepper(lastStep(config), 900);
+		const canvas = frame.querySelector<HTMLElement>('[data-canvas]')!;
+		const svgEl = canvas.querySelector('svg')!;
+		const stats = frame.querySelector<HTMLElement>('[data-stats]')!;
+		const pick = (name: string) => frame.querySelector<HTMLSelectElement>(`select[name="${name}"]`)!;
+		let code = showVariant(frame, config.mode);
+
+		const draw = () => {
+			const st = stateAt(config, stepper.step);
+			render(svgEl, config, st, Math.max(260, canvas.clientWidth));
+			highlightLines(code, st.cur.lines);
+			const b = blockTotals(config);
+			const g = gridTotals(config);
+			stats.textContent =
+				`This block so far: ${fmt(st.globalReads)} global loads, ${fmt(st.sharedReads)} shared reads. ` +
+				`Per block in total: ${fmt(b.globalWithout)} without shared memory, ${fmt(b.globalWith)} with. ` +
+				`Whole grid of ${g.blocks} block${g.blocks === 1 ? '' : 's'}: ${fmt(g.globalWithout)} and ${fmt(g.globalWith)}.`;
+		};
+
+		frame.querySelector('.sim-params')!.addEventListener('change', () => {
+			config.mode = pick('mode').value as Config['mode'];
+			config.n = Number(pick('n').value);
+			config.tile = Number(pick('tile').value);
+			code = showVariant(frame, config.mode);
+			stepper.setLast(lastStep(config));
+		});
+
+		bindControls(frame, stepper, (step) => describe(config, step));
+		stepper.onChange(draw);
+		new ResizeObserver(draw).observe(canvas);
+		draw();
+	}
+
+	document.querySelectorAll<HTMLElement>('[data-sim="tile-loader"]').forEach(mount);
+</script>
