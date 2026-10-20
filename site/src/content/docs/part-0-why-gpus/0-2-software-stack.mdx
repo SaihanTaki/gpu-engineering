@@ -173,7 +173,7 @@ print each stage of the `nvcc` path inside the course Docker image:
 	triton={triton}
 	titles={{ cuda: 'cuda/saxpy.cu', numba: 'numba/saxpy.py', triton: 'triton/saxpy.py' }}
 >
-	<div slot="triton">
+	<div slot="triton-note">
 		The Triton kernel works on a block of `BLOCK` elements per program, so the source has no thread index. How the
 		block is split over threads appears in the TTGIR stage of the simulation.
 	</div>

@@ -137,7 +137,7 @@ version against NumPy.
 	triton={triton}
 	titles={{ cuda: 'cuda/whoami.cu', numba: 'numba/whoami.py', triton: 'triton/whoami.py' }}
 >
-	<div slot="triton">
+	<div slot="triton-note">
 		Triton has no `threadIdx`. A Triton program handles a whole block of elements at once:
 		`tl.program_id(0)` plays the role of `blockIdx.x`, and `tl.arange(0, BLOCK)` gives the offsets that
 		`threadIdx.x` would. The mask does the job of the bounds check. How many hardware threads work on each

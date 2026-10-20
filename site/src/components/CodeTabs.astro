@@ -11,8 +11,7 @@ interface Props {
 
 const { cuda, numba, triton, titles = {} } = Astro.props;
 // In MDX a child with slot="triton" replaces the triton prop, so the note uses slot="triton-note".
-// The old slot name still renders for pages that have not moved yet.
-const hasTritonNote = Astro.slots.has('triton-note') || Astro.slots.has('triton');
+const hasTritonNote = Astro.slots.has('triton-note');
 ---
 
 <Tabs syncKey="lang">
@@ -34,7 +33,6 @@ const hasTritonNote = Astro.slots.has('triton-note') || Astro.slots.has('triton'
 		(triton || hasTritonNote) && (
 			<TabItem label="Triton">
 				<slot name="triton-note" />
-				<slot name="triton" />
 				{triton && <Code code={triton} lang="python" title={titles.triton} />}
 			</TabItem>
 		)
