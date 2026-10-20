@@ -428,3 +428,99 @@
 	min-height: 3em;
 	font-size: var(--sl-text-sm);
 }
+
+/* CPU vs GPU sim */
+.sim-race-track {
+	fill: var(--sim-block-b);
+	stroke: var(--sim-line);
+}
+.sim-race-serial {
+	fill: url(#sim-race-stripes);
+}
+.sim-race-stripe-bg {
+	fill: var(--sim-block-b);
+}
+.sim-race-stripe {
+	stroke: var(--sim-muted);
+	stroke-width: 3;
+}
+.sim-race-parallel {
+	fill: var(--sim-active);
+}
+.sim-race-divider {
+	stroke: var(--sim-text);
+	stroke-width: 1.5;
+}
+.sim-worker {
+	fill: var(--sim-block-b);
+	stroke: var(--sim-line);
+	stroke-width: 0.5;
+}
+.sim-worker.is-busy {
+	fill: var(--sim-active);
+	stroke: var(--sim-active);
+}
+.sim-worker.is-busy.is-serial {
+	fill: url(#sim-race-stripes);
+	stroke: var(--sim-muted);
+}
+.sim-worker.is-busy.is-serial.is-tiny {
+	fill: var(--sim-muted);
+}
+[data-sim='cpu-vs-gpu'] input[type='range'] {
+	min-height: 44px;
+}
+.sim-race-legend {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.25rem 1.25rem;
+	margin: 0.5rem 0 0;
+	padding: 0;
+	list-style: none;
+	font-size: var(--sl-text-xs);
+}
+.sim-race-legend li {
+	display: flex;
+	align-items: center;
+	gap: 0.4rem;
+}
+.sim-swatch {
+	width: 1rem;
+	height: 0.75rem;
+	border: 1px solid var(--sim-line);
+	border-radius: 2px;
+	background: var(--sim-block-b);
+}
+.sim-swatch.is-serial {
+	background: repeating-linear-gradient(45deg, var(--sim-muted) 0 2px, var(--sim-block-b) 2px 4px);
+}
+.sim-swatch.is-parallel {
+	background: var(--sim-active);
+}
+.sim-race-table {
+	width: 100%;
+	margin-top: 0.75rem;
+	border-collapse: collapse;
+	font-size: var(--sl-text-sm);
+}
+.sim-race-table caption {
+	text-align: start;
+	padding-bottom: 0.4rem;
+	font-family: var(--sl-font-mono);
+	font-size: var(--sl-text-xs);
+	color: var(--sim-muted);
+}
+.sim-race-table :is(th, td) {
+	padding: 0.35rem 0.5rem 0.35rem 0;
+	border-bottom: 1px solid var(--sim-line);
+	text-align: start;
+	vertical-align: top;
+}
+.sim-race-table thead th {
+	font-size: var(--sl-text-xs);
+	font-weight: 500;
+	color: var(--sim-muted);
+}
+.sim-race-table td {
+	font-family: var(--sl-font-mono);
+}
