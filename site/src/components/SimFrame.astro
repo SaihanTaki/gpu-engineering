@@ -1,0 +1,63 @@
+---
+import { Code } from '@astrojs/starlight/components';
+
+interface Props {
+	title: string;
+	/** Matched by the sim's script to find its frames. */
+	sim: string;
+	/** Code variants the sim can switch between; the first is shown initially. */
+	code?: { name: string; code: string; lang: string }[];
+	/** Serialized config read by the sim's script. */
+	config?: Record<string, unknown>;
+}
+
+const { title, sim, code = [], config = {} } = Astro.props;
+const headingId = `sim-${sim}-${Math.random().toString(36).slice(2, 8)}`;
+---
+
+<figure class="sim not-content" data-sim={sim} data-config={JSON.stringify(config)} aria-labelledby={headingId}>
+	<header class="sim-head">
+		<p class="sim-kind">Simulation</p>
+		<h3 id={headingId}>{title}</h3>
+	</header>
+
+	<div class="sim-params"><slot name="params" /></div>
+
+	<div class="sim-body">
+		<div class="sim-stage"><slot /></div>
+		{
+			code.length > 0 && (
+				<div class="sim-code">
+					{code.map((v, i) => (
+						<div data-code-variant={v.name} hidden={i > 0}>
+							<Code code={v.code} lang={v.lang} frame="none" />
+						</div>
+					))}
+				</div>
+			)
+		}
+	</div>
+
+	<div class="sim-controls" role="toolbar" aria-label={`${title} controls`}>
+		<button type="button" data-sim-control="reset" title="Reset (Home)">Reset</button>
+		<button type="button" data-sim-control="prev" title="Step back (Left arrow)">Back</button>
+		<button type="button" data-sim-control="play" class="is-primary" aria-label="Play" title="Play (Space)">
+			<span class="when-paused">Play</span><span class="when-playing">Pause</span>
+		</button>
+		<button type="button" data-sim-control="next" title="Step forward (Right arrow)">Next</button>
+		<label class="sim-speed">
+			Speed
+			<select data-sim-control="speed">
+				<option value="0.5">0.5x</option>
+				<option value="1" selected>1x</option>
+				<option value="2">2x</option>
+				<option value="4">4x</option>
+			</select>
+		</label>
+		<input type="range" min="0" max="0" value="0" data-sim-control="scrub" aria-label="Step" class="sim-scrub" />
+		<span class="sim-counter" data-sim-control="counter" aria-hidden="true"></span>
+	</div>
+
+	<p class="sim-status" data-sim-status aria-live="polite"></p>
+	<figcaption><slot name="caption" /></figcaption>
+</figure>

@@ -1,0 +1,362 @@
+@import '@fontsource-variable/source-serif-4/opsz.css';
+@import '@fontsource-variable/source-serif-4/opsz-italic.css';
+@import '@fontsource/ibm-plex-sans/400.css';
+@import '@fontsource/ibm-plex-sans/500.css';
+@import '@fontsource/ibm-plex-sans/600.css';
+@import '@fontsource/ibm-plex-mono/400.css';
+@import '@fontsource/ibm-plex-mono/500.css';
+
+/* Dark theme is Starlight's :root default; light overrides below. */
+:root {
+	--sl-font: 'IBM Plex Sans', var(--sl-font-system);
+	--sl-font-mono: 'IBM Plex Mono', var(--sl-font-system-mono);
+	--course-serif: 'Source Serif 4 Variable', Georgia, serif;
+
+	--sl-color-accent-low: #0b3b37;
+	--sl-color-accent: #14b8a6;
+	--sl-color-accent-high: #99f6e4;
+
+	--sim-panel: #0e1615;
+	--sim-line: #2b3d3b;
+	--sim-text: #e3eeec;
+	--sim-muted: #9db3af;
+	--sim-block-a: #134540;
+	--sim-block-b: #29363a;
+	--sim-active: #2dd4bf;
+	--sim-warn: #fbbf24;
+	--sim-warn-fill: #4a3410;
+	--sim-code-active: rgba(45, 212, 191, 0.16);
+}
+
+:root[data-theme='light'] {
+	--sl-color-accent-low: #ccfbf1;
+	--sl-color-accent: #0f766e;
+	--sl-color-accent-high: #134e4a;
+
+	--sim-panel: #f5f9f8;
+	--sim-line: #c3d3d0;
+	--sim-text: #10201e;
+	--sim-muted: #4a5f5c;
+	--sim-block-a: #c8ece6;
+	--sim-block-b: #e2e8e7;
+	--sim-active: #0f766e;
+	--sim-warn: #92400e;
+	--sim-warn-fill: #fde9c4;
+	--sim-code-active: rgba(15, 118, 110, 0.13);
+}
+
+/* Serif for reading prose; headings, UI and sims stay in Plex Sans. */
+.sl-markdown-content :is(p, li, blockquote, td):not(:where(.not-content *)) {
+	font-family: var(--course-serif);
+	font-size: 1.0625rem;
+	line-height: 1.65;
+}
+.sl-markdown-content :is(p, li, td) code {
+	font-size: 0.875em;
+}
+
+/* Simulation frame */
+.sim {
+	margin-block: 2rem;
+	padding: 1rem;
+	border: 1px solid var(--sim-line);
+	border-radius: 6px;
+	background: var(--sim-panel);
+	color: var(--sim-text);
+	font-family: var(--sl-font);
+}
+.sim-head {
+	display: flex;
+	align-items: baseline;
+	gap: 0.75rem;
+	flex-wrap: wrap;
+	margin-bottom: 0.75rem;
+}
+.sim-head h3 {
+	margin: 0;
+	font-size: var(--sl-text-lg);
+	font-weight: 600;
+	color: var(--sim-text);
+}
+.sim-kind {
+	margin: 0;
+	font-family: var(--sl-font-mono);
+	font-size: var(--sl-text-xs);
+	color: var(--sim-active);
+}
+.sim code {
+	font-family: var(--sl-font-mono);
+	font-size: 0.85em;
+}
+
+.sim-params {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+	gap: 0.75rem 1.25rem;
+	margin-bottom: 1rem;
+}
+.sim-field {
+	display: grid;
+	gap: 0.25rem;
+	font-size: var(--sl-text-sm);
+}
+.sim-field output {
+	font-family: var(--sl-font-mono);
+	font-weight: 500;
+	color: var(--sim-active);
+	margin-inline-start: 0.25rem;
+}
+.sim-check {
+	display: flex;
+	align-items: center;
+	gap: 0.5rem;
+	font-size: var(--sl-text-sm);
+	min-height: 44px;
+}
+.sim input[type='range'] {
+	accent-color: var(--sim-active);
+	min-height: 32px;
+	width: 100%;
+}
+.sim input[type='checkbox'] {
+	accent-color: var(--sim-active);
+	width: 1.25rem;
+	height: 1.25rem;
+}
+.sim select,
+.sim input[type='number'] {
+	font: inherit;
+	font-size: var(--sl-text-sm);
+	color: var(--sim-text);
+	background: var(--sl-color-bg);
+	border: 1px solid var(--sim-muted);
+	border-radius: 4px;
+	padding: 0.4rem 0.5rem;
+	min-height: 44px;
+}
+.sim input[type='number'] {
+	width: 5rem;
+	font-family: var(--sl-font-mono);
+}
+
+.sim-body {
+	display: grid;
+	/* minmax(0, ...) stops long code lines from widening the track past the viewport. */
+	grid-template-columns: minmax(0, 1fr);
+	gap: 1rem;
+}
+.sim {
+	container-type: inline-size;
+}
+/* Side by side only when the sim itself is wide; Starlight's content column usually is not. */
+@container (min-width: 60rem) {
+	.sim-body:has(.sim-code) {
+		grid-template-columns: minmax(0, 1fr) minmax(0, 27rem);
+		align-items: start;
+	}
+}
+.sim-stage {
+	min-width: 0;
+}
+.sim-canvas {
+	width: 100%;
+	overflow-x: auto;
+}
+.sim-canvas svg {
+	display: block;
+	max-width: 100%;
+	height: auto;
+}
+
+.sim-launch {
+	margin: 0 0 0.5rem;
+	font-family: var(--sl-font-mono);
+	font-size: var(--sl-text-sm);
+	overflow-wrap: anywhere;
+}
+.sim-launch.is-warning {
+	color: var(--sim-warn);
+}
+
+.sim-code .ec-line {
+	transition: background-color 120ms linear;
+}
+.sim-code .ec-line.sim-line-active {
+	background: var(--sim-code-active);
+	box-shadow: inset 3px 0 0 var(--sim-active);
+}
+
+.sim-controls {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 0.5rem;
+	margin-top: 1rem;
+	padding-top: 0.75rem;
+	border-top: 1px solid var(--sim-line);
+}
+.sim-controls button {
+	font: inherit;
+	font-size: var(--sl-text-sm);
+	font-weight: 500;
+	min-height: 44px;
+	min-width: 44px;
+	padding: 0 0.9rem;
+	color: var(--sim-text);
+	background: transparent;
+	border: 1px solid var(--sim-muted);
+	border-radius: 4px;
+	cursor: pointer;
+}
+.sim-controls button:hover:not(:disabled) {
+	border-color: var(--sim-active);
+}
+.sim-controls button:disabled {
+	opacity: 0.45;
+	cursor: default;
+}
+.sim-controls button.is-primary {
+	min-width: 5.5rem;
+	color: var(--sl-color-black);
+	background: var(--sim-active);
+	border-color: var(--sim-active);
+}
+.sim-controls [data-playing='true'] .when-paused,
+.sim-controls :not([data-playing='true']) > .when-playing {
+	display: none;
+}
+.sim-speed {
+	display: flex;
+	align-items: center;
+	gap: 0.4rem;
+	font-size: var(--sl-text-sm);
+}
+.sim-scrub {
+	flex: 1 1 8rem;
+}
+.sim-counter {
+	font-family: var(--sl-font-mono);
+	font-size: var(--sl-text-xs);
+	color: var(--sim-muted);
+	min-width: 7ch;
+}
+.sim :is(button, input, select):focus-visible {
+	outline: 2px solid var(--sim-active);
+	outline-offset: 2px;
+}
+
+.sim-status {
+	margin: 0.75rem 0 0;
+	min-height: 3em;
+	font-size: var(--sl-text-sm);
+}
+.sim figcaption {
+	margin-top: 0.75rem;
+	font-size: var(--sl-text-xs);
+	color: var(--sim-muted);
+}
+
+.sim-inspect {
+	margin: 1rem 0 0;
+	padding: 0.75rem;
+	border: 1px solid var(--sim-line);
+	border-radius: 4px;
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.75rem 1rem;
+	align-items: center;
+}
+.sim-inspect legend {
+	padding: 0 0.25rem;
+	font-size: var(--sl-text-xs);
+	color: var(--sim-muted);
+}
+.sim-inspect label {
+	display: flex;
+	align-items: center;
+	gap: 0.4rem;
+	font-family: var(--sl-font-mono);
+	font-size: var(--sl-text-sm);
+}
+.sim-formula {
+	flex-basis: 100%;
+	margin: 0;
+	font-family: var(--sl-font-mono);
+	font-size: var(--sl-text-sm);
+	overflow-wrap: anywhere;
+}
+
+/* SVG parts drawn by sims */
+.sim-label {
+	font: 500 13px var(--sl-font-mono);
+	fill: var(--sim-text);
+}
+.sim-small {
+	font: 11px var(--sl-font-mono);
+	fill: var(--sim-muted);
+}
+.sim-block {
+	fill: none;
+	stroke: var(--sim-line);
+}
+.sim-block.is-running {
+	stroke: var(--sim-active);
+	stroke-width: 2;
+}
+.sim-thread {
+	cursor: pointer;
+}
+.sim-cell {
+	stroke: var(--sim-line);
+}
+.sim-thread.is-selected .sim-cell {
+	stroke: var(--sim-active);
+	stroke-width: 2.5;
+}
+.sim-cell-text {
+	font: 11px var(--sl-font-mono);
+	fill: var(--sim-text);
+	text-anchor: middle;
+	pointer-events: none;
+}
+.sim-link {
+	fill: none;
+	stroke: var(--sim-active);
+	stroke-opacity: 0.45;
+	stroke-width: 1.25;
+}
+.sim-link.is-selected {
+	stroke-opacity: 1;
+	stroke-width: 2.5;
+}
+.sim-link.is-oob {
+	stroke: var(--sim-warn);
+	stroke-dasharray: 4 3;
+}
+.sim-element {
+	fill: transparent;
+	stroke: var(--sim-muted);
+}
+.sim-element.is-written {
+	stroke: var(--sim-line);
+}
+.sim-element.is-missing,
+.sim-element.is-past-end {
+	stroke: var(--sim-warn);
+	stroke-dasharray: 3 2;
+	stroke-width: 1.5;
+}
+.sim-element.is-past-end.is-hit {
+	fill: var(--sim-warn-fill);
+}
+.sim-index {
+	font: 10px var(--sl-font-mono);
+	fill: var(--sim-muted);
+	text-anchor: middle;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.sim-code .ec-line {
+		transition: none;
+	}
+}
