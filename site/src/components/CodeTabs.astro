@@ -1,0 +1,39 @@
+---
+import { Code, Tabs, TabItem } from '@astrojs/starlight/components';
+
+interface Props {
+	cuda?: string;
+	numba?: string;
+	triton?: string;
+	/** File names shown as the code block titles. */
+	titles?: { cuda?: string; numba?: string; triton?: string };
+}
+
+const { cuda, numba, triton, titles = {} } = Astro.props;
+const hasTritonNote = Astro.slots.has('triton');
+---
+
+<Tabs syncKey="lang">
+	{
+		cuda && (
+			<TabItem label="CUDA C++">
+				<Code code={cuda} lang="cpp" title={titles.cuda} />
+			</TabItem>
+		)
+	}
+	{
+		numba && (
+			<TabItem label="Numba">
+				<Code code={numba} lang="python" title={titles.numba} />
+			</TabItem>
+		)
+	}
+	{
+		(triton || hasTritonNote) && (
+			<TabItem label="Triton">
+				<slot name="triton" />
+				{triton && <Code code={triton} lang="python" title={titles.triton} />}
+			</TabItem>
+		)
+	}
+</Tabs>

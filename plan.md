@@ -148,7 +148,7 @@ for v1.
 |---|---|---|
 | Site | **Astro** + **Starlight** (Astro's official docs theme), TypeScript | Ships zero JS by default; only the sims load scripts. Starlight provides the sidebar, prev/next, search, dark mode, mobile layout and "Edit this page" links. Deploy the `dist/` output to GitHub Pages |
 | Theme customization | Starlight `customCss` for fonts and colors; component overrides (e.g. `Footer`, `PageTitle`) only where needed | Keeps Starlight upgradable; we restyle it instead of forking it |
-| Chapter content | **MDX** (built into Starlight) in the `docs` collection (`src/content/docs/`), one folder per part. Starlight's `docsSchema` is extended with course fields (chapter number, prerequisites, GPU presets used, Colab link) | Prose and sims in one file; schema catches missing metadata at build time |
+| Chapter content | **MDX** (built into Starlight) in the `docs` collection (`src/content/docs/`), one folder per part. Starlight's default `docsSchema`; extend it only when a component needs a new field (e.g. a Colab link) | Prose and sims in one file; schema catches missing metadata at build time |
 | Simulations | Plain **SVG + TS** classes, wrapped in `.astro` components that mount them from a `<script>` tag. **D3** only for scales/transitions | No UI framework needed; each sim's JS loads only on pages that use it |
 | Shared sim library | `sim-core`: timeline/stepper, controls, code-highlight bridge, color tokens built on Starlight's CSS variables | Every sim behaves the same way and follows Starlight's light/dark theme |
 | Code display | Starlight's `<Code>` component (Expressive Code, Shiki-based) inside Starlight `<Tabs syncKey="lang">` for C++ / Numba / Triton, wrapped in our `CodeTabs.astro` | Highlighting happens at build time. `syncKey` remembers the learner's language choice across every chapter |
@@ -196,7 +196,7 @@ gpu-engineering/
 │   ├── astro.config.mjs       # starlight() config: sidebar groups, editLink, customCss, base path
 │   ├── tsconfig.json          # path aliases: @sims, @components, @kernels
 │   ├── src/
-│   │   ├── content.config.ts  # docsLoader() + docsSchema({ extend: course fields })
+│   │   ├── content.config.ts  # docsLoader() + docsSchema()
 │   │   ├── content/docs/
 │   │   │   ├── index.mdx               # landing page (Starlight splash template)
 │   │   │   ├── part-0-why-gpus/        # 0-1-cpu-vs-gpu.mdx, 0-2-software-stack.mdx
@@ -248,12 +248,9 @@ A chapter then reads like this:
 ```mdx
 ---
 # src/content/docs/part-2-memory/06-coalescing.mdx
-title: Global memory & coalescing
-chapter: 6
+title: 6. Global memory & coalescing
 sidebar:
   order: 6
-prerequisites: [2, 4]
-colab: notebooks/ch06-coalescing.ipynb
 ---
 import { Aside } from '@astrojs/starlight/components';
 import Coalescing from '@sims/coalescing/Coalescing.astro';
@@ -312,7 +309,7 @@ unit-tested with Vitest separately from the SVG view.
 
 | Phase | Scope | Done when |
 |---|---|---|
-| **M0: Skeleton** | Starlight scaffold (sidebar groups per part, extended schema, `custom.css`), `sim-core`, `CodeTabs`, one sim (grid indexing), Dockerfile, licenses, `CONTRIBUTING.md`, Pages deploy | Chapter 2 is fully readable and interactive |
+| **M0: Skeleton** | Starlight scaffold (sidebar groups per part, `custom.css`), `sim-core`, `CodeTabs`, one sim (grid indexing), Dockerfile, licenses, `CONTRIBUTING.md`, Pages deploy | Chapter 2 is fully readable and interactive |
 | **M1: Foundations** | Part 0 + Part 1 (ch 0.1–5) | Learner can write and launch a kernel and explain warps/occupancy |
 | **M2: Memory** | Part 2 (ch 6–11) | Transpose case study with all three languages and benchmarks |
 | **M3: Patterns** | Part 3 (ch 12–18) | Reduction + scan + histogram sims shipped |

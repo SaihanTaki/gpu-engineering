@@ -1,0 +1,41 @@
+---
+title: GPU Engineering
+description: An open course on GPU architecture and CUDA programming. Each idea has a simulation you can step through, and each kernel comes in CUDA C++, Numba and Triton.
+template: splash
+hero:
+  tagline: An open course on how GPUs run your code. Step through each idea in a simulation, then run the same kernel in CUDA C++, Numba and Triton.
+  actions:
+    - text: Read chapter 2, the programming model
+      link: part-1-foundations/02-programming-model/
+      variant: primary
+    - text: How chapters and simulations work
+      link: start/
+      variant: minimal
+---
+
+import GridIndexing from '@sims/grid-indexing/GridIndexing.astro';
+
+## Try it here
+
+Every thread in a CUDA kernel runs the same code. The only thing that tells
+threads apart is their position in the grid. Change the numbers below and step
+through the launch to see which array element each thread ends up writing.
+
+<GridIndexing />
+
+## Where the course stands
+
+This is an early release. Chapter 2 is the first chapter written; the rest of
+the course follows the outline in `plan.md` in the repository, one part at a time:
+
+| Part | Covers |
+|---|---|
+| 0. Why GPUs? | Throughput versus latency, and the toolchain from Python down to machine code |
+| 1. Foundations | Architecture, the programming model, a first kernel, warps, occupancy |
+| 2. Memory hierarchy | Coalescing, shared memory, bank conflicts, caches, a transpose case study |
+| 3. Parallel patterns | Reduction, scan, histograms, stencils, sorting, sparse matrices |
+| 4. Performance engineering | The roofline model, matrix multiply step by step, streams, profiling |
+| 5. AI kernels | Tensor cores and mixed precision, softmax and LayerNorm, FlashAttention |
+
+The course is free and open source. Code is MIT licensed and course text is
+CC BY-SA 4.0. Corrections and new chapters are welcome through GitHub.

@@ -1,0 +1,154 @@
+---
+import SimFrame from '@components/SimFrame.astro';
+import { codeFor } from './model';
+
+interface Props {
+	n?: number;
+	blockDim?: number;
+	gridMode?: 'ceil' | 'floor';
+	guard?: boolean;
+}
+
+const { n = 20, blockDim = 8, gridMode = 'ceil', guard = true } = Astro.props;
+const code = [
+	{ name: 'guard', code: codeFor(true), lang: 'cpp' },
+	{ name: 'noGuard', code: codeFor(false), lang: 'cpp' },
+];
+---
+
+<SimFrame title="Which element does each thread touch?" sim="grid-indexing" code={code} config={{ n, blockDim, gridMode, guard }}>
+	<Fragment slot="params">
+		<label class="sim-field">
+			<span>Elements <code>n</code> <output data-out="n">{n}</output></span>
+			<input type="range" name="n" min="1" max="64" value={n} />
+		</label>
+		<label class="sim-field">
+			<span>Threads per block <code>blockDim.x</code> <output data-out="blockDim">{blockDim}</output></span>
+			<input type="range" name="blockDim" min="1" max="32" value={blockDim} />
+		</label>
+		<label class="sim-field">
+			<span>Number of blocks <code>gridDim.x</code></span>
+			<select name="gridMode">
+				<option value="ceil" selected={gridMode === 'ceil'}>(n + blockDim - 1) / blockDim</option>
+				<option value="floor" selected={gridMode === 'floor'}>n / blockDim</option>
+			</select>
+		</label>
+		<label class="sim-check">
+			<input type="checkbox" name="guard" checked={guard} />
+			<span>Bounds check <code>if (i &lt; n)</code></span>
+		</label>
+	</Fragment>
+
+	<p class="sim-launch" data-launch></p>
+	<div class="sim-canvas" data-canvas><svg role="img" aria-label="Threads grouped into blocks above, the out array below"></svg></div>
+
+	<fieldset class="sim-inspect">
+		<legend>Inspect a thread: hover, tap, or type its numbers</legend>
+		<label>blockIdx.x <input type="number" name="selBlock" min="0" value="0" inputmode="numeric" /></label>
+		<label>threadIdx.x <input type="number" name="selThread" min="0" value="0" inputmode="numeric" /></label>
+		<p class="sim-formula" data-formula aria-live="polite"></p>
+	</fieldset>
+
+	<Fragment slot="caption">
+		The sim runs one block at a time so each step is readable. A real GPU runs many blocks at once, in no guaranteed
+		order, which is why a kernel must never depend on block order.
+	</Fragment>
+</SimFrame>
+
+<script>
+	import { Stepper } from '@sim-core/stepper';
+	import { bindControls } from '@sim-core/controls';
+	import { highlightLines, showVariant } from '@sim-core/code-sync';
+	import { describe, gridDim, lastStep, stateAt, threadOf, uncovered, type Config } from './model';
+	import { render, type Selection } from './view';
+
+	function mount(frame: HTMLElement) {
+		const config: Config = JSON.parse(frame.dataset.config!);
+		const stepper = new Stepper(lastStep(config));
+		const canvas = frame.querySelector<HTMLElement>('[data-canvas]')!;
+		const svgEl = canvas.querySelector('svg')!;
+		const launch = frame.querySelector<HTMLElement>('[data-launch]')!;
+		const formula = frame.querySelector<HTMLElement>('[data-formula]')!;
+		const field = <T extends HTMLElement>(name: string) => frame.querySelector<T>(`[name="${name}"]`)!;
+		const selBlock = field<HTMLInputElement>('selBlock');
+		const selThread = field<HTMLInputElement>('selThread');
+		let selected: Selection | null = null;
+		let code = showVariant(frame, config.guard ? 'guard' : 'noGuard');
+
+		const clampSelection = () => {
+			if (!selected) return;
+			selected.block = Math.min(selected.block, Math.max(0, gridDim(config) - 1));
+			selected.thread = Math.min(selected.thread, config.blockDim - 1);
+		};
+
+		const draw = () => {
+			const st = stateAt(config, stepper.step);
+			render(svgEl, config, st, selected, Math.max(300, canvas.clientWidth), select);
+			highlightLines(code, st.lines);
+
+			const blocks = gridDim(config);
+			const total = blocks * config.blockDim;
+			const missing = uncovered(config).length;
+			const extra = total - Math.min(total, config.n);
+			launch.textContent =
+				`whoami<<<${blocks}, ${config.blockDim}>>>(out, ${config.n}): ${total} threads. ` +
+				(missing
+					? `${missing} element${missing === 1 ? ' has' : 's have'} no thread.`
+					: extra
+						? `${extra} extra thread${extra === 1 ? '' : 's'} with i >= n.`
+						: 'One thread per element.');
+			launch.classList.toggle('is-warning', missing > 0 || (!config.guard && extra > 0));
+
+			selBlock.max = String(Math.max(0, blocks - 1));
+			selThread.max = String(config.blockDim - 1);
+			if (!selected || blocks === 0) {
+				formula.textContent = blocks === 0 ? 'No blocks were launched.' : '';
+				return;
+			}
+			const th = threadOf(config, selected.block, selected.thread);
+			const result = th.inBounds
+				? `${th.i} < ${config.n}, so it writes out[${th.i}].`
+				: config.guard
+					? `${th.i} >= ${config.n}, so the bounds check skips the store.`
+					: `${th.i} >= ${config.n} and there is no bounds check: it writes past the end of out[].`;
+			formula.textContent = `i = blockIdx.x * blockDim.x + threadIdx.x = ${th.block} * ${config.blockDim} + ${th.thread} = ${th.i}. ${result}`;
+		};
+
+		function select(s: Selection) {
+			// Redrawing replaces the hovered node, so skip no-op selections to avoid redraw loops.
+			if (selected?.block === s.block && selected.thread === s.thread) return;
+			selected = s;
+			selBlock.value = String(s.block);
+			selThread.value = String(s.thread);
+			draw();
+		}
+
+		const fromInputs = () => {
+			selected = { block: Number(selBlock.value) || 0, thread: Number(selThread.value) || 0 };
+			clampSelection();
+			draw();
+		};
+		selBlock.addEventListener('input', fromInputs);
+		selThread.addEventListener('input', fromInputs);
+
+		const reconfigure = () => {
+			config.n = Number(field<HTMLInputElement>('n').value);
+			config.blockDim = Number(field<HTMLInputElement>('blockDim').value);
+			config.gridMode = field<HTMLSelectElement>('gridMode').value as Config['gridMode'];
+			config.guard = field<HTMLInputElement>('guard').checked;
+			frame.querySelector('[data-out="n"]')!.textContent = String(config.n);
+			frame.querySelector('[data-out="blockDim"]')!.textContent = String(config.blockDim);
+			code = showVariant(frame, config.guard ? 'guard' : 'noGuard');
+			clampSelection();
+			stepper.setLast(lastStep(config));
+		};
+		frame.querySelector('.sim-params')!.addEventListener('input', reconfigure);
+
+		bindControls(frame, stepper, (step) => describe(config, step));
+		stepper.onChange(draw);
+		new ResizeObserver(draw).observe(canvas);
+		draw();
+	}
+
+	document.querySelectorAll<HTMLElement>('[data-sim="grid-indexing"]').forEach(mount);
+</script>
