@@ -1,0 +1,110 @@
+---
+import SimFrame from '@components/SimFrame.astro';
+import { GPUS } from '@sim-core/gpu-specs';
+import { CODE, DEFAULT_FAULT_US, DEFAULT_PAGES, FAULT_US, fmtMiB, MODES, PAGE_BYTES, PAGE_COUNTS, type Mode } from './model';
+
+interface Props {
+	gpu?: (typeof GPUS)[number]['id'];
+	mode?: Mode;
+}
+
+const { gpu = 'a100', mode = 'demand' } = Astro.props;
+const code = [mode, ...MODES.map((m) => m.id).filter((m) => m !== mode)].map((m) => ({ name: m, code: CODE[m], lang: 'cpp' }));
+---
+
+<SimFrame title="Page migration: x = 2 * x with the CPU on both sides" sim="page-migration" code={code} config={{ gpu, mode, pages: DEFAULT_PAGES, faultUs: DEFAULT_FAULT_US }}>
+	<Fragment slot="params">
+		<label class="sim-field">
+			<span>Memory</span>
+			<select name="mode">
+				{MODES.map((m) => <option value={m.id} selected={m.id === mode}>{m.label}</option>)}
+			</select>
+		</label>
+		<label class="sim-field">
+			<span>GPU</span>
+			<select name="gpu">
+				{GPUS.map((g) => <option value={g.id} selected={g.id === gpu}>{g.name}, PCIe Gen{g.pcieGen}</option>)}
+			</select>
+		</label>
+		<label class="sim-field">
+			<span>Array size</span>
+			<select name="pages">
+				{PAGE_COUNTS.map((n) => <option value={n} selected={n === DEFAULT_PAGES}>{fmtMiB(n * PAGE_BYTES)}, {n} pages of 2 MiB</option>)}
+			</select>
+		</label>
+		<label class="sim-field">
+			<span>Cost per fault (assumed)</span>
+			<select name="faultUs">
+				{FAULT_US.map((f) => <option value={f} selected={f === DEFAULT_FAULT_US}>{f} µs</option>)}
+			</select>
+		</label>
+	</Fragment>
+
+	<div class="sim-canvas" data-canvas>
+		<svg role="img" aria-label="CPU RAM and GPU memory, each with a row of 2 MiB pages, the PCIe link between them, and a time bar"></svg>
+	</div>
+
+	<ul class="pm-counts" data-counts aria-label="Counters and time estimates for this run"></ul>
+
+	<Fragment slot="caption">
+		Transfer times are lower bounds from the per-direction PCIe peak; the kernel is 2 x bytes over peak memory bandwidth.
+		Three values are assumptions, because NVIDIA does not publish them: each GPU or CPU fault moves exactly one 2 MiB
+		page, each fault costs the handling time you pick, and a pageable copy pays a CPU copy into a staging buffer at the
+		PCIe rate, not overlapped with the DMA. The real driver groups faults, may move more or less than a page, and
+		pipelines staging. Allocation, launch and per-call costs are left out.
+	</Fragment>
+</SimFrame>
+
+<script>
+	import { Stepper } from '@sim-core/stepper';
+	import { bindControls } from '@sim-core/controls';
+	import { highlightLines, showVariant } from '@sim-core/code-sync';
+	import { gpuById } from '@sim-core/gpu-specs';
+	import { describe, fmt, fmtTime, lastStep, run, stateAt, type Mode, type Params } from './model';
+	import { KINDS, render } from './view';
+
+	function mount(frame: HTMLElement) {
+		const config = JSON.parse(frame.dataset.config!);
+		const sel = (name: string) => frame.querySelector<HTMLSelectElement>(`select[name="${name}"]`)!;
+		let p: Params = { gpu: gpuById(config.gpu), mode: config.mode, pages: config.pages, faultUs: config.faultUs };
+		const stepper = new Stepper(lastStep(p), 1100);
+		const canvas = frame.querySelector<HTMLElement>('[data-canvas]')!;
+		const svgEl = canvas.querySelector('svg')!;
+		const countsEl = frame.querySelector<HTMLElement>('[data-counts]')!;
+		let code = showVariant(frame, p.mode);
+
+		const draw = () => {
+			const st = stateAt(p, stepper.step);
+			const end = run(p).at(-1)!.done;
+			render(svgEl, p.gpu, p.mode, st, end, Math.max(260, canvas.clientWidth));
+			highlightLines(code, st.lines);
+			const rows: [string, string][] = KINDS.filter((k) => end[k.key] > 0).map((k) => [k.cls, `${k.name}: ${fmtTime(st.done[k.key])} of ${fmtTime(end[k.key])}`]);
+			rows.push(['', `GPU faults ${fmt(st.gpuFaults)}, CPU faults ${fmt(st.cpuFaults)}, transfers ${fmt(st.transfers)}`]);
+			countsEl.replaceChildren(
+				...rows.map(([cls, label]) => {
+					const li = document.createElement('li');
+					if (cls) {
+						const sw = document.createElement('span');
+						sw.className = `sim-swatch ${cls}`;
+						li.append(sw);
+					}
+					li.append(label);
+					return li;
+				}),
+			);
+		};
+
+		frame.querySelector('.sim-params')!.addEventListener('change', () => {
+			p = { gpu: gpuById(sel('gpu').value), mode: sel('mode').value as Mode, pages: Number(sel('pages').value), faultUs: Number(sel('faultUs').value) };
+			code = showVariant(frame, p.mode);
+			stepper.setLast(lastStep(p));
+		});
+
+		bindControls(frame, stepper, (step) => describe(p, step));
+		stepper.onChange(draw);
+		new ResizeObserver(draw).observe(canvas);
+		draw();
+	}
+
+	document.querySelectorAll<HTMLElement>('[data-sim="page-migration"]').forEach(mount);
+</script>
