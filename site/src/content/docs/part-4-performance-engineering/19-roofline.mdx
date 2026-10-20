@@ -1,0 +1,358 @@
+---
+title: 19. The roofline model
+description: Arithmetic intensity, the ridge point between memory-bound and compute-bound kernels, and where the kernels from earlier chapters sit against the peak FLOPs and bandwidth of a T4, A100 and H100.
+sidebar:
+  order: 19
+banner:
+  content: Draft chapter. If something is wrong or unclear, use the edit link at the bottom of the page.
+---
+
+import Roofline from '@sims/roofline/Roofline.astro';
+import { gpuById } from '@sim-core/gpu-specs';
+import { attainable, evaluate, fmtNum, PRESETS, presetAi, ridge } from '@sims/roofline/model';
+
+export const t4 = gpuById('t4');
+export const a100 = gpuById('a100');
+export const h100 = gpuById('h100');
+export const r = (g, roof = 'fp32') => fmtNum(ridge(g, roof));
+export const att = (g, ai, roof = 'fp32') => fmtNum(attainable(g, roof, ai));
+export const pct = (g, ai, roof = 'fp32') => fmtNum((100 * attainable(g, roof, ai)) / g.peakFp32Tflops);
+export const gflops = (g, ai) => fmtNum(1000 * attainable(g, 'fp32', ai));
+export const peak = (x) => (x === null ? 'none' : fmtNum(x));
+export const preset = (id) => PRESETS.find((p) => p.id === id);
+export const bound = (g, p) => evaluate(g, 'fp32', p.flops, p.bytes).bound;
+
+A vector add on the {a100.name} reaches at most {gflops(a100, 1 / 12)} GFLOPS:
+{pct(a100, 1 / 12)}% of the {a100.peakFp32Tflops} TFLOPS the datasheet
+promises for FP32. A large matrix multiply does enough arithmetic per byte
+that nothing in the model stops it from reaching the full {a100.peakFp32Tflops}. Neither kernel is broken. They are limited
+by different parts of the chip, and no amount of tuning will make the vector
+add use the arithmetic units it leaves idle.
+
+The roofline model tells you, from two counts you can do on paper, which
+limit applies to a kernel and how fast it could possibly run. It is the
+first thing to work out before optimizing anything, because it tells you
+whether to cut bytes or cut instructions.
+
+## Two numbers per GPU
+
+Every GPU has a peak arithmetic rate and a peak memory bandwidth. NVIDIA
+publishes both on the datasheet. The peak rate depends on the precision and
+on whether the work runs on the regular CUDA cores or on the tensor cores
+(chapter 1):
+
+| | {t4.name} | {a100.name} | {h100.name} |
+|---|---|---|---|
+| FP64, TFLOPS | {peak(t4.peakFp64Tflops)} | {peak(a100.peakFp64Tflops)} | {peak(h100.peakFp64Tflops)} |
+| FP32, TFLOPS | {peak(t4.peakFp32Tflops)} | {peak(a100.peakFp32Tflops)} | {peak(h100.peakFp32Tflops)} |
+| TF32 tensor, TFLOPS | {peak(t4.peakTf32TensorTflops)} | {peak(a100.peakTf32TensorTflops)} | {peak(h100.peakTf32TensorTflops)} |
+| FP16/BF16 tensor, TFLOPS | {peak(t4.peakFp16TensorTflops)} | {peak(a100.peakFp16TensorTflops)} | {peak(h100.peakFp16TensorTflops)} |
+| FP8 tensor, TFLOPS | {peak(t4.peakFp8TensorTflops)} | {peak(a100.peakFp8TensorTflops)} | {peak(h100.peakFp8TensorTflops)} |
+| INT8 tensor, TOPS | {peak(t4.peakInt8TensorTops)} | {peak(a100.peakInt8TensorTops)} | {peak(h100.peakInt8TensorTops)} |
+| DRAM bandwidth, GB/s | {fmtNum(t4.memoryGbPerS)} | {fmtNum(a100.memoryGbPerS)} | {fmtNum(h100.memoryGbPerS)} |
+
+These are NVIDIA's figures at boost clock, from the T4 and A100 datasheets,
+the Turing whitepaper and the H100 product page. Three details matter when
+you read a datasheet yourself:
+
+- **Sparsity.** The A100 datasheet and H100 page list a second, doubled
+  tensor figure "with sparsity", for matrices where two of every four values
+  are zero. The table uses the dense figures, which are what an ordinary
+  matrix multiply can reach. On the H100 page only the sparse figures are
+  printed; the table halves them.
+- **Accumulator precision.** The FP16 tensor row is for FP16 inputs with FP32
+  accumulation, the usual setting for training. On these three data center
+  GPUs it runs at the same rate as FP16 accumulation; on some consumer GPUs
+  it does not.
+- **T4 FP64.** The T4 datasheet gives no FP64 figure. The Turing whitepaper
+  says FP64 runs at 1/32 of the FP32 rate, which gives the 0.25 here.
+
+One FMA (fused multiply-add) counts as 2 FLOPs, and every FP32 peak assumes
+every lane issues an FMA every clock. A kernel that does only adds can reach
+half of it at best.
+
+## Arithmetic intensity
+
+The property of a kernel that decides which limit applies is its
+**arithmetic intensity**: the operations it does per byte it moves to and
+from DRAM.
+
+```
+AI = FLOPs / bytes of DRAM traffic        (FLOP/byte)
+```
+
+Count FLOPs as the useful floating-point operations of the algorithm, not
+the instructions the compiler emits: no address arithmetic, no loop
+counters. Count bytes at DRAM, the bytes that cross between the chip and its
+memory. A value read twice but served from L1 or L2 the second time counts
+once (chapter 9).
+
+Vector add from chapter 3, `c[i] = a[i] + b[i]` in FP32: 1 add, two 4-byte
+loads and one 4-byte store per element. AI = 1 / 12 = {fmtNum(1 / 12)}
+FLOP/byte, for any n.
+
+A matrix multiply of two N x N FP32 matrices does N<sup>3</sup>
+multiply-adds, 2N<sup>3</sup> FLOPs. At the very least it reads A and B and
+writes C once: 12N<sup>2</sup> bytes. AI = N / 6, which grows with the
+matrix. At N = 4,096 that is {fmtNum(4096 / 6)} FLOP/byte. Whether a real
+GEMM gets close to that depends on how much reuse it gets from shared
+memory and registers, which is chapter 20.
+
+## The roofline
+
+A kernel needs at least FLOPs / peak seconds for its arithmetic and at least
+bytes / bandwidth seconds for its memory traffic. On a GPU the two overlap:
+while some warps wait for memory, others compute (chapter 4). So the time is
+at least the larger of the two, and the rate in FLOPs per second is at most
+
+```
+attainable = min(peak, AI x bandwidth)
+```
+
+Plot that on log-log axes, intensity across and FLOPs per second up, and
+you get the roofline: a slope of bandwidth on the left, a flat roof of peak
+arithmetic on the right. They meet at the **ridge point**,
+
+```
+ridge = peak / bandwidth        (FLOP/byte)
+```
+
+On the {a100.name} with FP32, 19.5 x 10<sup>12</sup> / 2.039 x 10<sup>12</sup>
+= {r(a100)} FLOP/byte.
+
+- A kernel left of the ridge is **memory-bound**. It reaches its best speed
+  only if it uses the full bandwidth, and the arithmetic units sit partly
+  idle. Making the arithmetic cheaper does nothing; moving fewer bytes per
+  FLOP moves the kernel right and up the slope.
+- A kernel right of the ridge is **compute-bound**. Fewer bytes no longer
+  help; fewer or cheaper instructions do, or a faster unit such as the
+  tensor cores.
+
+The ridge differs per GPU: {r(t4)} on the {t4.name}, {r(a100)} on the
+{a100.name} and {r(h100)} on the {h100.name}. With the FP16 tensor roof it
+moves far right: {r(a100, 'fp16')} FLOP/byte on the {a100.name}. Tensor
+cores raise the peak and leave the bandwidth where it was, so a kernel needs
+far more reuse per byte to be compute-bound on them.
+
+## Your kernel on the roofline
+
+Set the work and the DRAM traffic of a kernel and watch where it lands.
+The diamond sits on the roof, at the best speed the model allows; a real
+kernel sits at or below it. The numbered circles are kernels from earlier
+chapters; step through them with **Next** to read where each one sits and
+why. Switch the compute roof to a tensor-core precision to see how far the
+ridge moves.
+
+<Roofline />
+
+Things to try:
+
+- **The default** is 2<sup>30</sup> FLOPs over 2<sup>32</sup> bytes, 0.25
+  FLOP/byte, the same spot as the fused kernel from chapter 12. Double the
+  FLOPs: the point moves right along the slope and the modeled time does not
+  change, because the bytes did not.
+- **Find the ridge.** Raise the work until the diamond reaches the flat roof.
+  Past the ridge, more FLOPs means more time and fewer bytes means nothing.
+- **Change the GPU** with the kernel fixed. A memory-bound kernel speeds up
+  by the bandwidth ratio between GPUs, not by the FLOPs ratio.
+- **The {h100.name} with FP8.** The ridge sits at {r(h100, 'fp8')} FLOP/byte.
+  Of the markers, only the large GEMM (8) gets there.
+
+## The earlier kernels on the roofline
+
+Counting FP32 data, with every byte going to DRAM once, on the {a100.name}:
+
+<table>
+	<thead>
+		<tr><th>#</th><th>Kernel</th><th>Chapter</th><th>FLOP/byte</th><th>Attainable, TFLOPS</th><th>Bound</th></tr>
+	</thead>
+	<tbody>
+		{PRESETS.map((p, i) => (
+			<tr>
+				<td>{i + 1}</td>
+				<td>{p.name}</td>
+				<td>{p.chapter}</td>
+				<td>{p.flops === 0 ? '0' : fmtNum(presetAi(p))}</td>
+				<td>{p.flops === 0 ? 'n/a' : att(a100, presetAi(p))}</td>
+				<td>{p.flops === 0 ? 'bandwidth' : bound(a100, p)}</td>
+			</tr>
+		))}
+	</tbody>
+</table>
+
+What the table says:
+
+- **Every kernel from Parts 1 to 3 is memory-bound,** at least {fmtNum(ridge(a100, 'fp32') / 0.25)} times left of the ridge. For
+  these kernels the right measure of quality is not FLOPS but bandwidth: how
+  close the bytes per second come to {fmtNum(a100.memoryGbPerS)} GB/s.
+- **Fusion moves a kernel right.** Chapter 12's fused kernel does the same 3
+  operations with 12 bytes instead of 28, so its intensity and its
+  attainable rate are both 28 / 12 = 2.33 times higher.
+- **Transpose does no arithmetic at all.** It has no place on a FLOP
+  roofline. Chapter 11 judged it in GB/s against the bandwidth roof, which is
+  the slope of this chart read in bytes.
+- **A GEMM without reuse is as memory-bound as a reduction.** Tiling (chapter
+  7) raises its intensity to T / 4 for T x T tiles: each tile of A and B is
+  loaded once and used T times. With 32 x 32 tiles that is 8 FLOP/byte,
+  still just left of the {a100.name}'s FP32 ridge at {r(a100)}. Chapter 20
+  goes further with register blocking.
+
+Precision moves both axes. The same GEMM with FP16 data moves half the
+bytes, so its intensity doubles; on the tensor cores its roof is
+{fmtNum(a100.peakFp16TensorTflops / a100.peakFp32Tflops)} times higher too.
+Part 5 builds tensor-core kernels against that roof.
+
+## Cache-level rooflines
+
+The chart above has one slope, DRAM. A GPU has more memory levels, each with
+its own bandwidth: L2, then L1 and shared memory in each SM, which are much
+faster than DRAM. A **hierarchical roofline** draws one slope per level and
+gives a kernel one intensity per level: its FLOPs over the bytes it moves at
+that level.
+
+A tiled GEMM moves many bytes between shared memory and registers and few
+between DRAM and L2, so its L1 intensity is low and its DRAM intensity high.
+If the kernel's point sits on the L1 slope, the cache bandwidth is the limit,
+not DRAM. NVIDIA's datasheets do not list L1 or L2 bandwidth, which is why
+this chapter's chart has no such slopes. Nsight Compute's hierarchical
+roofline sections draw L1, L2 and DRAM ceilings for the GPU you profile on.
+
+## What the model leaves out
+
+- **Reaching the roof at all.** Peak bandwidth needs enough bytes in flight
+  to cover DRAM latency (chapters 4 and 5); a kernel with low occupancy or
+  few blocks sits below the slope. Peak FLOPs needs every lane issuing an
+  FMA every clock.
+- **Launch overhead and short kernels** (chapter 12). A kernel that moves a
+  few kilobytes is limited by its launch, not by either roof.
+- **Clocks.** The peaks assume the boost clock. The Turing whitepaper says
+  the T4's 585 MHz base clock is "the lowest clock that would typically be
+  seen in very stressful inferencing workloads", against a 1,590 MHz boost.
+  A kernel that keeps a 70 W card at its power limit runs below the roof.
+- **Other instructions.** Integer address math, special functions
+  (chapter 1) and type conversions use issue slots without counting as
+  FLOPs.
+
+The model is still useful for exactly this reason: the distance between a
+kernel's measured point and the roof tells you how much is left to win.
+
+## Compute it yourself
+
+No kernel code in this chapter; the arithmetic is the point. A few lines of
+Python give the intensity, the attainable rate and the bound for a kernel:
+
+```python
+def roofline(flops, bytes_moved, peak_tflops, bw_gb_s):
+    ai = flops / bytes_moved
+    attainable = min(peak_tflops, ai * bw_gb_s / 1000)
+    ridge = peak_tflops * 1000 / bw_gb_s
+    bound = "memory" if ai < ridge else "compute"
+    return ai, attainable, bound
+
+# A100 SXM4 80 GB, FP32 on CUDA cores: 19.5 TFLOPS, 2,039 GB/s.
+PEAK, BW = 19.5, 2039
+
+n = 2**24  # fused relu(a*x + y): 3 ops per element, x and y read, out written
+print(roofline(3 * n, 3 * 4 * n, PEAK, BW))
+
+N = 4096  # GEMM, each matrix moved once
+print(roofline(2 * N**3, 3 * 4 * N**2, PEAK, BW))
+```
+
+```text
+(0.25, 0.50975, 'memory')
+(682.6666666666666, 19.5, 'compute')
+```
+
+## Measure it
+
+Nsight Compute measures a kernel's real FLOPs and DRAM bytes and draws it on
+the roofline of the GPU it runs on. To collect the overview chart and the
+single-precision hierarchical one for every kernel of a program:
+
+```sh
+ncu --section SpeedOfLight_RooflineChart \
+    --section SpeedOfLight_HierarchicalSingleRooflineChart \
+    -o roofline ./your_program
+ncu-ui roofline.ncu-rep
+```
+
+The section names are from the section table in the Nsight Compute
+Profiling Guide, and `--section` and `-o` from the CLI documentation; the
+command was not run for this chapter (no GPU was available), so check
+`ncu --list-sections` on your install. There are also double, half and
+tensor-core variants: `SpeedOfLight_HierarchicalDoubleRooflineChart`,
+`SpeedOfLight_HierarchicalHalfRooflineChart` and
+`SpeedOfLight_HierarchicalTensorRooflineChart`.
+
+Things to look for: how far below the roof each kernel sits, and whether
+its DRAM intensity matches your paper count. A measured intensity higher
+than your count means the caches served some of the bytes you counted; a
+lower one means extra traffic, such as uncoalesced accesses (chapter 6).
+
+## Exercises
+
+**1. Ridge points.** Which of the three GPUs needs the highest FP32
+intensity before a kernel becomes compute-bound?
+
+<details>
+<summary>Answer</summary>
+
+The ridge is peak over bandwidth: {t4.name} {t4.peakFp32Tflops} / 0.3 =
+{r(t4)}, {a100.name} 19.5 / 2.039 = {r(a100)}, {h100.name} 67 / 3.35 =
+{r(h100)} FLOP/byte. The T4, with the lowest bandwidth, needs the most
+reuse per byte, even though it has the lowest peak.
+
+</details>
+
+**2. SAXPY.** `y[i] = a * x[i] + y[i]` in FP32. What is its intensity, and
+at most how many GFLOPS can it reach on the {a100.name}?
+
+<details>
+<summary>Answer</summary>
+
+One multiply and one add, 2 FLOPs (one FMA). Two 4-byte loads, `x[i]` and
+`y[i]`, and one 4-byte store: 12 bytes. AI = 2 / 12 = {fmtNum(1 / 6)}
+FLOP/byte. Attainable = {fmtNum(1 / 6)} x {fmtNum(a100.memoryGbPerS)} GB/s =
+{gflops(a100, 1 / 6)} GFLOPS, {pct(a100, 1 / 6)}% of the FP32 peak.
+
+</details>
+
+**3. Big enough tiles.** In the model, a tiled FP32 GEMM has intensity
+T / 4. What is the smallest power-of-two tile size T that puts it right of
+the {a100.name}'s FP32 ridge? And on the {t4.name}?
+
+<details>
+<summary>Answer</summary>
+
+T / 4 must exceed {r(a100)} on the {a100.name}, so T > {fmtNum(4 * ridge(a100, 'fp32'))}:
+T = 64, at 16 FLOP/byte. On the {t4.name}, T / 4 > {r(t4)} needs
+T > {fmtNum(4 * ridge(t4, 'fp32'))}: T = 128. Real kernels do not tile only in
+shared memory; register blocking (chapter 20) and L2 reuse between blocks
+raise the DRAM intensity further.
+
+</details>
+
+**4. More arithmetic for free.** Someone changes the sum reduction from
+chapter 13 to Kahan summation, which does 4 floating-point operations per
+element instead of 1 to keep rounding error small. In the model, how much
+slower does it get on the {a100.name}?
+
+<details>
+<summary>Answer</summary>
+
+Not at all. It still reads 4 bytes per element, so its intensity goes from
+0.25 to 1 FLOP/byte, still far left of the ridge at {r(a100)}. The time is
+the bytes over the bandwidth, the same as before. A memory-bound kernel has
+arithmetic to spare; in practice extra instructions can still cost a little
+if they lengthen the loop between loads.
+
+</details>
+
+## Further reading
+
+- [Samuel Williams, Andrew Waterman and David Patterson, Roofline: An Insightful Visual Performance Model for Multicore Architectures](https://doi.org/10.1145/1498765.1498785) (Communications of the ACM, 2009): the paper that introduced the model.
+- [Charlene Yang et al., Hierarchical Roofline Performance Analysis for Deep Learning Applications](https://arxiv.org/abs/2009.05257) (2020): L1, L2 and DRAM rooflines and tensor-core roofs on NVIDIA GPUs, measured with Nsight Compute.
+- [Nsight Compute Profiling Guide](https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html): the roofline sections, arithmetic intensity and the ridge point as Nsight Compute defines them.
+- [NVIDIA A100 datasheet](https://www.nvidia.com/content/dam/en-zz/Solutions/Data-Center/a100/pdf/nvidia-a100-datasheet-us-nvidia-1758950-r4-web.pdf), [T4 datasheet](https://www.nvidia.com/content/dam/en-zz/Solutions/Data-Center/tesla-t4/t4-tensor-core-datasheet-951643.pdf) and [H100 product page](https://www.nvidia.com/en-us/data-center/h100/): the peak figures in the table above.
+- [NVIDIA Turing architecture whitepaper](https://images.nvidia.com/aem-dam/en-zz/Solutions/design-visualization/technologies/turing-architecture/NVIDIA-Turing-Architecture-Whitepaper.pdf), Appendix A: T4 clocks and tensor rates with FP16 and FP32 accumulation.
