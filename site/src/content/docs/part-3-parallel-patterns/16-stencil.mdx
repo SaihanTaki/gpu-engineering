@@ -8,6 +8,8 @@ sidebar:
 import { Code } from '@astrojs/starlight/components';
 import HaloLoader from '@sims/halo-loader/HaloLoader.astro';
 import CodeTabs from '@components/CodeTabs.astro';
+import Quiz from '@components/Quiz.astro';
+import quiz from '@quizzes/16-stencil';
 import {
 	CONSTANT_MEMORY_BYTES,
 	filterBytes,
@@ -358,6 +360,10 @@ through the normal or read-only path; constant memory is for the filter, which
 every thread reads at the same index.
 
 </details>
+
+## Quiz
+
+<Quiz questions={quiz} />
 
 ## Further reading
 
