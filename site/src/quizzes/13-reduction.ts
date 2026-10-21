@@ -4,13 +4,13 @@ export default [
 	{
 		q: 'Why is having each of a million threads `atomicAdd` its element into one float a poor way to sum an array?',
 		options: [
-			'`atomicAdd` does not work on floats',
-			'All threads update the same address, and the memory system applies those updates one at a time',
-			'Atomics bypass the L2 cache and read DRAM twice',
+			'`atomicAdd` does not work on floats, only on integers',
+			'All threads update one address, so the updates serialize',
+			'Atomics bypass the L2 cache and read DRAM twice per update',
 			'The result is always wrong because of rounding',
 		],
 		answer: 1,
-		why: 'Every update hits one address, so they serialize. One atomic per block, as in `reduce_atomic`, keeps contention small.',
+		why: 'Every update hits one address, and the memory system applies them one at a time. One atomic per block, as in `reduce_atomic`, keeps contention small.',
 	},
 	{
 		q: 'A tree reduction sums 256 values. How many adds and how many levels does it take?',
@@ -21,10 +21,10 @@ export default [
 	{
 		q: 'With interleaved addressing, `if (tid % (2 * s) == 0)`, which threads add at stride 1?',
 		options: [
-			'Threads 0 to `blockDim.x / 2 - 1`',
-			'Only thread 0',
-			'Threads 0, 2, 4 and so on, half the lanes of every warp',
-			'Every thread',
+			'Threads 0 to `blockDim.x / 2 - 1`, the first half',
+			'Only thread 0, which holds the running total',
+			'Threads 0, 2, 4 and so on',
+			'Every thread, since the stride is 1',
 		],
 		answer: 2,
 		why: 'At stride 1 the multiples of 2 work. They are spread across the whole block, so every warp issues the add for half its lanes.',
@@ -32,9 +32,9 @@ export default [
 	{
 		q: 'What is the main cost of interleaved addressing?',
 		options: [
-			'Every warp still issues the add while only a few of its lanes do work, at every level',
+			'Every warp issues the add while few of its lanes work',
 			'It needs twice as many barriers as sequential addressing',
-			'It reads global memory with a stride',
+			'It reads global memory with a stride of `2s`',
 			'It produces the wrong sum for non power of two blocks only',
 		],
 		answer: 0,
@@ -55,10 +55,10 @@ export default [
 	{
 		q: 'Harris\'s second kernel computes `index = 2 * s * tid`. It packs the working threads, so what problem does it introduce?',
 		options: [
-			'Divergence at every level',
-			'Uncoalesced global loads',
-			'A race between levels',
-			'Bank conflicts, because neighbouring lanes touch shared words `2s` apart',
+			'Divergence inside every warp at every level',
+			'Uncoalesced global loads of the input array',
+			'A race between levels on the shared array',
+			'Bank conflicts in shared memory',
 		],
 		answer: 3,
 		why: 'Packing removes the divergence, but words `2s` apart fall into the same banks. Sequential addressing has lanes read consecutive words.',
@@ -67,8 +67,8 @@ export default [
 		q: 'Why is sequential addressing free of bank conflicts?',
 		options: [
 			'Consecutive `tid` read consecutive words, `sdata[tid + s]`',
-			'It uses only half the threads',
-			'It keeps every partial sum in a register',
+			'It uses only half the threads at the first level',
+			'It keeps every partial sum in a register until the end',
 			'The stride is always a multiple of 32',
 		],
 		answer: 0,
@@ -89,10 +89,10 @@ export default [
 	{
 		q: 'Why does the shuffle part of the last warp need no `__syncthreads()`?',
 		options: [
-			'The `_sync` in the name means the hardware brings the lanes in `mask` together for the exchange',
+			'The hardware synchronizes the lanes named in `mask`',
 			'Shuffles go through shared memory, which is always coherent',
-			'The 32 lanes of a warp are guaranteed to run in lockstep on every GPU',
-			'Only lane 0 writes the result',
+			'The 32 lanes of a warp always run in lockstep on every GPU',
+			'Only lane 0 writes the result, so no other lane can race',
 		],
 		answer: 0,
 		why: 'The mask names the lanes that take part and the hardware synchronizes them. Lockstep is not guaranteed since Volta.',
@@ -100,10 +100,10 @@ export default [
 	{
 		q: 'Harris\'s slides unroll the last warp through a `volatile` shared array. Why is that unsafe on current GPUs?',
 		options: [
-			'`volatile` is not allowed on shared memory',
-			'Since Volta, lanes of a warp can be scheduled independently, so implicit warp-synchronous code can break',
-			'Shared memory has fewer banks since Volta',
-			'It causes 32-way bank conflicts',
+			'`volatile` is no longer allowed on shared memory arrays',
+			'Since Volta, lanes of a warp can be scheduled independently',
+			'Shared memory has fewer banks since Volta, so the loads conflict',
+			'It causes 32-way bank conflicts on the last warp',
 		],
 		answer: 1,
 		why: 'The trick relied on the lanes executing in lockstep. NVIDIA calls implicit warp-synchronous code unsafe; shuffles state what they need.',
@@ -129,9 +129,9 @@ export default [
 	{
 		q: 'Why do Harris\'s last kernel and `reduce_atomic` have each thread add many elements in a register first, with a grid-stride loop?',
 		options: [
-			'So that the kernel needs no shared memory at all',
-			'So that the result is the same on every run',
-			'So that the tree runs once per block over values that each summarize many elements',
+			'So that the kernel needs no shared memory or barriers at all',
+			'So that the atomics happen in a fixed order on every run',
+			'So that each tree runs over values that summarize many elements',
 			'Because a grid may have at most one block per SM',
 		],
 		answer: 2,
@@ -140,21 +140,21 @@ export default [
 	{
 		q: '`reduce_atomic` returns slightly different sums on different runs of the same float input. Why?',
 		options: [
-			'`atomicAdd` sometimes drops an update',
+			'`atomicAdd` sometimes drops an update under heavy contention',
 			'Each block computes its own sum in a random order',
-			'The grid-stride loop skips elements at random',
-			'Blocks reach the `atomicAdd` in a changing order, and float addition is not associative',
+			'The grid-stride loop skips some elements at random',
+			'Blocks reach the `atomicAdd` in a changing order',
 		],
 		answer: 3,
-		why: 'Each block sum has a fixed order, but the order of the block sums changes with scheduling, and `(a + b) + c` can round differently from `(a + c) + b`.',
+		why: 'Each block sum has a fixed order, but the order of the block sums changes with scheduling. Float addition is not associative: `(a + b) + c` can round differently from `(a + c) + b`.',
 	},
 	{
 		q: 'Why do the chapter\'s tests use whole numbers from -3 to 3 as input?',
 		options: [
-			'While every partial sum stays below `2^24`, float32 represents them exactly, so every order gives the same answer',
-			'Small numbers make the kernels faster',
-			'The kernels only support integers',
-			'Negative numbers trigger the bounds check',
+			'Their partial sums stay below `2^24`, so float32 holds them exactly',
+			'Small numbers make the kernels run faster on every GPU',
+			'The kernels only support integer input, not general floats',
+			'Negative numbers exercise the bounds check in each block',
 		],
 		answer: 0,
 		why: 'Exact partial sums remove rounding, so the tree, the atomics and a CPU loop all agree bit for bit.',
@@ -168,10 +168,10 @@ export default [
 	{
 		q: 'In Nsight Compute, what does `smsp__thread_inst_executed.sum` divided by `smsp__inst_executed.sum` measure?',
 		options: [
-			'Instructions per clock',
-			'The fraction of time spent at barriers',
+			'Instructions per clock on each SM sub-partition',
+			'The fraction of time warps spend waiting at barriers',
 			'The average number of lanes doing work per instruction',
-			'Bank conflicts per request',
+			'Bank conflicts per shared memory request',
 		],
 		answer: 2,
 		why: 'Thread instructions over warp instructions is the average active lanes, the measured version of the sim\'s lane slot percentage.',
@@ -179,8 +179,8 @@ export default [
 	{
 		q: 'Without a GPU, why are the two Numba shuffle kernels only compiled to PTX and not run?',
 		options: [
-			'Numba cannot compile shuffles',
-			'The kernels need more than 1024 threads',
+			'Numba cannot compile shuffles to PTX',
+			'The kernels need more than 1024 threads per block',
 			'Numba\'s simulator has no `shfl_down_sync`',
 			'PTX cannot be run on a CPU by any tool',
 		],

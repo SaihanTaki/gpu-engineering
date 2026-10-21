@@ -6,7 +6,7 @@ export default [
 		options: [
 			'A transpose does more arithmetic per element than a copy',
 			'A transpose reads every element twice, once per dimension',
-			'One side of the transpose walks a column, so most of each sector it moves is thrown away',
+			'One side walks a column, so most of each sector it moves is thrown away',
 			'The copy kernel stages its data through shared memory and the transpose does not',
 		],
 		answer: 2,
@@ -57,11 +57,11 @@ export default [
 		options: [
 			'It flushes the tile from shared memory to global memory',
 			'It makes the global loads of `in` coalesced',
-			'It prevents bank conflicts on the column read',
-			'The column a lane reads was written by 32 different threads in all 8 warps of the block',
+			'It prevents bank conflicts when the whole warp reads one column of the tile',
+			'The column a lane reads was written by threads in all 8 warps',
 		],
 		answer: 3,
-		why: 'Without the barrier, nothing makes the other warps finish their stores into the tile first. The barrier does nothing for coalescing or bank conflicts.',
+		why: 'Each column holds values from 32 different threads in all 8 warps. Without the barrier, nothing makes the other warps finish their stores into the tile first. The barrier does nothing for coalescing or bank conflicts.',
 	},
 	{
 		q: 'After the barrier, the tiled kernel rebuilds `x` and `y` from `blockIdx.y` and `blockIdx.x` swapped. Why?',
@@ -124,21 +124,21 @@ export default [
 	{
 		q: 'What does the bandwidth model assume about shared memory speed?',
 		options: [
-			'Each bank delivers 4 bytes per clock, so one SM serves one conflict-free warp request per clock',
+			'Each of the 32 banks delivers 4 bytes per clock',
 			'Shared memory runs at the same bandwidth as DRAM',
-			'Each bank delivers 32 bytes per clock, one sector',
+			'Each bank delivers 32 bytes per clock, one full sector',
 			'Shared memory time is ignored and only sectors are counted',
 		],
 		answer: 0,
-		why: '32 banks of 4 bytes per clock is one 128-byte warp request per clock. A 32-way conflict therefore costs 32 clocks.',
+		why: '32 banks of 4 bytes per clock is one conflict-free 128-byte warp request per clock per SM. A 32-way conflict therefore costs 32 clocks.',
 	},
 	{
 		q: 'On the A100, the model gives the tiled kernel about 58% of peak memory bandwidth. What limits it?',
 		options: [
 			'Its global stores, which are still strided',
-			'The 32-way bank conflict on the column read, which makes shared memory slower than the sector traffic',
-			'The cost of the `__syncthreads()` barrier',
-			'L2 cache misses on the reads of `in`',
+			'The 32-way bank conflict on the column read',
+			'The cost of the `__syncthreads()` barrier between phases',
+			'L2 cache misses on the global reads of `in`',
 		],
 		answer: 1,
 		why: 'Both global sides are coalesced, 256 bytes of sectors. The 33 shared passes take longer than those sectors, so shared memory sets the time. The model does not count barrier cost or caches.',
@@ -146,24 +146,24 @@ export default [
 	{
 		q: 'Why are the tiled and padded bars equal on the Tesla T4 in the model?',
 		options: [
-			'The T4 has more shared memory banks than the A100',
+			'The T4 has more shared memory banks than the A100, so the column read never conflicts',
 			'The T4 hardware removes bank conflicts automatically',
-			'Its memory is slow relative to its SMs, so the sector time is longer than even the conflicted shared memory time',
+			'Its memory is slow relative to its SMs, so sector time hides the conflicts',
 			'The model treats the T4 as having no shared memory',
 		],
 		answer: 2,
-		why: 'At 300 GB/s for 40 SMs, the sectors take longer than the 33 passes, so the conflicts are hidden behind memory traffic in this model. Real hardware does not promise that.',
+		why: 'At 300 GB/s for 40 SMs, the sectors take longer than even the 33 conflicted passes, so the conflicts are hidden behind memory traffic in this model. Real hardware does not promise that.',
 	},
 	{
 		q: 'Which effect left out of the model can make the real naive kernel do better than the model predicts?',
 		options: [
-			'Bank conflicts on its shared memory store',
-			'The cost of its barrier',
-			'Extra warps added by the bounds check',
-			'L1 and L2 merging the partial sector writes of neighbouring warps before they reach DRAM',
+			'Bank conflicts on its shared memory store of the tile',
+			'The cost of its barrier between the load and the store',
+			'Extra warps added by the bounds check on matrices not a multiple of 32',
+			'L1 and L2 merging partial sector writes from neighbouring warps',
 		],
 		answer: 3,
-		why: 'The naive kernel uses no shared memory and no barrier. Its waste is partial sector writes, and the caches can combine those from neighbouring warps.',
+		why: 'The naive kernel uses no shared memory and no barrier. Its waste is partial sector writes, and the caches can combine those from neighbouring warps before they reach DRAM.',
 	},
 	{
 		q: 'Which tile width gives a conflict-free column read with 32 banks?',
@@ -174,13 +174,13 @@ export default [
 	{
 		q: 'Triton has no shared memory in its language. Why are both of its transpose kernels still fast?',
 		options: [
-			'The compiler picks a thread layout per load and store and converts between them through shared memory',
-			'Triton reads `in` with strided loads that the L2 cache merges',
+			'The compiler converts between load and store layouts through shared memory',
+			'Triton reads `in` with strided loads that the L2 cache merges into full sectors',
 			'`tl.trans` calls `cudaMemcpy` with a transposed layout',
 			'Triton launches one thread per element, so there are no sectors to waste',
 		],
 		answer: 0,
-		why: 'Each kernel compiles to one `ttg.convert_layout`, lowered to shared memory stores, a `bar.sync` and shared memory loads. The staging is generated, not written by hand.',
+		why: 'The compiler picks a thread layout per load and store. Each kernel compiles to one `ttg.convert_layout`, lowered to shared memory stores, a `bar.sync` and shared memory loads. The staging is generated, not written by hand.',
 	},
 	{
 		q: 'In the Nsight Compute memory tables, what sectors per request do you expect for the global stores of `transpose_naive`?',
