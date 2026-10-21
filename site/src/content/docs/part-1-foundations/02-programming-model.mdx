@@ -11,6 +11,8 @@ import CodeTabs from '@components/CodeTabs.astro';
 import cuda from '@kernels/ch02-programming-model/cuda/whoami.cu?raw';
 import numba from '@kernels/ch02-programming-model/numba/whoami.py?raw';
 import triton from '@kernels/ch02-programming-model/triton/whoami.py?raw';
+import Quiz from '@components/Quiz.astro';
+import quiz from '@quizzes/02-programming-model';
 
 You launch a million threads and every one of them runs the same function,
 line for line. There is no loop handing out work. So how does thread 7,341
@@ -211,6 +213,10 @@ One block of 8 threads launches. Threads 5, 6 and 7 fail `i < out.size`, so
 3 threads skip the store and the table has 5 rows.
 
 </details>
+
+## Quiz
+
+<Quiz questions={quiz} />
 
 ## Further reading
 

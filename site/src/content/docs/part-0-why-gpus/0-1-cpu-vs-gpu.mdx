@@ -13,6 +13,8 @@ import { totals } from '@sims/gpu-architecture/model';
 import cuda from '@kernels/ch0-1-cpu-vs-gpu/cuda/saxpy.cu?raw';
 import numba from '@kernels/ch0-1-cpu-vs-gpu/numba/saxpy.py?raw';
 import triton from '@kernels/ch0-1-cpu-vs-gpu/triton/saxpy.py?raw';
+import Quiz from '@components/Quiz.astro';
+import quiz from '@quizzes/0-1-cpu-vs-gpu';
 
 export const h100 = gpuById('h100');
 export const fmt = (n) => n.toLocaleString('en-US');
@@ -273,6 +275,10 @@ its own memory, so the copy often takes longer than the kernel. At 1000
 elements, the fixed cost of each call can be larger than the work itself.
 
 </details>
+
+## Quiz
+
+<Quiz questions={quiz} />
 
 ## Further reading
 

@@ -9,6 +9,8 @@ import { Aside } from '@astrojs/starlight/components';
 import GpuArchitecture from '@sims/gpu-architecture/GpuArchitecture.astro';
 import { GPUS, gpuById } from '@sim-core/gpu-specs';
 import { totals, formatKb } from '@sims/gpu-architecture/model';
+import Quiz from '@components/Quiz.astro';
+import quiz from '@quizzes/01-gpu-architecture';
 
 export const a100 = gpuById('a100');
 export const t4 = gpuById('t4');
@@ -190,6 +192,10 @@ many of its 108 SMs can be busy?
 This is one reason to launch many more blocks than there are SMs.
 
 </details>
+
+## Quiz
+
+<Quiz questions={quiz} />
 
 ## Further reading
 

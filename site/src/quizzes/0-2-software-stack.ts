@@ -1,0 +1,200 @@
+import type { Question } from './types';
+
+export default [
+	{
+		q: 'Which statement about the NVIDIA driver is true?',
+		options: [
+			'It is part of the CUDA Toolkit and installed with `nvcc`',
+			'It is only used by CUDA programs, not graphics',
+			'It is installed separately from the CUDA tools, and every use of the GPU goes through it',
+			'It is linked into each program statically by `nvcc`',
+		],
+		answer: 2,
+		why: 'The driver is installed on the machine on its own and handles all GPU use, graphics included. The toolkit is a separate product, and the runtime is what `nvcc` links statically.',
+	},
+	{
+		q: 'How does the CUDA runtime API, with `cudaMalloc` and `cudaMemcpy`, relate to the CUDA driver API?',
+		options: [
+			'The runtime API is built on top of the driver API',
+			'The driver API is built on top of the runtime API',
+			'They are two independent APIs with no link',
+			'The runtime API replaces the driver once a program starts',
+		],
+		answer: 0,
+		why: 'The runtime is a library from the toolkit that calls into the lower level driver API. On Linux, `nvcc` links it into your program statically by default.',
+	},
+	{
+		q: 'What is SASS?',
+		options: [
+			'A virtual instruction set that stays stable across generations',
+			'The IR that Numba hands to NVIDIA\'s compiler',
+			'The container that holds several cubins',
+			'The disassembled machine code that the SMs execute',
+		],
+		answer: 3,
+		why: 'SASS is the real machine code for one GPU generation, and NVIDIA changes it between generations. The stable virtual instruction set is PTX.',
+	},
+	{
+		q: 'Why does PTX exist?',
+		options: [
+			'It runs faster than SASS on every GPU',
+			'It is a stable virtual instruction set, so programs do not need rebuilding for every new GPU',
+			'It is the only format the driver can load',
+			'It lets the CPU run GPU kernels',
+		],
+		answer: 1,
+		why: 'PTX is documented, plain text and kept stable across generations. Without it, every program would have to be recompiled to new SASS for each new GPU.',
+	},
+	{
+		q: 'What does `ptxas` do?',
+		options: [
+			'Compiles CUDA C++ source to PTX',
+			'Lists the cubins inside a fatbin',
+			'Compiles PTX to SASS for one GPU and packs it into a cubin',
+			'Loads a cubin onto the GPU at run time',
+		],
+		answer: 2,
+		why: '`ptxas` is the PTX assembler, the second compile step. The front end writes PTX first, and the driver is what loads code at run time.',
+	},
+	{
+		q: 'What is the difference between `compute_80` and `sm_80`?',
+		options: [
+			'`compute_80` is PTX for a virtual architecture, `sm_80` is SASS for a real one',
+			'`compute_80` is for the A100, `sm_80` is for the H100',
+			'`compute_80` is SASS, `sm_80` is PTX',
+			'They are two names for the same target',
+		],
+		answer: 0,
+		why: 'The same number labels both kinds of code. `compute_80` is PTX that may use every 8.0 feature, and `sm_80` is SASS for GPUs with compute capability 8.0.',
+	},
+	{
+		q: 'What does the shorthand `nvcc -arch=sm_80` build?',
+		options: [
+			'Only an `sm_80` cubin',
+			'Only `compute_80` PTX',
+			'SASS for every GPU from 8.0 upward',
+			'An `sm_80` cubin plus `compute_80` PTX',
+		],
+		answer: 3,
+		why: '`-arch=sm_80` means both at once: SASS for `sm_80` and the matching PTX. Building only a cubin needs the long form with `-code=sm_80`.',
+	},
+	{
+		q: 'With no architecture option, what does the `nvcc` in CUDA 13.4 build for?',
+		options: [
+			'`sm_80` and `compute_80` PTX',
+			'`sm_75` and `compute_75` PTX',
+			'The GPU in the build machine',
+			'Every architecture it supports',
+		],
+		answer: 1,
+		why: 'The default is `sm_75` plus `compute_75` PTX, the oldest target it supports. `nvcc` does not look at the GPU in the machine.',
+	},
+	{
+		q: 'A cubin is built for compute capability 8.6. Which GPU can run it?',
+		options: ['One with compute capability 8.0', 'One with compute capability 9.0', 'One with compute capability 8.9', 'One with compute capability 7.5'],
+		answer: 2,
+		why: 'A cubin runs on its own major version with an equal or higher minor version. 8.0 has a lower minor version and 9.0 is a different major version.',
+	},
+	{
+		q: 'Which kind of code can the driver compile for a GPU newer than the one it was built for?',
+		options: [
+			'Plain PTX such as `compute_80`',
+			'Arch-specific PTX such as `compute_90a`',
+			'An `sm_80` cubin',
+			'Family-specific PTX such as `compute_100f`',
+		],
+		answer: 0,
+		why: 'Plain PTX runs on anything newer. Arch-specific and family-specific PTX do not carry forward this way, and an `sm_80` cubin is stuck on major version 8.',
+	},
+	{
+		q: 'A program is built with `nvcc -arch=compute_75 -code=sm_75`. Which of the T4 (7.5), A100 (8.0) and H100 (9.0) can run it?',
+		options: ['All three', 'The T4 and the A100', 'None of them', 'Only the T4'],
+		answer: 3,
+		why: 'The fatbin holds only an `sm_75` cubin and no PTX. The cubin runs on major version 7 only, and with no PTX the driver has nothing to JIT compile for the newer GPUs.',
+	},
+	{
+		q: 'The driver JIT compiles PTX when a program starts. What happens to the result?',
+		options: [
+			'It is thrown away when the program exits',
+			'It is kept in a cache on disk, which is emptied when the driver is upgraded',
+			'It is written back into the program\'s fatbin',
+			'It is uploaded to NVIDIA for reuse',
+		],
+		answer: 1,
+		why: 'JIT compiling costs start-up time, so the driver caches the SASS on disk for the next run. A driver upgrade empties the cache.',
+	},
+	{
+		q: 'What is a fatbin?',
+		options: [
+			'A single cubin for the newest GPU',
+			'The PTX text file written by `nvcc -ptx`',
+			'A container in the executable that can hold several cubins and PTX versions',
+			'The driver\'s cache of JIT compiled code',
+		],
+		answer: 2,
+		why: '`nvcc` embeds all the GPU code in a fatbin, and at run time the driver picks the best code in it for the GPU it finds.',
+	},
+	{
+		q: 'What does Numba hand to NVIDIA\'s NVVM compiler?',
+		options: ['NVVM IR, which is LLVM IR with NVIDIA\'s rules', 'CUDA C++ source', 'TritonGPU IR', 'SASS'],
+		answer: 0,
+		why: 'Numba compiles the Python function to NVVM IR, and NVVM turns it into PTX. Neither Numba nor Triton needs `nvcc`.',
+	},
+	{
+		q: 'In Triton\'s pipeline, at which stage does it first decide which thread holds which elements?',
+		options: ['Triton IR (TTIR)', 'LLVM IR', 'PTX', 'TritonGPU IR (TTGIR)'],
+		answer: 3,
+		why: 'In TTIR every value is a whole block of data with no threads. The TTGIR adds the layout that splits each block over threads.',
+	},
+	{
+		q: 'The TTGIR layout for SAXPY has `sizePerThread = [4]`, `threadsPerWarp = [32]` and `warpsPerCTA = [4]`. How many elements does one pass of the layout cover?',
+		options: ['128', '512', '1024', '32'],
+		answer: 1,
+		why: '4 * 32 * 4 = 512. With `BLOCK` = 1024 that takes two passes, so each of the 128 threads handles 8 elements. 128 is the thread count, not the elements per pass.',
+	},
+	{
+		q: 'Numba\'s PTX loads with `ld.f32` and Triton\'s with `ld.global.b32`. What is the difference?',
+		options: [
+			'`ld.f32` reads shared memory, `ld.global.b32` reads global memory',
+			'`ld.f32` is faster on every GPU',
+			'`ld.f32` is a generic load, `ld.global.b32` names global memory directly',
+			'There is none, both become `LDG.E` in SASS',
+		],
+		answer: 2,
+		why: 'A generic address goes to global memory unless it falls in the shared, local or constant window. The difference survives to SASS as `LD.E` against `LDG.E`.',
+	},
+	{
+		q: 'Both Python paths compile `a * x[i] + y[i]` to the same SASS instruction. Which one?',
+		options: ['`FFMA`', '`FMUL` followed by `FADD`', '`fma.rn.f32`', '`LDG.E`'],
+		answer: 0,
+		why: 'The PTX has one `fma.rn.f32`, which becomes `FFMA` in SASS. `fma.rn.f32` is the PTX instruction, not the SASS one.',
+	},
+	{
+		q: 'Why does Triton\'s PTX start with `.version 8.8` while Numba\'s starts with `.version 9.4`?',
+		options: [
+			'Triton targets an older GPU than Numba',
+			'The PTX version is fixed by the GPU\'s compute capability',
+			'Numba runs `nvcc` and Triton does not',
+			'Triton derives the PTX version from the `ptxas` it bundles, which is from CUDA 12.9',
+		],
+		answer: 3,
+		why: 'Both listings target `sm_80`. The version depends on the tool: Numba\'s NVVM from `nvidia-nvvm` 13.4.92 writes 9.4, and Triton matches its bundled CUDA 12.9 `ptxas`.',
+	},
+	{
+		q: 'Which tool prints the SASS of a cubin or a whole executable?',
+		options: ['`nvcc -ptx`', '`cuobjdump -sass`', '`nvidia-smi`', '`cuobjdump -lptx`'],
+		answer: 1,
+		why: '`cuobjdump -sass` disassembles the GPU code. `nvcc -ptx` writes PTX, and `cuobjdump -lptx` only lists the PTX inside a fatbin.',
+	},
+	{
+		q: 'How can you get the PTX for a Numba kernel on a machine with no GPU?',
+		options: [
+			'Call the kernel\'s `inspect_sass()`',
+			'Read the kernel\'s `asm` dictionary',
+			'Call `numba.cuda.compile_ptx(fn, signature, cc=(8, 0))`',
+			'Run `nvcc -ptx` on the Python file',
+		],
+		answer: 2,
+		why: '`compile_ptx` returns PTX for a chosen compute capability without a GPU. `inspect_sass()` needs a GPU, and the `asm` dictionary belongs to Triton.',
+	},
+] satisfies Question[];
