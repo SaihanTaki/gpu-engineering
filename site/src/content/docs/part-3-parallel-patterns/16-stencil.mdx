@@ -3,8 +3,6 @@ title: 16. Stencil and convolution
 description: How a block computes a tile of a 2D convolution from a shared memory copy of its input plus a halo, what the halo costs as the filter grows, and why the filter belongs in constant memory.
 sidebar:
   order: 16
-banner:
-  content: Draft chapter. If something is wrong or unclear, use the edit link at the bottom of the page.
 ---
 
 import { Code } from '@astrojs/starlight/components';
@@ -226,14 +224,14 @@ reaches `__syncthreads()`.
 		filter positions, loads the whole block of input pixels shifted by `(dy, dx)` with one `tl.load`. Offsets that fall
 		outside the image are masked off, and `other=0.0` makes them read as zero: the boundary rule in one argument.
 		`tl.static_range` unrolls both loops at compile time. The shifted blocks overlap, and the compiler does not stage
-		them in shared memory for this kernel (the listing below shows no `local_alloc`); the overlap is left to the L1 and L2
+		them in shared memory for this kernel (the summary below shows no `local_alloc`); the overlap is left to the L1 and L2
 		caches, the third arrangement above.
 	</div>
 </CodeTabs>
 
 `test_correctness.py` checks the Numba and Triton kernels against a NumPy
-reference for `R = 1, 2, 3` and shapes from 1 x 1 to 40 x 21, including images
-smaller than the halo. The CUDA program checks both of its kernels against a CPU
+reference for `R = 1, 2, 3` and shapes 1 x 1, 16 x 16, 17 x 33, 40 x 21 and
+2 x 50, including images smaller than the halo. The CUDA program checks both of its kernels against a CPU
 loop, and the test runs it when `nvcc` is present. A separate test pins down the boundary rule on the reference itself:
 a 3 x 3 box filter of ones on an image of ones gives 4 in the corner, 6 on an
 edge and 9 inside.
@@ -279,9 +277,9 @@ Things to look for:
 - In Nsight Compute, the global load requests of `conv2d_naive` against
   `conv2d_tiled`. They should differ by about the ratio the simulation shows for
   `TILE = 16`.
-- The L1 hit rate of the naive kernel. It is high, because neighbouring threads
-  load overlapping windows, and it is the reason the measured gap is smaller than
-  the gap in load counts.
+- The L1 hit rate of the naive kernel. It should be high, because neighbouring
+  threads load overlapping windows, which would explain why the measured gap is
+  smaller than the gap in load counts.
 - How the gap changes from R = 1 to R = 3, against the halo overhead table.
 
 ## What the model leaves out

@@ -3,8 +3,6 @@ title: 18. Sparse matrices
 description: How COO, CSR and ELL store a sparse matrix, three SpMV kernels that give rows to threads in different ways, and why uneven rows decide which one is fast.
 sidebar:
   order: 18
-banner:
-  content: Draft chapter. If something is wrong or unclear, use the edit link at the bottom of the page.
 ---
 
 import SparseFormats from '@sims/sparse-formats/SparseFormats.astro';
@@ -242,7 +240,7 @@ rows by length and pick a kernel per bin, or split the nonzeros evenly across
 threads regardless of rows, as in Merrill and Garland's merge-based SpMV. For
 real work use [cuSPARSE](https://docs.nvidia.com/cuda/cusparse/index.html):
 its generic [`cusparseSpMV`](https://docs.nvidia.com/cuda/cusparse/index.html#cusparsespmv)
-takes a matrix in COO, CSR, CSC, sliced ELL (SELL) or block CSR (BSR) format.
+takes a matrix in COO, CSR, CSC, sliced ELL (SELL) or block sparse row (BSR) format.
 From Python, `torch.sparse` and CuPy's `cupyx.scipy.sparse` use cuSPARSE for their GPU sparse products.
 
 ## The code
@@ -292,7 +290,7 @@ and prints the ELL width and slots per nonzero. Things to look for:
 - On `uniform`, the order of the three kernels. Rows of 1 to 16 nonzeros are
   shorter than a warp, which the vector kernel does not like.
 - On `skewed`, how much the scalar kernel slows down compared with the
-  vector kernel. A few thousand long rows are enough.
+  vector kernel. About a thousand long rows are enough.
 - In the memory tables, the sectors per request of global loads: high for
   `spmv_csr_scalar`, lower for `spmv_ell` and `spmv_csr_vector`.
 - In Source Counters, the average number of active threads per instruction

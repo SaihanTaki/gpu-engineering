@@ -3,8 +3,6 @@ title: 15. Histogram and atomics
 description: Why a histogram needs atomic operations, why threads that hit the same bin wait for each other, and how a private copy per block in shared memory cuts that wait.
 sidebar:
   order: 15
-banner:
-  content: Draft chapter. If something is wrong or unclear, use the edit link at the bottom of the page.
 ---
 
 import { Code } from '@astrojs/starlight/components';
@@ -55,16 +53,19 @@ Two details from the same section matter for histograms:
 - Plain `atomicAdd` is atomic at device scope, so it is correct across all
   blocks of the grid. `atomicAdd_block` is atomic only within a block, and
   `atomicAdd_system` also covers the CPU and other GPUs.
-- These atomics have relaxed memory ordering. They count correctly, but they
-  do not order other memory accesses. That is all a histogram needs.
+- These atomics "have ordering `cuda::memory_order_relaxed`". They count
+  correctly, but they do not order other memory accesses. That is all a
+  histogram needs.
 
 ## Contention
 
 Atomicity has a cost when threads collide. The Programming Guide, in its
 description of the SIMT architecture, says that when an atomic instruction of
-a warp writes the same location from several threads, "each read/modify/write
-to that location occurs and they are all serialized, but the order in which
-they occur is undefined."
+a warp writes the same location in global memory from several threads, "each
+read/modify/write to that location occurs and they are all serialized, but the
+order in which they occur is undefined." The guide says this for global
+memory. This chapter assumes shared memory atomics on one address queue the
+same way, and so does the simulation.
 
 So the time a histogram takes depends on the data, not only on its size.
 Spread values over many bins and the atomics go to different addresses.
@@ -125,14 +126,14 @@ Things to try:
 - **Uniform, 4 and 8 blocks.** The values are already spread, so the global
   kernel's queues are short: {slots('uniform', 4, 'global')} slots. Four blocks
   give {slots('uniform', 4, 'shared')}, but eight give
-  {slots('uniform', 8, 'shared')}: with every bin nonzero in every block, the
-  merge queues 8 blocks on each bin.
+  {slots('uniform', 8, 'shared')}: almost every bin is nonzero in almost every
+  block, so the merge queues up to 8 blocks on one bin.
 
 ## The code
 
 All three languages compute a 256-bin histogram of bytes. Both CUDA kernels use
 a grid-stride loop, so the grid size does not depend on the input size. The
-merge skips bins that stayed at zero.
+CUDA and Numba merges skip bins that stayed at zero.
 
 <CodeTabs
 	cuda={cuda}
@@ -153,8 +154,8 @@ merge skips bins that stayed at zero.
 The CUDA kernels are in a header with no host code, so the tests can compile
 them with NVRTC on a machine without `nvcc`. `cuda/histogram.cu` includes it,
 times each kernel on three inputs and checks it against a CPU count. Every
-version is tested against `np.bincount`, exactly, for uniform, skewed and
-one-bin inputs.
+Numba and Triton version is tested against `np.bincount`, exactly, for
+uniform, skewed and one-bin inputs.
 
 What the Triton compiler produced, counted in its PTX:
 
