@@ -3,8 +3,6 @@ title: 8. Bank conflicts
 description: How shared memory splits into 32 banks, why a warp that asks one bank for several words waits for each of them, and how padding and XOR swizzling spread a column read over all the banks.
 sidebar:
   order: 8
-banner:
-  content: Draft chapter. If something is wrong or unclear, use the edit link at the bottom of the page.
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -113,7 +111,7 @@ is word `r * 33 + c`, in bank `(r + c) % 32`. Down a column, `r` goes from 0 to
 banks. Rows are still conflict-free.
 
 The cost is 32 unused words per tile, about 3% of a 32 by 32 tile. Padding also
-moves the start of every row off a 16-byte boundary, so the rows can no longer
+moves three rows in four off a 16-byte boundary, so the rows can no longer
 be read with aligned `float4` loads. And it fixes the column read only. A
 diagonal read, `tile[i][i]`, is conflict-free in the plain tile (word `33 * i`,
 bank `i`) and becomes 2-way in the padded one (word `34 * i`, bank `2i % 32`).
@@ -152,7 +150,8 @@ swizzle. After that, try stride 64, stride 33, and `G = 2` with stride 32.
 Stride 64 reads every other row of column 0. Padding moves row `r` by `r`
 banks, so rows 0 and 32 still meet in bank 0, rows 2 and 34 in bank 2, and so
 on: 2-way. Stride 33 is the diagonal, conflict-free in the plain tile and 2-way
-with padding. With `G = 2`, pairs of lanes share a word, so bank 0 has 16
+with padding. With the swizzle it is 32-way: lane `r` reads column `c = r`, and
+`c ^ r = 0`, so every lane lands in bank 0. With `G = 2`, pairs of lanes share a word, so bank 0 has 16
 words to send instead of 32.
 
 <Aside type="tip">
@@ -172,7 +171,9 @@ conflict from the simulation, 32 times per tile.
 
 There are three versions of the kernel: the plain tile, the padded tile and the
 swizzled tile. They do the same arithmetic and produce the same sums. The tests
-in `kernels/ch08-bank-conflicts/` check them against NumPy.
+in `kernels/ch08-bank-conflicts/` check the Numba and Triton versions against
+NumPy. When `nvcc` is on the path they also build and run the CUDA program,
+which checks its kernels against its own CPU loop.
 
 <CodeTabs
 	cuda={cuda}

@@ -3,8 +3,6 @@ title: 10. Unified and pinned memory
 description: Pageable and pinned host memory, Unified Memory with cudaMallocManaged, page faults and migration, cudaMemPrefetchAsync and cudaMemAdvise, and system-allocated memory with HMM.
 sidebar:
   order: 10
-banner:
-  content: Draft chapter. If something is wrong or unclear, use the edit link at the bottom of the page.
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -110,9 +108,11 @@ names two device attributes to check:
   every GPU in this course. Pages move on demand, through page faults, while
   kernels run.
 - It is 0 for **limited** support: Windows, WSL, some Tegra devices and GPUs
-  older than compute capability 6.0. Managed memory "is first allocated in the
-  CPU's physical memory", it is moved to the GPU before a kernel launches,
-  page faulting "is only supported from the CPU side", and "the CPU must not
+  older than compute capability 6.0
+  ([section 4.1.3](https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/unified-memory.html#unified-memory-on-windows-wsl-and-tegra)).
+  Managed memory "is first allocated in the CPU's physical memory", it is
+  moved to the GPU before a kernel launches, page faulting "is only supported
+  from the CPU side" (section 4.1.3), and "the CPU must not
   access managed memory while the GPU is active". You also cannot allocate
   more managed memory than the GPU has.
 
@@ -272,7 +272,9 @@ allocations. There are two ways a system gets it:
   the CPU and GPU share one page table, such as NVIDIA Grace Hopper. There the
   GPU faults less and, where it can, accesses CPU memory remotely over the
   NVLink C2C link instead of migrating it.
-  When ATS is present, HMM is disabled.
+  When ATS is present, HMM is disabled: NVIDIA's
+  [HMM blog post](https://developer.nvidia.com/blog/simplifying-gpu-application-development-with-heterogeneous-memory-management)
+  says of such systems that "HMM is automatically disabled there".
 
 Check for it in code with `cudaDevAttrPageableMemoryAccess`, which is 1 when
 "all system memory is fully-supported unified memory", or from the shell with
@@ -336,13 +338,16 @@ nsys profile --cuda-um-cpu-page-faults=true --cuda-um-gpu-page-faults=true \
 Things to look for:
 
 - The GB/s of the pinned and pageable runs against the per-direction PCIe peak
-  of your card ({t4.pcieGbPerS} GB/s for Gen3, {a100.pcieGbPerS} for Gen4,
-  {h100.pcieGbPerS} for Gen5).
+  of your card (about {t4.pcieGbPerS} GB/s for Gen3, {a100.pcieGbPerS} for
+  Gen4, {h100.pcieGbPerS} for Gen5; the exact x16 figures are 15.75, 31.5 and
+  63 GB/s). The program's figure is lower than the link alone would give,
+  because its time also includes the kernel and the CPU check.
 - How far the on-demand run is behind the prefetch run, and whether the gap
   changes with the array size (pass a count, for example
   `./cuda/unified_memory 1000000`).
 - In the Nsight Systems timeline, the Unified Memory rows: how many GPU and
-  CPU faults each run takes, and how large the migrations are. Nsight Systems
+  CPU faults each run takes, and how large the migrations are.
+  [Nsight Systems](https://docs.nvidia.com/nsight-systems/UserGuide/index.html)
   warns that fault tracing "may cause significant runtime overhead", so do not
   trust times from the traced run.
 
@@ -438,7 +443,7 @@ make the code work there?
 <details>
 <summary>Answer</summary>
 
-`cudaMemAdvise` returns an error first: for system-allocated memory and a
+`cudaMemAdvise` may return an error first: for system-allocated memory and a
 device location, the runtime API requires that device to have a non-zero
 `pageableMemoryAccess`, and `CUDA_CHECK` exits. Remove the hint and the kernel dereferences a
 pointer the GPU has no mapping for, so it fails with an illegal address error,

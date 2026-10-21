@@ -3,8 +3,6 @@ title: 7. Shared memory
 description: How a block of threads stages data in on-chip shared memory, why it needs __syncthreads() to do it safely, and how tiling a matrix multiply cuts its global memory loads by the tile size.
 sidebar:
   order: 7
-banner:
-  content: Draft chapter. If something is wrong or unclear, use the edit link at the bottom of the page.
 ---
 
 import { Code } from '@astrojs/starlight/components';
@@ -208,8 +206,11 @@ barriers.
 	</div>
 </CodeTabs>
 
-`test_correctness.py` checks all six kernels against NumPy for sizes from 1 to
-256, including sizes that are not multiples of the tile.
+`test_correctness.py` checks the Numba and Triton kernels against NumPy for
+sizes 1, 7, 32, 50 and 256, including sizes that are not multiples of the tile.
+When `nvcc` is on the path it also builds and runs the CUDA program for n = 1,
+50 and 512, and that program checks both of its kernels against its own CPU
+`reference()`.
 
 ## What the compilers made of it
 
@@ -226,7 +227,8 @@ for none of this. Its TTGIR, the GPU-specific stage of Triton's compiler
 for B, 16 KB in all, `async_copy_global_to_local` filling them and `local_load`
 reading them for the dot product. Two buffers per matrix let the copy for one
 iteration run while the other is used; `num_stages`, from chapter 5, controls
-that pipelining.
+that pipelining. With `num_stages = 3`, Triton keeps `num_stages - 1 = 2`
+buffers.
 
 ## Measure it yourself
 

@@ -3,8 +3,6 @@ title: 9. Registers, caches and other memory
 description: Where a kernel's data lives besides global and shared memory, what register spilling and local memory cost, how constant memory and the read-only path work, and how L1 and L2 serve a stream of loads.
 sidebar:
   order: 9
-banner:
-  content: Draft chapter. If something is wrong or unclear, use the edit link at the bottom of the page.
 ---
 
 import { Aside, Code } from '@astrojs/starlight/components';
@@ -148,6 +146,8 @@ instructions are `STL` and `LDL` (store and load local).
 
 Local memory goes through L1 and L2 like global memory. A spill that stays in
 L1 costs an L1 round trip, slower than a register but far cheaper than DRAM.
+NVIDIA does not document whether spill stores also write through to L2, so
+only the spill loads that hit L1 are sure to stay off L2.
 A spill that falls out of L1, because the SM's warps together spill more than
 L1 holds or because other data pushes it out, costs an L2 or DRAM access.
 
@@ -353,8 +353,8 @@ local array kernels. The Triton file shows the cache hints Triton exposes.
 	<div slot="triton-note">
 		Triton has no `__constant__` variables or per-thread arrays to declare; its compiler decides what goes in
 		registers and shared memory, and `n_spills` on the compiled kernel tells you whether it spilled. What you do
-		control is how each load uses the caches. `tl.load` takes `cache_modifier` (`""`, `".ca"`, `".cg"`, `".cs"` or
-		`".cv"` in Triton 3.8) and `eviction_policy` (`"evict_first"` or `"evict_last"`), which map to the PTX cache
+		control is how each load uses the caches. `tl.load` takes `cache_modifier` (the Triton docs list `""`, `".ca"`,
+		`".cg"` and `".cv"`; Triton 3.8 also accepts `".cs"`, as the listing below shows) and `eviction_policy` (`"evict_first"` or `"evict_last"`), which map to the PTX cache
 		operators and eviction hints above. Here `x` is read once and `w`, a 256-entry table, by every program, so the
 		second variant streams `x` and keeps `w`. These are the loads Triton emits for each variant:
 
@@ -463,8 +463,9 @@ every spill stays in L1? What if none do?
 512 bytes of spill stores plus 544 bytes of spill loads is 1,056 bytes per
 thread, and the code has no loops, so each spill runs once:
 1,056 x 16,384 = 17,301,504 bytes, about 17.3 MB. If every spill stays in L1,
-none of that reaches L2 or DRAM, but it still costs L1 bandwidth and
-instructions. If none do, every spill is at least an L2 access, and a DRAM
+the 544 bytes of loads per thread hit L1 and never reach L2 or DRAM; whether
+the stores write through to L2 is not documented. Either way it costs L1
+bandwidth and instructions. If none do, every spill is at least an L2 access, and a DRAM
 access when it misses L2 too. The register cap that caused the spills was meant to
 raise occupancy (chapter 5); whether it pays off depends on which case you
 are in, so measure both builds.
