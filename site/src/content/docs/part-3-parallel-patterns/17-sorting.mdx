@@ -3,8 +3,6 @@ title: 17. Sorting
 description: Bitonic sort as a fixed network of compare-swaps that maps one thread to one comparator, radix sort built from histograms and scans, merging with merge path, and why CUB and Thrust are what production code calls.
 sidebar:
   order: 17
-banner:
-  content: Draft chapter. If something is wrong or unclear, use the edit link at the bottom of the page.
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -174,9 +172,11 @@ same keys for comparison.
 </CodeTabs>
 
 `test_correctness.py` checks both Numba methods and the Triton block sort
-against `np.sort` for sizes 1, 2, 7, 64, 100, 256, 1000 and 1024 (more under a
-GPU), with duplicate and negative keys, plus sorted, reversed and constant
-inputs. It compiles the Numba kernels to PTX and the CUDA kernels with NVRTC for
+against `np.sort`, with duplicate and negative keys. On a GPU the Numba methods
+run sizes 1, 2, 7, 64, 100, 256, 1000, 1024 and 5000; under the simulator they
+run 1, 2, 7, 64, 100 and 300. The Triton block sort runs the first eight sizes
+and 2049. The Numba shared method is also checked on sorted, reversed and
+constant inputs. The test compiles the Numba kernels to PTX and the CUDA kernels with NVRTC for
 `sm_75`, `sm_80` and `sm_90`, which works without a GPU, and runs the CUDA
 program when `nvcc` is present.
 
@@ -264,7 +264,10 @@ mean nothing under `NUMBA_ENABLE_CUDASIM=1` or `TRITON_INTERPRET=1`. Things to
 look for:
 
 - In the `nsys` kernel summary, the number of `bitonic_step` and
-  `bitonic_shared` launches: it should match the counts above.
+  `bitonic_shared` launches. The program runs each method twice, and both
+  methods launch `bitonic_step`, so for `2^20` keys expect
+  {2 * (big.perStage + big.hybridGlobal)} `bitonic_step` and
+  {2 * big.hybridShared} `bitonic_shared` launches.
 - The gap between `global` and `shared`, and between both and `thrust`.
 - In Nsight Compute, the shared memory bank conflicts of `bitonic_shared` from
   the stages with `j < 32`.

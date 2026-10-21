@@ -126,19 +126,21 @@ __global__ void conv2d_tiled(const float *in, float *out, int h, int w) {
         tile[i / IN][i % IN] = inside ? in[yy * w + xx] : 0.0f;
     }
     __syncthreads();
+    int x = x0 + R + threadIdx.x, y = y0 + R + threadIdx.y;
+    if (x >= w || y >= h) return;
     float sum = 0.0f;
     for (int dy = 0; dy <= 2 * R; ++dy)
         for (int dx = 0; dx <= 2 * R; ++dx)
             sum += c_filter[dy * (2 * R + 1) + dx] * tile[threadIdx.y + dy][threadIdx.x + dx];
-    out[(y0 + R + threadIdx.y) * w + x0 + R + threadIdx.x] = sum;
+    out[y * w + x] = sum;
 }`;
 
 export function steps(c: Config): Step[] {
 	const out: Step[] = [{ kind: 'start', round: -1, lines: [4, 5, 6] }];
 	for (let k = 0; k < rounds(c); k++) out.push({ kind: 'load', round: k, lines: [7, 8, 9, 10] });
 	out.push({ kind: 'sync', round: -1, lines: [12] });
-	out.push({ kind: 'compute', round: -1, lines: [13, 14, 15, 16] });
-	out.push({ kind: 'store', round: -1, lines: [17] });
+	out.push({ kind: 'compute', round: -1, lines: [13, 14, 15, 16, 17, 18] });
+	out.push({ kind: 'store', round: -1, lines: [19] });
 	return out;
 }
 

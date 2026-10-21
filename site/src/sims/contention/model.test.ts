@@ -87,6 +87,11 @@ suite('queues', () => {
 		expect(totalsAt(c, 'shared', LAST_STEP).slots).toBe(totalsAt(c, 'global', LAST_STEP).slots + 1);
 	});
 
+	it('on the uniform input, 8 blocks cost more slots than 4', () => {
+		const slots = (blocks: number) => totalsAt(cfg('uniform', blocks), 'shared', LAST_STEP).slots;
+		expect(slots(8)).toBeGreaterThan(slots(4));
+	});
+
 	it('the merge adds only nonzero bins', () => {
 		for (const c of all) {
 			const counts = privateCounts(c, ROUNDS);
