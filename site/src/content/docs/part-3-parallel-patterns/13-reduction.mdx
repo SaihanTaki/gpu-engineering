@@ -3,8 +3,6 @@ title: 13. Reduction
 description: Summing an array on a GPU with a tree of adds, why sequential addressing keeps warps busy where interleaved addressing does not, how warp shuffles finish without barriers, and how blocks combine their partial sums.
 sidebar:
   order: 13
-banner:
-  content: Draft chapter. If something is wrong or unclear, use the edit link at the bottom of the page.
 ---
 
 import { Code } from '@astrojs/starlight/components';
@@ -103,7 +101,7 @@ words, `sdata[tid + s]` for consecutive `tid`, so it is free of both problems.
 
 ### The last warp, with shuffles
 
-The last six levels of sequential addressing run on fewer than 64 values,
+The last six levels of sequential addressing run on 64 values or fewer,
 all inside warp 0. They still pay a `__syncthreads()` each, and two shared
 memory loads and a store per level. A warp can exchange registers
 directly instead:

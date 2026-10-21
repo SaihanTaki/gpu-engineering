@@ -3,8 +3,6 @@ title: '11. Case study: matrix transpose'
 description: Three transpose kernels, naive, shared memory tiled and padded, and how 32-byte sectors and 32 shared memory banks decide which one runs near the memory bandwidth.
 sidebar:
   order: 11
-banner:
-  content: Draft chapter. If something is wrong or unclear, use the edit link at the bottom of the page.
 ---
 
 import { Code } from '@astrojs/starlight/components';
@@ -188,9 +186,9 @@ copy kernel at 105.2.
 
 ## The code
 
-All three languages have the same three kernels, except Triton. Unlike
-Harris's version, which assumes the sizes are multiples of 32, every kernel
-here checks bounds, so any `rows x cols` works.
+CUDA and Numba have the same three kernels; Triton has two (see the note).
+Unlike Harris's version, which assumes the sizes are multiples of 32, every
+kernel here checks bounds, so any `rows x cols` works.
 
 <CodeTabs
 	cuda={cuda}
@@ -224,9 +222,11 @@ loads and barriers):
 Both variants compile to the same plan: one layout conversion, lowered to
 shared memory stores, a `bar.sync` and shared memory loads. The global loads
 and stores in the PTX are `ld.global.v4.b32` and `st.global.v4.b32`, 16 bytes
-per thread, so both global sides are coalesced. Whether the conversion's
-shared memory accesses conflict is the compiler's business; check the
-profiler, as below.
+per thread, so both global sides are coalesced. That PTX assumes `rows` and
+`cols` are multiples of 16, the launch-time divisibility hint in the summary's
+header; for other sizes Triton can emit narrower accesses. Whether the
+conversion's shared memory accesses conflict is the compiler's business;
+check the profiler, as below.
 
 ## Measure it yourself
 

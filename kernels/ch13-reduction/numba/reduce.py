@@ -107,15 +107,23 @@ MULTI_PASS = {"interleaved": reduce_interleaved, "sequential": reduce_sequential
 NEEDS_SHUFFLE = {"warp_final", "atomic"}
 
 
-def multi_pass(kernel, d_x):
-    # Each launch leaves one partial sum per block; launch again on those.
+def partial_buffers(n):
+    blocks = (n + BLOCK - 1) // BLOCK
+    return cuda.device_array(blocks, dtype=np.float32), cuda.device_array(blocks, dtype=np.float32)
+
+
+def multi_pass(kernel, d_x, bufs=None):
+    # Each launch leaves one partial sum per block; launch again on those,
+    # ping-ponging between two buffers so nothing is allocated per pass.
+    d_a, d_b = bufs or partial_buffers(d_x.size)
     while True:
         blocks = (d_x.size + BLOCK - 1) // BLOCK
-        d_out = cuda.device_array(blocks, dtype=np.float32)
+        d_out = d_a[:blocks]
         kernel[blocks, BLOCK](d_x, d_out)
         if blocks == 1:
             return d_out
         d_x = d_out
+        d_a, d_b = d_b, d_a
 
 
 def one_pass_atomic(d_x, blocks=None):
@@ -138,13 +146,14 @@ if __name__ == "__main__":
     x = np.random.default_rng(0).integers(-3, 4, n).astype(np.float32)
     expected = int(x.astype(np.int64).sum())
     d_x = cuda.to_device(x)
+    bufs = partial_buffers(n)
     reps = 20
     print(f"n = {n} floats, {BLOCK} threads per block, expected sum {expected}")
     for name in [*MULTI_PASS, "atomic"]:
         if os.environ.get("NUMBA_ENABLE_CUDASIM") == "1" and name in NEEDS_SHUFFLE:
             print(f"  {name:<11} skipped: needs a GPU")
             continue
-        run = (lambda: one_pass_atomic(d_x)) if name == "atomic" else (lambda: multi_pass(MULTI_PASS[name], d_x))
+        run = (lambda: one_pass_atomic(d_x)) if name == "atomic" else (lambda: multi_pass(MULTI_PASS[name], d_x, bufs))
         # The first call compiles the kernel, so it is not timed.
         run()
         cuda.synchronize()
