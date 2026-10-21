@@ -7,6 +7,8 @@ sidebar:
 
 import SparseFormats from '@sims/sparse-formats/SparseFormats.astro';
 import CodeTabs from '@components/CodeTabs.astro';
+import Quiz from '@components/Quiz.astro';
+import quiz from '@quizzes/18-sparse';
 import { ell, maxLen, N, nnz, pct, totals, WARP } from '@sims/sparse-formats/model';
 import cuda from '@kernels/ch18-sparse/cuda/spmv_kernels.cuh?raw';
 import numba from '@kernels/ch18-sparse/numba/spmv.py?raw';
@@ -372,6 +374,10 @@ of real data. HYB with `K = 8` puts the first 8 entries of every row in ELL
 row in COO.
 
 </details>
+
+## Quiz
+
+<Quiz questions={quiz} />
 
 ## Further reading
 

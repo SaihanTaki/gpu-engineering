@@ -8,6 +8,8 @@ sidebar:
 import { Code } from '@astrojs/starlight/components';
 import Contention from '@sims/contention/Contention.astro';
 import CodeTabs from '@components/CodeTabs.astro';
+import Quiz from '@components/Quiz.astro';
+import quiz from '@quizzes/15-histogram';
 import { BINS, HOT_BIN, LAST_STEP, N, ROUNDS, THREADS, totalsAt } from '@sims/contention/model';
 import cuda from '@kernels/ch15-histogram/cuda/histogram_kernels.cuh?raw';
 import numba from '@kernels/ch15-histogram/numba/histogram.py?raw';
@@ -255,6 +257,10 @@ kernel's 256 bins, a skewed input leaves most bins at zero in every block, so
 the check saves most of the merge.
 
 </details>
+
+## Quiz
+
+<Quiz questions={quiz} />
 
 ## Further reading
 

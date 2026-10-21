@@ -8,6 +8,8 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 import BitonicNetwork from '@sims/bitonic-network/BitonicNetwork.astro';
 import CodeTabs from '@components/CodeTabs.astro';
+import Quiz from '@components/Quiz.astro';
+import quiz from '@quizzes/17-sorting';
 import { comparatorCount, launchCounts, stageCount, stateAt } from '@sims/bitonic-network/model';
 import cuda from '@kernels/ch17-sorting/cuda/bitonic_kernels.cuh?raw';
 import numba from '@kernels/ch17-sorting/numba/bitonic.py?raw';
@@ -352,6 +354,10 @@ keys, and for 1025?
 {fmt(comparatorCount(1024))}, for one extra key.
 
 </details>
+
+## Quiz
+
+<Quiz questions={quiz} />
 
 ## Further reading
 
