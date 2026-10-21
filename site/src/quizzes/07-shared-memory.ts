@@ -10,7 +10,7 @@ export default [
 	{
 		q: 'Which statement about the scope and lifetime of shared memory is correct?',
 		options: [
-			'One copy per SM, shared by every block resident there',
+			'One copy per SM, shared by every block resident on that SM at the time',
 			'One copy per kernel launch, visible to every block',
 			'One copy per block, which exists only while that block runs',
 			'One copy per warp, kept until the kernel ends',
@@ -27,8 +27,8 @@ export default [
 	{
 		q: 'A block needs 64 KB of shared memory. What does the CUDA C++ kernel have to do?',
 		options: [
-			'Use an `extern __shared__` array, pass the bytes at launch and opt in with `cudaFuncSetAttribute`',
-			'Declare `__shared__ float buf[16384]`, since static arrays have no size limit',
+			'Use `extern __shared__`, pass the bytes at launch, and call `cudaFuncSetAttribute`',
+			'Declare `__shared__ float buf[16384]`, since static shared arrays have no size limit at all',
 			'Allocate the buffer with `cudaMalloc` and pass the pointer as a kernel argument',
 			'Split the array into two static `__shared__` arrays of 32 KB each',
 		],
@@ -49,7 +49,7 @@ export default [
 	{
 		q: 'In the tiled kernel, the first `__syncthreads()` sits between loading `As` and `Bs` and the inner loop. What can go wrong without it?',
 		options: [
-			'Two threads write the same slot of `As` and one write is lost',
+			'Two threads write the same slot of `As` at once and one of the two writes is lost',
 			'A thread reads a slot of `As` or `Bs` that another thread has not written yet',
 			'The global loads stop being coalesced',
 			'The compiler refuses to unroll the inner loop',
@@ -62,8 +62,8 @@ export default [
 		options: [
 			'It makes the sum in each thread visible to the other threads',
 			'It flushes `As` and `Bs` to global memory',
-			'It stops a fast thread from overwriting a tile that a slow thread is still reading',
-			'It waits for the global loads of the next phase to arrive',
+			'It stops a thread overwriting a tile another thread is still reading',
+			'It waits for the global loads of the next phase to arrive in shared memory',
 		],
 		answer: 2,
 		why: 'This is the after reading, before overwriting case. Without it a warp can start loading the next tiles while others still need the current ones.',
@@ -94,7 +94,7 @@ export default [
 	{
 		q: 'How many values does each thread read for its dot product in the tiled kernel?',
 		options: [
-			'`2n / TILE`, the same as its global loads',
+			'`2n / TILE`, the same as its number of global loads',
 			'`2n`, but most of them come from shared memory',
 			'`n`, because each element of A is read once',
 			'`TILE`, one per term of a phase',
@@ -123,8 +123,8 @@ export default [
 		q: 'Why use shared memory instead of relying on L1 to catch the repeated loads?',
 		options: [
 			'L1 does not cache global loads on these GPUs',
-			'L1 is slower than device memory for repeated reads',
-			'A cache keeps what it decides to keep, while shared memory keeps exactly what the block put there',
+			'L1 is slower than device memory when the same address is read repeatedly',
+			'Shared memory holds exactly what the block put there, a cache does not',
 			'Shared memory is larger than L1 on every GPU in the course',
 		],
 		answer: 2,
@@ -146,7 +146,7 @@ export default [
 		options: [
 			'One per thread of a warp',
 			'The unrolled inner loop, 16 reads from each tile',
-			'The loads that fill `As` and `Bs`',
+			'The loads that fill `As` and `Bs` each phase',
 			'One per phase of a 512 x 512 multiply',
 		],
 		answer: 1,
@@ -155,7 +155,7 @@ export default [
 	{
 		q: 'The Triton TTGIR allocates two 32 x 32 buffers for A and two for B. Why two per matrix?',
 		options: [
-			'One holds the tile and one holds its transpose for `tl.dot`',
+			'One buffer holds the tile and the other holds its transpose for `tl.dot`',
 			'One buffer per warp of the program',
 			'The kernel computes two output tiles per program',
 			'The copy for the next iteration runs while the other buffer is used',
@@ -177,8 +177,8 @@ export default [
 	{
 		q: 'What does the tile loader simulation count?',
 		options: [
-			'Element loads the kernel issues, with no caches, transactions or timing',
-			'Bytes moved between L2 and device memory',
+			'Element loads the kernel issues, with no caches or timing',
+			'Bytes moved between L2 and device memory over the whole run',
 			'Memory transactions after coalescing',
 			'Cycles spent waiting at each barrier',
 		],

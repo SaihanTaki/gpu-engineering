@@ -101,13 +101,13 @@ export default [
 	{
 		q: 'Besides the extra column, what other cost of `float tile[32][33]` does the chapter name?',
 		options: [
-			'Three rows in four no longer start on a 16-byte boundary, so aligned `float4` loads stop working',
-			'The tile no longer fits in 48 KB of static shared memory',
+			'Most rows stop starting on a 16-byte boundary, breaking aligned `float4` loads',
+			'The padded tile no longer fits within the 48 KB limit of static shared memory',
 			'The row stores become 2-way conflicts',
 			'Every index needs an extra XOR',
 		],
 		answer: 0,
-		why: 'Row `r` starts at word `33r`, which is a multiple of 4 only when `r` is. The XOR is the cost of swizzling, not padding.',
+		why: 'Row `r` starts at word `33r`, which is a multiple of 4 only when `r` is, so three rows in four are misaligned. The XOR is the cost of swizzling, not padding.',
 	},
 	{
 		q: 'With the XOR swizzle `tile[r][c ^ r]`, in which column of row 3 is element `(3, 5)` stored?',
@@ -142,7 +142,7 @@ export default [
 	{
 		q: 'In the plain `row_sums` kernel, which shared memory access is the 32-way conflict?',
 		options: [
-			'The row-by-row stores that fill the tile',
+			'The row-by-row stores that fill the tile before the sum loop',
 			'The global loads that read the matrix',
 			'The final store of each row sum',
 			'Step `j` of the sum loop, where lane `i` reads `tile[i][j]`',
@@ -154,18 +154,18 @@ export default [
 		q: 'The plain kernel shows about 32 times as many shared load wavefronts as the padded one. Why is it not 32 times slower?',
 		options: [
 			'Nsight Compute counts wavefronts that never execute',
-			'The kernel also reads global memory and adds numbers, and other warps run while one waits',
+			'Shared loads are only part of the work, and other warps run while one waits',
 			'The hardware pads the tile automatically at run time',
-			'Only the first column read conflicts; later ones are cached',
+			'Only the first column read conflicts; the later column reads are served from cache',
 		],
 		answer: 1,
-		why: 'Shared loads are only part of the work, and the SM hides some of the wait by switching to other warps. The chapter quotes no speedup for that reason.',
+		why: 'The kernel also reads global memory and adds numbers, and the SM hides some of the wait by switching to other warps. The chapter quotes no speedup for that reason.',
 	},
 	{
 		q: 'Where in Nsight Compute do you find shared memory requests, wavefronts and bank conflicts?',
 		options: [
 			'The Launch Statistics section',
-			'The Occupancy section',
+			'The Occupancy section, next to the shared memory limits',
 			'The shared memory table of Memory Workload Analysis',
 			'The Speed Of Light section',
 		],
