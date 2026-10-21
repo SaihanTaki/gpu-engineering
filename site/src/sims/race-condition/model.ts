@@ -100,7 +100,7 @@ export interface ThreadState {
 export interface State {
 	count: number;
 	threads: ThreadState[];
-	/** Updates lost so far. */
+	/** Updates lost so far: finished updates minus count. A later stale store can bring one back. */
 	lost: number;
 	/** The instruction that ran to reach this step, with count before and after it. */
 	event: (Event & { before: number; after: number; lost: number }) | null;
@@ -118,6 +118,7 @@ export function stateAt(c: Config, step: number): State {
 		lossySteps: [],
 	};
 	const k = Math.max(0, Math.min(step, events.length));
+	let finished = 0;
 	for (let i = 0; i < k; i++) {
 		const e = events[i];
 		const th = s.threads[e.thread];
@@ -137,8 +138,9 @@ export function stateAt(c: Config, step: number): State {
 			th.reg = s.count;
 			s.count += 1;
 		}
+		if (e.op === 'store' || e.op === 'atomic') finished++;
 		th.done++;
-		s.lost += lost;
+		s.lost = finished - s.count;
 		if (lost > 0) s.lossySteps.push(i);
 		s.event = { ...e, before, after: s.count, lost };
 	}
@@ -163,7 +165,9 @@ export function describe(c: Config, step: number): string {
 		what =
 			e.lost > 0
 				? `${t} stores r = ${e.after} over count = ${e.before}. It loaded ${s.threads[e.thread].loaded}, before ${plural(e.lost, 'other update')} landed, so ${e.lost === 1 ? 'that update is' : 'those updates are'} lost.`
-				: `${t} stores r = ${e.after}. count goes from ${e.before} to ${e.after}.`;
+				: e.lost < 0
+					? `${t} stores r = ${e.after} over count = ${e.before}. It loaded ${s.threads[e.thread].loaded}, after a stale store lowered count, so ${plural(-e.lost, 'lost update')} ${e.lost === -1 ? 'is' : 'are'} counted again.`
+					: `${t} stores r = ${e.after}. count goes from ${e.before} to ${e.after}.`;
 	else what = `${t} runs atomicAdd: it reads ${e.before}, writes ${e.after}, and no other thread can run in between.`;
 	let tail = '';
 	if (step === last && isComplete(c)) {

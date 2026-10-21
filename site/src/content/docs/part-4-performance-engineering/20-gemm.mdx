@@ -3,8 +3,6 @@ title: 20. Matrix multiply, step by step
 description: Six CUDA kernels for C = A * B, from one thread per output to float4 loads and autotuned tiles, with the FLOPs per byte of each step, why it is faster, and what limits it next.
 sidebar:
   order: 20
-banner:
-  content: Draft chapter. If something is wrong or unclear, use the edit link at the bottom of the page.
 ---
 
 import { Code } from '@astrojs/starlight/components';
@@ -200,7 +198,8 @@ for (int j = 0; j < TN; j += 4)
 
 Per warp and `k`, the A loads drop from {fmt(8 * p2d('A'))} passes to 2 and the B loads from
 {fmt(8 * p2d('B'))} to 8. The cost is a constraint: `K`, `N`, `TM`, `TN`, `BK` and `BN` must be
-multiples of 4, so a `float4` is never half inside the matrix.
+multiples of 4, so a `float4` is never half inside the matrix. The pass counts for 16-byte
+loads are the model's assumption (see below); NVIDIA documents no rule for them.
 
 - **FLOPs per byte:** {num(at('vec').intensity)}, unchanged.
 - **Model estimate:** {est('vec')} GFLOP/s, the {a100.name}'s FP32 peak: the model now
@@ -222,8 +221,8 @@ The simulation's version searches {tuned.searched} tile shapes against the model
 best estimate, because the model puts all of them at the compute roof. That is the point of
 measuring: the model cannot tell those apart, and a real GPU can. Boehm reports that on an
 A100 his autotuner picked `BM = BN = 64, BK = 16, TM = TN = 4`, smaller than the tiles he
-had chosen for his A6000, and 6% faster on the A100 than his `BM = BN = 128, BK = 16,
-TM = TN = 8`.
+had chosen for his A6000. On the A100 his `BM = BN = 128, BK = 16, TM = TN = 8` was 6%
+slower than that pick.
 
 ## Seven steps in one simulation
 
@@ -264,7 +263,8 @@ The estimate is the lowest of three ceilings, each in GFLOP/s:
 - **Shared memory:** FLOPs per output divided by the shared memory passes per output, times
   one pass per clock on every SM. A pass serves up to 32 distinct 4-byte words in 32
   different banks; a warp's load costs the most distinct words any bank must serve, and
-  at least distinct words / 32 (so a 16-byte load of 128 words is at least 4 passes). The
+  at least distinct words / 32 (so a 16-byte load of 128 words is at least 4 passes). That
+  rule for 16-byte loads is the model's assumption; NVIDIA does not document one. The
   passes of warp 0 at `k = 0` stand for every warp. The SM clock is derived from the peak
   FP32 rate, as in chapter 11.
 
@@ -318,12 +318,14 @@ On a GPU, from `kernels/ch20-gemm`:
 make -C cuda run
 python numba/gemm.py
 python triton/gemm.py
-ncu --set full -k regex:gemm_ ./cuda/gemm 4096 4096 4096
+ncu --set full --kernel-id ::regex:gemm_:1 ./cuda/gemm 4096 4096 4096
 ```
 
 Each program prints GFLOP/s for every kernel, `2 x M x N x K` over the mean time. The CUDA
 one ends with cuBLAS, the reference; the Triton one compares with `torch.matmul` with TF32
-turned off. Things to look for:
+turned off. The program launches each kernel 11 times, and `--kernel-id ::regex:gemm_:1`
+limits Nsight Compute to the first launch of each kernel name: the six steps, with the
+`vec 128x128x8 8x8` shape standing for all of `gemm_vec`. Things to look for:
 
 - The order of the steps, and where your GPU's numbers stop following the model.
 - In Nsight Compute, the memory throughput of `gemm_naive` against `gemm_coalesced`, and

@@ -3,8 +3,6 @@ title: 21. Streams and concurrency
 description: The default stream and its implicit synchronization, pinned memory and cudaMemcpyAsync, overlapping copies with kernels by chunking over streams, copy engines, events, and CUDA Graphs.
 sidebar:
   order: 21
-banner:
-  content: Draft chapter. If something is wrong or unclear, use the edit link at the bottom of the page.
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -50,7 +48,9 @@ Graphs cut the launch cost of a pipeline you run many times.
 
 ## Streams and the default stream
 
-A **stream** is a queue of GPU work. The programming guide defines it as "a
+A **stream** is a queue of GPU work. The
+[CUDA 12.9 programming guide](https://docs.nvidia.com/cuda/archive/12.9.2/cuda-c-programming-guide/index.html#streams)
+defines it as "a
 sequence of commands (possibly issued by different host threads) that execute
 in order". Work in one stream runs in the order it was issued. Work in
 different streams has no order between them: it "may execute ... out of order

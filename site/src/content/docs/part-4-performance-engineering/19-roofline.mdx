@@ -3,8 +3,6 @@ title: 19. The roofline model
 description: Arithmetic intensity, the ridge point between memory-bound and compute-bound kernels, and where the kernels from earlier chapters sit against the peak FLOPs and bandwidth of a T4, A100 and H100.
 sidebar:
   order: 19
-banner:
-  content: Draft chapter. If something is wrong or unclear, use the edit link at the bottom of the page.
 ---
 
 import Roofline from '@sims/roofline/Roofline.astro';
@@ -65,7 +63,10 @@ you read a datasheet yourself:
   GPUs it runs at the same rate as FP16 accumulation; on some consumer GPUs
   it does not.
 - **T4 FP64.** The T4 datasheet gives no FP64 figure. The Turing whitepaper
-  says FP64 runs at 1/32 of the FP32 rate, which gives the 0.25 here.
+  says FP64 runs at 1/32 of the FP32 rate, which gives the 0.25 here. The
+  [CUDA Programming Guide](https://docs.nvidia.com/cuda/archive/12.9.2/cuda-c-programming-guide/index.html#arithmetic-instructions)
+  agrees: on compute capability 7.5 an SM produces 2 FP64 results per clock
+  against 64 FP32 results.
 
 One FMA (fused multiply-add) counts as 2 FLOPs, and every FP32 peak assumes
 every lane issues an FMA every clock. A kernel that does only adds can reach
@@ -182,8 +183,8 @@ Counting FP32 data, with every byte going to DRAM once, on the {a100.name}:
 
 What the table says:
 
-- **Every kernel from Parts 1 to 3 is memory-bound,** at least {fmtNum(ridge(a100, 'fp32') / 0.25)} times left of the ridge. For
-  these kernels the right measure of quality is not FLOPS but bandwidth: how
+- **Every streaming kernel from Parts 1 to 3 is memory-bound,** at least {fmtNum(ridge(a100, 'fp32') / 0.25)} times left of the ridge; the chapter 7 tiled GEMM sits just left of it. For
+  the streaming kernels the right measure of quality is not FLOPS but bandwidth: how
   close the bytes per second come to {fmtNum(a100.memoryGbPerS)} GB/s.
 - **Fusion moves a kernel right.** Chapter 12's fused kernel does the same 3
   operations with 12 bytes instead of 28, so its intensity and its

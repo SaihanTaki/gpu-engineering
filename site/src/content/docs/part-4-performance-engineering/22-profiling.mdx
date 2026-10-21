@@ -3,8 +3,6 @@ title: 22. Profiling and debugging
 description: How to find out whether a kernel is wrong and where its time goes. Nsight Systems for the timeline, Nsight Compute for one kernel, compute-sanitizer for races and bad memory accesses, and the Numba simulator and Triton interpreter for debugging without a GPU.
 sidebar:
   order: 22
-banner:
-  content: Draft chapter. If something is wrong or unclear, use the edit link at the bottom of the page.
 ---
 
 import { Code } from '@astrojs/starlight/components';
@@ -291,13 +289,14 @@ Compute.
 ### Nsight Compute: one kernel
 
 ```sh
-ncu --kernel-name regex:count_ --launch-count 1 --set full -o count ./bugs race
+ncu --kernel-name regex:count_ --launch-count 2 --set full -o count ./bugs race
 ncu --import count.ncu-rep --page details
 ```
 
 `--kernel-name` (short `-k`) picks the kernels to profile; `regex:` makes it a
 partial match, so `regex:count_` matches both counters. `--launch-count`
-(`-c`) stops after that many matching launches. `--set full` collects every
+(`-c`) stops after that many matching launches; `./bugs race` launches
+`count_racy` once and then `count_atomic` once, so 2 covers both. `--set full` collects every
 section; with no `--set`, `--section` or `--metrics`, `ncu` collects the
 smaller `basic` set. `--import` with `--page details` prints a saved report.
 
@@ -514,7 +513,7 @@ low memory throughput mean too few loads in flight to hide the latency.
 
 - [Compute Sanitizer documentation](https://docs.nvidia.com/compute-sanitizer/ComputeSanitizer/index.html): the four tools, their options, and walk-throughs of `memcheck_demo`, `block_error`, `warp_error`, `memset_error` and two synccheck samples. The samples are in the [compute-sanitizer-samples](https://github.com/NVIDIA/compute-sanitizer-samples) repository.
 - [Nsight Compute Profiling Guide](https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html): [sets and sections](https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#sections-and-rules), [replay](https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#replay) and [overhead](https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#overhead), [metrics structure](https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#metrics-structure), [warp stall reasons](https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#warp-stall-reasons) and [roofline charts](https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#roofline-charts).
-- [Nsight Compute CLI](https://docs.nvidia.com/nsight-compute/NsightComputeCli/index.html), for every `ncu` option, and the [nvprof metric mapping table](https://docs.nvidia.com/nsight-compute/2025.1/NsightComputeCli/index.html#metric-comparison) in the 2025.1 version of the same guide.
+- [Nsight Compute CLI](https://docs.nvidia.com/nsight-compute/NsightComputeCli/index.html), for every `ncu` option, and the [nvprof metric mapping table](https://archive.docs.nvidia.com/nsight-compute/2025.1/NsightComputeCli/index.html#metric-comparison) in the 2025.1 version of the same guide.
 - [Nsight Systems User Guide](https://docs.nvidia.com/nsight-systems/UserGuide/index.html): the `nsys profile` options, `nsys stats` reports, and NVTX.
 - [CUDA C++ Programming Guide 12.4: error checking](https://docs.nvidia.com/cuda/archive/12.4.0/cuda-c-programming-guide/index.html#error-checking) and [synchronization functions](https://docs.nvidia.com/cuda/archive/12.4.0/cuda-c-programming-guide/index.html#synchronization-functions), for when `__syncthreads()` in conditional code is allowed.
 - [Triton: debugging](https://triton-lang.org/main/programming-guide/chapter-3/debugging.html), on the interpreter, `device_print`, `pdb` and running Triton under `compute-sanitizer`.
