@@ -4,9 +4,9 @@ export default [
 	{
 		q: "Boehm's naive kernel ran at 309 GFLOP/s and cuBLAS at 23,250 GFLOP/s on the same GPU. According to the chapter, what mainly differs between them?",
 		options: [
-			'cuBLAS does fewer FLOPs per output',
-			'How many bytes each moves per multiply-add, and from which memory',
-			'cuBLAS uses FP16 internally',
+			'cuBLAS does fewer FLOPs per output, using a faster algorithm',
+			'The bytes moved per multiply-add, and from which memory',
+			'cuBLAS uses FP16 internally and rounds back to FP32',
 			'cuBLAS runs on more SMs',
 		],
 		answer: 1,
@@ -27,13 +27,13 @@ export default [
 	{
 		q: 'Why does step 2 swap the roles of `threadIdx.x` and `threadIdx.y`?',
 		options: [
-			'So a warp covers 32 consecutive columns of one row, making A a broadcast and B 32 neighbouring words',
-			'So each thread computes more than one output',
-			'So A can be stored transposed in shared memory',
+			'So a warp covers 32 consecutive columns of one row',
+			'So each thread computes more than one output of C',
+			'So the tile of A can be stored transposed in shared memory',
 			'So the block fits the 1,024 thread limit',
 		],
 		answer: 0,
-		why: 'Consecutive lanes then read consecutive B words, 4 sectors, and one shared A word, 1 sector. That is 5 sectors instead of 33 per 32 multiply-adds.',
+		why: 'A becomes a broadcast and B 32 neighbouring words. Consecutive lanes read consecutive B words, 4 sectors, and one shared A word, 1 sector. That is 5 sectors instead of 33 per 32 multiply-adds.',
 	},
 	{
 		q: 'In step 2, `B[k * N + col]` is 32 neighbouring 4-byte words. How many 32-byte sectors is that?',
@@ -68,7 +68,7 @@ export default [
 	{
 		q: 'In the simulation, step 3 with BM and BN set to 64 is flagged. Why?',
 		options: [
-			'It needs 4,096 threads per block, four times the limit',
+			'It needs 4,096 threads per block',
 			'Its tiles exceed 48 KB of shared memory',
 			'Its intensity is above the ridge',
 			'It causes 64-way bank conflicts',
@@ -103,19 +103,19 @@ export default [
 	{
 		q: 'Step 6 switches global loads to `float4`. What does that change for DRAM?',
 		options: [
-			'The DRAM bytes stay the same; there are 4 times fewer load instructions',
+			'The DRAM bytes stay the same',
 			'The DRAM bytes drop to a quarter',
 			'The intensity quadruples',
 			'Uncoalesced loads become coalesced',
 		],
 		answer: 0,
-		why: 'A 16-byte load moves the same data as four 4-byte loads, so the FLOPs per byte are unchanged. The gain is fewer instructions.',
+		why: 'A 16-byte load moves the same data as four 4-byte loads, so the FLOPs per byte are unchanged. The gain is 4 times fewer load instructions.',
 	},
 	{
 		q: 'Why does step 6 store the tile of A transposed in shared memory, as `AsT[k * BM + m]`?',
 		options: [
-			'To make the global loads of A coalesced',
-			"So a thread's `TM` values of A are contiguous and can be read 4 at a time",
+			'To make the global loads of A from DRAM coalesced',
+			"So a thread's `TM` values of A are contiguous",
 			'To halve the shared memory the tile needs',
 			'So the second `__syncthreads()` can be removed',
 		],
@@ -128,7 +128,7 @@ export default [
 			'M must be a power of two',
 			'BM must equal BN',
 			'`K`, `N`, `TM`, `TN`, `BK` and `BN` must be multiples of 4',
-			'The block must have exactly 256 threads',
+			'The block must have exactly 256 threads so every thread loads one `float4`',
 		],
 		answer: 2,
 		why: 'A `float4` must never be half inside the matrix, so every dimension it walks along must be a multiple of 4.',
@@ -136,10 +136,10 @@ export default [
 	{
 		q: 'The model puts step 6 at the A100 FP32 peak. According to the chapter, what limits real kernels at that point?',
 		options: [
-			'DRAM bandwidth',
+			'DRAM bandwidth, since every tile of A and B comes from global memory',
 			'Shared memory bank conflicts',
 			'The 48 KB static shared memory limit',
-			'Instruction issue, latency hiding and how blocks map onto the 108 SMs',
+			'Instruction issue, latency hiding and mapping blocks onto 108 SMs',
 		],
 		answer: 3,
 		why: 'These are things the model does not count. Its DRAM and shared ceilings for step 6 are both well above 19,500 GFLOP/s.',
@@ -147,13 +147,13 @@ export default [
 	{
 		q: 'The simulation autotuner finds 303 tile shapes within 1% of the best estimate on the A100. Why so many?',
 		options: [
-			'The model puts all of them at the compute roof, so it cannot tell them apart',
-			'They all use the same number of registers',
+			'The model puts all of them at the compute roof',
+			'They all use the same number of registers per thread',
 			'The search only tried 303 shapes',
 			'The A100 has 303 possible block sizes',
 		],
 		answer: 0,
-		why: 'Once DRAM and shared ceilings are above the peak, the estimate is the peak. Only timing on a real GPU separates them, which is what an autotuner does.',
+		why: 'The model cannot tell them apart. Once DRAM and shared ceilings are above the peak, the estimate is the peak. Only timing on a real GPU separates them, which is what an autotuner does.',
 	},
 	{
 		q: "Which tile did Boehm's autotuner pick on an A100?",
@@ -169,19 +169,19 @@ export default [
 	{
 		q: 'In step 5 of the simulation, you set BK to 64. What does the chapter say happens?',
 		options: [
-			'The tile needs 64 KB of shared memory, more than the 48 KB a static `__shared__` array may use',
-			'The block exceeds 1,024 threads',
-			'B loads become broadcasts',
-			'The intensity drops below the ridge',
+			'The tiles need more than 48 KB of shared memory',
+			'The block exceeds the limit of 1,024 threads per block',
+			'B loads become broadcasts within each warp',
+			'The intensity drops below the A100 FP32 ridge',
 		],
 		answer: 0,
-		why: 'BK sets the depth of both tiles in shared memory. With 128 x 128 tiles, BK = 64 is 2 x 128 x 64 x 4 bytes, 64 KB.',
+		why: 'BK sets the depth of both tiles in shared memory. With 128 x 128 tiles, BK = 64 is 2 x 128 x 64 x 4 bytes, 64 KB, more than the 48 KB a static `__shared__` array may use.',
 	},
 	{
 		q: 'How does the model count DRAM bytes, and what does that mean for steps 1 and 2?',
 		options: [
-			'Only the first read of each element; the estimates are optimistic',
-			'Every requested 32-byte sector with no caching; the estimates are pessimistic for steps 1 and 2',
+			'Only the first read of each element, as with a perfect cache; the estimates are optimistic',
+			'Every requested 32-byte sector, with no caching; the estimates are pessimistic',
 			'Bytes measured by Nsight Compute; the estimates are exact',
 			'Only bytes written; reads are ignored',
 		],
@@ -194,31 +194,31 @@ export default [
 			'It transposes A and B on the GPU first',
 			'It passes A first with both transpose flags set',
 			'It copies the matrices to the host and back',
-			'It passes B first, since row-major C is column-major C^T = B^T * A^T',
+			'It passes B first and A second',
 		],
 		answer: 3,
-		why: 'The same memory read as column-major is the transpose. Computing B^T * A^T in column-major gives C^T, which is row-major C.',
+		why: 'Row-major C is column-major C^T = B^T * A^T. The same memory read as column-major is the transpose. Computing B^T * A^T in column-major gives C^T, which is row-major C.',
 	},
 	{
 		q: 'Why can the tests check every GEMM result exactly against a CPU loop?',
 		options: [
-			'The inputs are whole numbers from -4 to 4, so every float32 sum is exact in any order',
+			'The inputs are whole numbers from -4 to 4',
 			'All kernels add in the same order as the CPU',
 			'The comparison rounds to 3 decimal places',
 			'The GPU kernels use FP64 accumulators',
 		],
 		answer: 0,
-		why: 'Small integer products and their sums stay exactly representable in float32, so the order of additions cannot change the result.',
+		why: 'Small integer products and their sums stay exactly representable in float32, so every float32 sum is exact in any order of additions.',
 	},
 	{
 		q: 'In the Triton kernel, what does `input_precision="ieee"` do?',
 		options: [
 			'Turns on bounds checks',
-			'Keeps the multiply in full float32 on the FP32 units instead of the default TF32 on tensor cores',
-			'Enables FP16 accumulation',
+			'Keeps the multiply in full float32 instead of TF32',
+			'Enables FP16 accumulation on the tensor cores for speed',
 			'Disables autotuning',
 		],
 		answer: 1,
-		why: 'On recent GPUs `tl.dot` defaults to TF32 on tensor cores, which is chapter 23. The chapter compares against FP32 kernels, so it keeps IEEE float32.',
+		why: 'On recent GPUs `tl.dot` defaults to TF32 on tensor cores, which is chapter 23. `ieee` keeps it on the FP32 units. The chapter compares against FP32 kernels, so it keeps IEEE float32.',
 	},
 ] satisfies Question[];
