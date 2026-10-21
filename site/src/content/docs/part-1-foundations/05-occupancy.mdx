@@ -14,6 +14,8 @@ import cuda from '@kernels/ch05-occupancy/cuda/occupancy.cu?raw';
 import numba from '@kernels/ch05-occupancy/numba/occupancy.py?raw';
 import triton from '@kernels/ch05-occupancy/triton/occupancy.py?raw';
 import calc from '@kernels/ch05-occupancy/occupancy_calc.py?raw';
+import Quiz from '@components/Quiz.astro';
+import quiz from '@quizzes/05-occupancy';
 
 export const a100 = gpuById('a100');
 export const t4 = gpuById('t4');
@@ -369,6 +371,10 @@ gives {e5b.blocks}. The naive 65,536 / 1,536 = 42.7 ignores the allocation
 unit and would suggest 42.
 
 </details>
+
+## Quiz
+
+<Quiz questions={quiz} />
 
 ## Further reading
 

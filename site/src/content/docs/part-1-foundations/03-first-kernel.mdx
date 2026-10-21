@@ -13,6 +13,8 @@ import { arrayBytes, blocksFor, DEFAULT_N, fmt, fmtBytes, fmtTime, pct, THREADS_
 import cuda from '@kernels/ch03-vector-add/cuda/vector_add.cu?raw';
 import numba from '@kernels/ch03-vector-add/numba/vector_add.py?raw';
 import triton from '@kernels/ch03-vector-add/triton/vector_add.py?raw';
+import Quiz from '@components/Quiz.astro';
+import quiz from '@quizzes/03-first-kernel';
 
 export const a100 = gpuById('a100');
 export const h100 = gpuById('h100');
@@ -327,6 +329,10 @@ Version B: `a` and `b` in, `e` out, 3 arrays, at least
 versions; only the copies change.
 
 </details>
+
+## Quiz
+
+<Quiz questions={quiz} />
 
 ## Further reading
 

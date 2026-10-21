@@ -1,0 +1,196 @@
+import type { Question } from './types';
+
+export default [
+	{
+		q: 'In a 1D block, which warp and lane hold the thread with `threadIdx.x = 70`?',
+		options: ['Warp 1, lane 38', 'Warp 3, lane 6', 'Warp 2, lane 6', 'Warp 2, lane 7'],
+		answer: 2,
+		why: '`70 / 32 = 2` and `70 % 32 = 6`. Warp 0 holds threads 0 to 31, warp 1 holds 32 to 63, warp 2 starts at 64.',
+	},
+	{
+		q: 'A block is `dim3(32, 8)`. Which warp and lane hold the thread with `threadIdx.x = 5`, `threadIdx.y = 3`?',
+		options: ['Warp 3, lane 5', 'Warp 5, lane 3', 'Warp 0, lane 5', 'Warp 2, lane 37'],
+		answer: 0,
+		why: 'The thread ID is `x + y * Dx = 5 + 3 * 32 = 101`, so warp 3, lane 5. Swapping x and y gives the wrong ID, because rows are laid end to end.',
+	},
+	{
+		q: 'A block has 200 threads. How many warps does it get, and how many lanes of the last warp are empty?',
+		options: ['6 warps, no empty lanes', '7 warps, 8 empty lanes', '6 warps, 8 empty lanes', '7 warps, 24 empty lanes'],
+		answer: 3,
+		why: '`ceil(200 / 32) = 7`. The last warp holds threads 192 to 199, so 8 lanes are used and 24 are empty.',
+	},
+	{
+		q: 'What sets SIMT apart from SIMD vector hardware, according to the chapter?',
+		options: [
+			'SIMT has no shared instruction stream, so each lane fetches its own instructions',
+			'You write the code for one scalar thread, and each thread has its own registers and can branch on its own data',
+			'SIMT executes 64 threads per instruction instead of 32',
+			'SIMT lanes can each run a different instruction in the same cycle',
+		],
+		answer: 1,
+		why: 'A warp still issues one instruction at a time for all its lanes. The difference is the programming model: scalar code per thread, with the hardware working out which lanes take part.',
+	},
+	{
+		q: 'Why does switching from one warp to another cost nothing?',
+		options: [
+			'The scheduler saves the old warp\'s registers to L1 in a single cycle',
+			'Every resident warp keeps its program counters and registers on chip for its whole lifetime',
+			'Only one warp is resident per partition, so there is nothing to switch',
+			'Warps are switched only at block boundaries',
+		],
+		answer: 1,
+		why: 'Nothing is saved or restored, because every resident warp already has its own state on chip. That is what lets the scheduler pick a different warp every cycle.',
+	},
+	{
+		q: 'When is a warp not ready to issue?',
+		options: [
+			'When its next instruction needs a value that has not arrived yet, most often the result of a load',
+			'When another warp of the same block is issuing',
+			'When it has issued an instruction in the previous cycle',
+			'When some of its lanes are masked off',
+		],
+		answer: 0,
+		why: 'The scheduler picks a warp whose next instruction is ready. Waiting on a load is the common reason one is not.',
+	},
+	{
+		q: 'In the warp scheduler simulation, the load latency is 30 cycles and each load is followed by 4 arithmetic instructions. How many warps keep the scheduler busy?',
+		options: ['6', '8', '7', '5'],
+		answer: 2,
+		why: '`(L + A) / (1 + A) = 34 / 5 = 6.8`, rounded up to 7. Rounding down to 6 leaves idle cycles in every round.',
+	},
+	{
+		q: 'With the simulation\'s default of four warps, what do you see?',
+		options: [
+			'The scheduler issues an instruction every cycle',
+			'Each warp waits for the previous warp\'s load to return before issuing its own',
+			'Idle cycles appear only at the very end of the run',
+			'All four warps issue their loads in the first four cycles, then the scheduler idles until the first result returns',
+		],
+		answer: 3,
+		why: 'Four warps are too few for `L = 20` and `A = 2`, which need 8. Loads from different warps do not wait for each other; the scheduler simply runs out of ready warps.',
+	},
+	{
+		q: 'A kernel does fewer arithmetic instructions per load. What does that do to the number of warps needed to hide memory latency?',
+		options: [
+			'More warps are needed',
+			'Fewer warps are needed',
+			'The number does not change',
+			'Latency can no longer be hidden at any warp count',
+		],
+		answer: 0,
+		why: 'Each warp then has less work to cover the wait, so more warps must take turns. The Programming Guide states the same trend for real hardware.',
+	},
+	{
+		q: 'A Tesla T4 SM holds at most 32 warps. How many is that per warp scheduler?',
+		options: ['4', '16', '8', '32'],
+		answer: 2,
+		why: 'The SM has four partitions, each with one scheduler, so 32 / 4 = 8. The A100 holds 64 warps, 16 per scheduler.',
+	},
+	{
+		q: 'Some lanes of a warp take the `if` and the others take the `else`. What does the warp do?',
+		options: [
+			'It splits into two warps that run in parallel',
+			'It runs each path one after the other, with the lanes not on the current path masked off',
+			'It runs only the path most lanes take',
+			'It stalls until all lanes agree',
+		],
+		answer: 1,
+		why: 'A warp issues one instruction at a time, so it has to run both paths. Masked lanes do nothing for those instructions, and the lanes reconverge afterwards.',
+	},
+	{
+		q: 'A block of 64 threads branches on `threadIdx.x < 32`. Which warps diverge?',
+		options: ['Both warps', 'Only warp 0', 'Only warp 1', 'Neither warp'],
+		answer: 3,
+		why: 'Every lane of warp 0 takes one path and every lane of warp 1 takes the other. Different warps taking different paths is free.',
+	},
+	{
+		q: 'Which condition is always uniform within a warp?',
+		options: ['`threadIdx.x % 2 == 0`', '`threadIdx.x < 48`', '`x[threadIdx.x] > 0` on random data', '`threadIdx.x / 32 == 1`'],
+		answer: 3,
+		why: '`threadIdx.x / 32` is the warp index, the same for all 32 lanes. A cut at 48 falls in the middle of warp 1.',
+	},
+	{
+		q: 'A block of 128 threads branches on `threadIdx.x % 4 == 0`. The `if` body is 8 instructions and the `else` body is 4. How many instructions do the block\'s warps issue for the two bodies?',
+		options: ['48', '24', '32', '96'],
+		answer: 0,
+		why: 'All 4 warps contain lanes on both sides, so each runs both bodies: 4 x (8 + 4) = 48. Counting only the path each thread takes misses that the warp issues both.',
+	},
+	{
+		q: 'What does independent thread scheduling, from compute capability 7.0 on, change?',
+		options: [
+			'Divergent branches no longer cost anything',
+			'Threads of a warp are guaranteed to run in lockstep',
+			'Each thread has its own program counter, but the lanes on the other path still sit masked off',
+			'Each lane can execute a different instruction in the same cycle',
+		],
+		answer: 2,
+		why: 'Diverged paths can now be interleaved, but execution is still SIMT: in any cycle the active lanes run the same instruction. Lockstep is no longer guaranteed at all.',
+	},
+	{
+		q: 'Lanes of one warp exchange data through shared memory. On compute capability 7.0 and later, what must go between the write and the read?',
+		options: [
+			'Nothing, since lanes of a warp always run in step',
+			'A `__syncwarp()`',
+			'A `cudaDeviceSynchronize()`',
+			'A second kernel launch',
+		],
+		answer: 1,
+		why: 'Lanes are no longer guaranteed to be in step, so code that relies on it is a race. `__syncwarp()` does for a warp what `__syncthreads()` does for a block.',
+	},
+	{
+		q: 'The chapter\'s CUDA code calls `__ballot_sync(0xffffffff, ...)`. What does `0xffffffff` say?',
+		options: [
+			'Return the result only to lane 0',
+			'All 32 lanes of the warp take part',
+			'Use the full 32-bit value of the predicate',
+			'Wait for all warps of the block',
+		],
+		answer: 1,
+		why: 'The mask names the lanes that must take part. It is safe here because every lane, even past the end of the array, reaches the call.',
+	},
+	{
+		q: 'How do you write a per-element choice between two values in Triton?',
+		options: [
+			'An `if` on a block of conditions',
+			'A branch on `tl.program_id(0)`',
+			'A loop over the lanes of the program',
+			'`tl.where(cond, a, b)`, which computes both and keeps one per element',
+		],
+		answer: 3,
+		why: 'An `if` in a Triton kernel needs one scalar condition for the whole program, and the compiler rejects a block of them. `tl.where` is the same idea as `branch_free`.',
+	},
+	{
+		q: 'Why does the Numba version use float32 constants such as `TWO` and `HALF`?',
+		options: [
+			'A bare `2` or `0.5` would make the arithmetic float64',
+			'Numba cannot compile integer literals in a kernel',
+			'The CUDA simulator needs named constants',
+			'They let the compiler remove the branch',
+		],
+		answer: 0,
+		why: 'With a bare `2` or `0.5`, the arithmetic would run in float64. The named float32 constants keep it in float32.',
+	},
+	{
+		q: 'Which Nsight Compute section shows why warps were not ready to issue, such as Stall Long Scoreboard?',
+		options: ['Scheduler Statistics', 'Source Counters', 'Warp State Statistics', 'Occupancy'],
+		answer: 2,
+		why: 'Warp State Statistics breaks down stall reasons. Scheduler Statistics reports active and eligible warps per scheduler, but not why they stalled.',
+	},
+	{
+		q: 'The `branchy` kernel runs on data sorted so that all negative values come first. At most how many warps diverge?',
+		options: ['All of them', 'About half of them', 'Exactly 32', 'One'],
+		answer: 3,
+		why: 'After sorting, every warp holds values of one sign except the warp where the sign changes. On random data nearly every warp diverges.',
+	},
+	{
+		q: 'How do you check whether the compiler already turned a short `if/else` into predicated instructions?',
+		options: [
+			'Read the SASS with `cuobjdump -sass`',
+			'Run `nvcc --resource-usage`',
+			'Run `ncu --section Occupancy`',
+			'Run the kernel under `compute-sanitizer`',
+		],
+		answer: 0,
+		why: 'The SASS shows the instructions the GPU actually runs, branches or predicated ones. Resource usage only lists registers and memory.',
+	},
+] satisfies Question[];
