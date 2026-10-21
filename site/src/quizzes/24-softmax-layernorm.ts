@@ -1,0 +1,196 @@
+import type { Question } from './types';
+
+export default [
+	{
+		q: 'You feed `[1.0, 2.0, 1000.0]` in float32 to `exp(x) / sum(exp(x))`. What comes out?',
+		options: ['`[0, 0, 1]`', '`[0, 0, nan]`', '`[nan, nan, nan]`', '`[0, 0, inf]`'],
+		answer: 1,
+		why: '`exp(1000)` overflows to `inf`, so the sum is `inf`. The first two outputs are finite over `inf`, which is 0, and the last is `inf / inf`, which is NaN. The correct answer is `[0, 0, 1]`.',
+	},
+	{
+		q: 'Above roughly which score does `exp` overflow in FP16?',
+		options: ['About 88.7', 'About 65.5', 'About 11.1', 'About 5.5'],
+		answer: 2,
+		why: 'The largest finite FP16 value is 65504 and ln(65504) is about 11.09, so a score of 12 is enough. About 88.7 is the float32 limit, ln(3.4 x 10^38).',
+	},
+	{
+		q: 'In the safe softmax you subtract m = max x_j before `exp`. Why can the denominator no longer be zero?',
+		options: [
+			'The largest term is exactly e^0 = 1, so the sum is at least 1',
+			'Subtracting the max makes every exponent positive',
+			'Underflow is impossible once the max is removed',
+			'The division is done in double precision',
+		],
+		answer: 0,
+		why: 'Every exponent is at most 0, so nothing overflows, and the max element gives exactly 1. Small terms can still underflow to 0, but only when they are negligible next to that 1.',
+	},
+	{
+		q: 'How many memory accesses per element does the three-pass safe softmax make, and how many does the naive softmax make?',
+		options: ['3 and 2', '4 and 2', '3 and 3', '4 and 3'],
+		answer: 3,
+		why: 'Safe: read for the max, read for the sum, read again and write, so 3 reads and 1 write. Naive: 2 reads and 1 write. Milakov and Gimelshein count it the same way.',
+	},
+	{
+		q: 'The online softmax has running m = 2 and d = 3. The next element is x = 2. What are the new m and d?',
+		options: ['m = 2, d = 4', 'm = 2, d = 3', 'm = 2, d = 3e^0 + e^2', 'm = 4, d = 4'],
+		answer: 0,
+		why: 'The max does not change, so the rescale factor is e^0 = 1 and the new term is e^(2 - 2) = 1. d becomes 3 + 1 = 4.',
+	},
+	{
+		q: 'In the online update `d_new = d * e^(m - m_new) + e^(x - m_new)`, what does the factor `e^(m - m_new)` do?',
+		options: [
+			'It normalizes d so the outputs add up to 1',
+			'It shifts every earlier term to the new max at once, without reading them again',
+			'It protects x from underflow',
+			'It cancels the rounding error of the previous step',
+		],
+		answer: 1,
+		why: 'd was a sum of terms shifted by the old max. Multiplying by e^(m - m_new) moves all of them to the new max in one step. If the max did not change, the factor is 1.',
+	},
+	{
+		q: 'How many reads and writes per element does the online softmax kernel make in total?',
+		options: ['1 read and 1 write', '3 reads and 1 write', '2 reads and 1 write', '2 reads and 2 writes'],
+		answer: 2,
+		why: 'One pass finds m and d together, one more pass reads the row again to write the output. That is the naive traffic with the safe softmax\'s stability.',
+	},
+	{
+		q: 'What property of the merge operator ⊕ lets threads combine their [m, d] pairs in a tree in any grouping?',
+		options: [
+			'It is linear in d',
+			'It never overflows',
+			'It has an inverse',
+			'It is associative and commutative',
+		],
+		answer: 3,
+		why: 'A parallel reduction may combine partial results in any order and grouping. The paper shows ⊕ is associative and commutative, so that is safe. One element x is the pair [x, 1].',
+	},
+	{
+		q: 'Merge the chunk summaries [1, 2.0] and [3, 1.0].',
+		options: ['[3, 3.0]', '[3, 2.0e^2 + 1.0]', '[3, 2.0e^-2 + 1.0]', '[1, 2.0 + 1.0e^2]'],
+		answer: 2,
+		why: 'The larger max is 3. The first sum is rescaled by e^(1 - 3) = e^-2 and the second by e^0 = 1. Adding the sums without rescaling, or rescaling the wrong way, gives the other options.',
+	},
+	{
+		q: 'In the simulation, online mode, the increasing input (0 to 12), chunk 4. What rescale factor does each chunk after the first apply?',
+		options: ['e^-0.8, about 0.449', 'e^-3.2, about 0.041', '1, because the max is known from the start', 'e^-12, about 6 x 10^-6'],
+		answer: 1,
+		why: 'The max grows by 3.2 from one chunk to the next, so the old sum is multiplied by e^-3.2 each time. The final m is 12.',
+	},
+	{
+		q: 'In the simulation you change the chunk size for the online method. What stays the same?',
+		options: [
+			'The result and the number of reads per element',
+			'The number of steps and the rescale factors',
+			'Only the result; the reads per element change',
+			'Nothing; a smaller chunk is more accurate',
+		],
+		answer: 0,
+		why: 'Chunk size changes the number of steps and the rescale factors, but online always reads each element twice and the result is the same.',
+	},
+	{
+		q: 'With one block per row and 256 threads, how does the block merge its threads\' [m, d] pairs?',
+		options: [
+			'An atomic max and an atomic add in global memory',
+			'One thread loops over all 256 pairs in shared memory',
+			'Five `__shfl_down_sync` steps, then lane 0 broadcasts',
+			'Five `__shfl_xor_sync` steps per warp, one pair per warp through shared memory, then five more steps',
+		],
+		answer: 3,
+		why: 'It is the reduction from chapter 13 with ⊕ in place of `+`. Using `xor` instead of `down` leaves the result in every lane, so no broadcast is needed.',
+	},
+	{
+		q: 'A softmax over a 65536 x 64 matrix. Which mapping does the chapter recommend?',
+		options: [
+			'One 256-thread block per row',
+			'Several blocks per row with a second merge step',
+			'One warp per row, four rows per 256-thread block',
+			'One thread per row with no reduction',
+		],
+		answer: 2,
+		why: 'With one block per row, 192 of 256 threads load nothing. One warp covers 64 elements with two per lane, merges with five shuffles, and needs no shared memory or `__syncthreads()`. That is `softmax_online_warp`.',
+	},
+	{
+		q: 'For a 4096 x 1024 float32 matrix, how much traffic does `softmax_safe` move if every access goes to DRAM?',
+		options: ['16 MiB', '48 MiB', '32 MiB', '64 MiB'],
+		answer: 3,
+		why: 'The matrix is 4096 x 1024 x 4 bytes = 16 MiB. Three reads and one write make 4 x 16 = 64 MiB. 48 MiB is the online kernel and 32 MiB the Triton kernel.',
+	},
+	{
+		q: 'Why might `softmax_safe` and `softmax_online` run at nearly the same speed on a real GPU?',
+		options: [
+			'The compiler merges the passes automatically',
+			'A 4 KB row read again by the same block is likely to hit in L1 or L2',
+			'`expf` dominates the time in both kernels',
+			'Both kernels are compute-bound',
+		],
+		answer: 1,
+		why: 'The extra reads may never reach DRAM if the row stays in cache. The chapter suggests longer rows, such as `./cuda/softmax 512 65536`, to see whether the gap opens.',
+	},
+	{
+		q: 'For values near 1000 with a spread of 1, why does the one-pass formula σ^2 = E[x^2] - E[x]^2 lose accuracy in float32?',
+		options: [
+			'E[x^2] overflows float32',
+			'Welford\'s algorithm is needed to compute E[x]',
+			'It subtracts two nearly equal numbers near 10^6 with about 7 decimal digits of precision',
+			'The population variance needs a division by n - 1',
+		],
+		answer: 2,
+		why: 'Both terms are about 10^6 and agree in most of their digits, so the subtraction leaves few correct digits. The test `test_naive_variance_cancels` shows more than 1% error. 10^6 is far from overflow.',
+	},
+	{
+		q: 'In Welford\'s update, which line comes right after `mean ← mean + δ / n`?',
+		options: ['`M2 ← M2 + δ · (x - mean)`', '`M2 ← M2 + δ^2`', '`M2 ← M2 + (x - mean)^2 / n`', '`M2 ← M2 + δ · n`'],
+		answer: 0,
+		why: 'M2 grows by δ, the deviation from the old mean, times the deviation from the new mean. Using δ^2 alone ignores the mean update.',
+	},
+	{
+		q: 'Thread A has seen 2 and 4: n = 2, mean = 3, M2 = 2. Thread B has seen 6: n = 1, mean = 6, M2 = 0. What M2 does the Chan, Golub and LeVeque merge give?',
+		options: ['2', '11', '8', '6'],
+		answer: 2,
+		why: 'δ = 6 - 3 = 3, n = 3. M2 = 2 + 0 + 3^2 x 2 x 1 / 3 = 2 + 6 = 8. The merged mean is 4, and the deviations of 2, 4 and 6 from 4 square to 4 + 0 + 4 = 8, which checks out.',
+	},
+	{
+		q: 'Besides the output, what does the fused LayerNorm kernel write for each row, and why?',
+		options: [
+			'μ and 1/√(σ^2 + ε), because the backward pass needs them',
+			'γ and β, so the optimizer can update them',
+			'The row max and sum, for the following softmax',
+			'Nothing else; the backward pass recomputes everything from x',
+		],
+		answer: 0,
+		why: 'It stores two floats per row, the mean and the reciprocal standard deviation, for the backward pass.',
+	},
+	{
+		q: 'Why does the Triton LayerNorm kernel use the two-pass variance instead of Welford?',
+		options: [
+			'Triton has no division',
+			'Welford cannot be merged across threads',
+			'The two-pass formula needs fewer registers',
+			'The row is already in registers, so the second pass costs no memory traffic, and two-pass is accurate',
+		],
+		answer: 3,
+		why: 'With the row on chip, reading it twice is free, and the two-pass variance does not suffer the cancellation of E[x^2] - E[x]^2.',
+	},
+	{
+		q: 'In the Triton `softmax_kernel`, padding past the row length is loaded as `-inf`. Why that value?',
+		options: [
+			'It marks the end of the row for `tl.sum`',
+			'It never wins `tl.max`, and its `exp` is 0',
+			'It makes the padding positions output NaN, which are discarded',
+			'It is the only value `tl.load` accepts as `other`',
+		],
+		answer: 1,
+		why: 'BLOCK is the next power of two at or above the row length, so some lanes are padding. `-inf` cannot be the max and adds e^-inf = 0 to the sum.',
+	},
+	{
+		q: 'Which `ncu` metric would you compare between `softmax_safe` and `softmax_online` to see whether the extra pass reaches DRAM?',
+		options: [
+			'`sm__warps_active.avg`',
+			'`gpu__time_duration.sum` only',
+			'`dram__bytes_read.sum`',
+			'`l1tex__t_sectors.sum`',
+		],
+		answer: 2,
+		why: 'If the rows stay in cache between passes, both kernels read about the matrix size from DRAM. Time alone does not say why they differ.',
+	},
+] satisfies Question[];

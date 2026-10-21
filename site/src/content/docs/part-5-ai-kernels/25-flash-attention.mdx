@@ -12,6 +12,8 @@ import { ridge, fmtNum } from '@sims/roofline/model';
 import { attentionFlops, flashTraffic, fmt, fmtBytes, naiveTraffic, onChip, REAL_CONFIG } from '@sims/attention-tiler/model';
 import cuda from '@kernels/ch25-flash-attention/cuda/flash_attention_kernels.cuh?raw';
 import triton from '@kernels/ch25-flash-attention/triton/flash_attention.py?raw';
+import Quiz from '@components/Quiz.astro';
+import quiz from '@quizzes/25-flash-attention';
 
 export const a100 = gpuById('a100');
 export const h100 = gpuById('h100');
@@ -438,6 +440,10 @@ The course ends here. These topics build on it and are out of scope:
   covers the Tensor Memory Accelerator and thread block clusters; the
   [PTX ISA](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html)
   documents the asynchronous `wgmma` instructions.
+
+## Quiz
+
+<Quiz questions={quiz} />
 
 ## Further reading
 

@@ -12,6 +12,8 @@ import { expLimit, fmt, inputs, mergePair, steps, welford, welfordMerge } from '
 import cuda from '@kernels/ch24-softmax/cuda/softmax_kernels.cuh?raw';
 import numba from '@kernels/ch24-softmax/numba/softmax.py?raw';
 import triton from '@kernels/ch24-softmax/triton/softmax.py?raw';
+import Quiz from '@components/Quiz.astro';
+import quiz from '@quizzes/24-softmax-layernorm';
 
 export const a100 = gpuById('a100');
 export const lim32 = expLimit('fp32').toFixed(2);
@@ -403,6 +405,10 @@ elements, needs no shared memory and no barrier, and puts four rows in each
 256-thread block. That is `softmax_online_warp`.
 
 </details>
+
+## Quiz
+
+<Quiz questions={quiz} />
 
 ## Further reading
 
