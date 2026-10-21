@@ -94,6 +94,17 @@ suite('final count', () => {
 		expect(s.lost).toBe(2);
 		expect(s.lossySteps).toEqual([8]);
 	});
+
+	it('a stale store can bring a lost update back', () => {
+		// 0 loads; 1 and 2 finish; 3 loads 2; 0 stores 1 over 2; 3 stores 3.
+		const c = cfg(4, 'plain', 'custom', [0, 1, 1, 1, 2, 2, 2, 3, 0, 0, 3, 3]);
+		expect(stateAt(c, 10).lost).toBe(2);
+		const s = final(c);
+		expect(s.count).toBe(3);
+		expect(s.lost).toBe(1);
+		expect(s.event?.lost).toBe(-1);
+		expect(describe(c, lastStep(c))).toContain('1 lost update is counted again');
+	});
 });
 
 suite('state', () => {
