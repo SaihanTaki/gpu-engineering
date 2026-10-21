@@ -1,0 +1,190 @@
+import type { Question } from './types';
+
+export default [
+	{
+		q: 'Why is having each of a million threads `atomicAdd` its element into one float a poor way to sum an array?',
+		options: [
+			'`atomicAdd` does not work on floats',
+			'All threads update the same address, and the memory system applies those updates one at a time',
+			'Atomics bypass the L2 cache and read DRAM twice',
+			'The result is always wrong because of rounding',
+		],
+		answer: 1,
+		why: 'Every update hits one address, so they serialize. One atomic per block, as in `reduce_atomic`, keeps contention small.',
+	},
+	{
+		q: 'A tree reduction sums 256 values. How many adds and how many levels does it take?',
+		options: ['255 adds in 8 levels', '128 adds in 8 levels', '255 adds in 255 levels', '256 adds in 16 levels'],
+		answer: 0,
+		why: 'The work is still `n - 1` adds, the same as a loop, but each of the log2 256 = 8 levels is one parallel step.',
+	},
+	{
+		q: 'With interleaved addressing, `if (tid % (2 * s) == 0)`, which threads add at stride 1?',
+		options: [
+			'Threads 0 to `blockDim.x / 2 - 1`',
+			'Only thread 0',
+			'Threads 0, 2, 4 and so on, half the lanes of every warp',
+			'Every thread',
+		],
+		answer: 2,
+		why: 'At stride 1 the multiples of 2 work. They are spread across the whole block, so every warp issues the add for half its lanes.',
+	},
+	{
+		q: 'What is the main cost of interleaved addressing?',
+		options: [
+			'Every warp still issues the add while only a few of its lanes do work, at every level',
+			'It needs twice as many barriers as sequential addressing',
+			'It reads global memory with a stride',
+			'It produces the wrong sum for non power of two blocks only',
+		],
+		answer: 0,
+		why: 'The working threads are scattered, so divergence wastes most lanes of each warp. The barrier count is the same as sequential addressing.',
+	},
+	{
+		q: 'A block of 256 threads runs sequential addressing. How many warps issue the add at the first level?',
+		options: ['8', '1', '2', '4'],
+		answer: 3,
+		why: 'At stride 128, threads 0 to 127 work: warps 0 to 3 with all 32 lanes. Warps 4 to 7 skip the add.',
+	},
+	{
+		q: 'In the simulation, how many warp instructions does interleaved addressing take for a block of 64 threads?',
+		options: ['6', '11', '12', '63'],
+		answer: 1,
+		why: 'At strides 1 to 16 both warps issue, 5 x 2 = 10, and at stride 32 only warp 0 does: 11. Sequential addressing needs 6.',
+	},
+	{
+		q: 'Harris\'s second kernel computes `index = 2 * s * tid`. It packs the working threads, so what problem does it introduce?',
+		options: [
+			'Divergence at every level',
+			'Uncoalesced global loads',
+			'A race between levels',
+			'Bank conflicts, because neighbouring lanes touch shared words `2s` apart',
+		],
+		answer: 3,
+		why: 'Packing removes the divergence, but words `2s` apart fall into the same banks. Sequential addressing has lanes read consecutive words.',
+	},
+	{
+		q: 'Why is sequential addressing free of bank conflicts?',
+		options: [
+			'Consecutive `tid` read consecutive words, `sdata[tid + s]`',
+			'It uses only half the threads',
+			'It keeps every partial sum in a register',
+			'The stride is always a multiple of 32',
+		],
+		answer: 0,
+		why: '32 consecutive 4-byte words fall in 32 different banks, so each warp request is served in one pass.',
+	},
+	{
+		q: 'In `v += __shfl_down_sync(FULL_MASK, v, offset)`, what does a lane near the top of the warp get when no lane is `offset` places above it?',
+		options: ['Zero', 'The value of lane 0', 'Its own value', 'An undefined value that corrupts lane 0'],
+		answer: 2,
+		why: 'Such lanes compute numbers nobody reads. It costs nothing because the warp issues one instruction either way.',
+	},
+	{
+		q: 'After shuffles with offsets 16, 8, 4, 2 and 1, which lane holds the sum of the warp\'s 32 values?',
+		options: ['Lane 31', 'Lane 0', 'Every lane', 'Lane 16'],
+		answer: 1,
+		why: 'Shuffle down moves values toward lower lanes, so the full sum ends in lane 0.',
+	},
+	{
+		q: 'Why does the shuffle part of the last warp need no `__syncthreads()`?',
+		options: [
+			'The `_sync` in the name means the hardware brings the lanes in `mask` together for the exchange',
+			'Shuffles go through shared memory, which is always coherent',
+			'The 32 lanes of a warp are guaranteed to run in lockstep on every GPU',
+			'Only lane 0 writes the result',
+		],
+		answer: 0,
+		why: 'The mask names the lanes that take part and the hardware synchronizes them. Lockstep is not guaranteed since Volta.',
+	},
+	{
+		q: 'Harris\'s slides unroll the last warp through a `volatile` shared array. Why is that unsafe on current GPUs?',
+		options: [
+			'`volatile` is not allowed on shared memory',
+			'Since Volta, lanes of a warp can be scheduled independently, so implicit warp-synchronous code can break',
+			'Shared memory has fewer banks since Volta',
+			'It causes 32-way bank conflicts',
+		],
+		answer: 1,
+		why: 'The trick relied on the lanes executing in lockstep. NVIDIA calls implicit warp-synchronous code unsafe; shuffles state what they need.',
+	},
+	{
+		q: 'For 256 threads, how many loop barriers does the shuffle final warp version use, against plain sequential addressing?',
+		options: ['8 against 8', '0 against 8', '5 against 8', '2 against 8'],
+		answer: 3,
+		why: 'The last six levels run inside warp 0 and pay no barrier each. It also cuts divergent warp instructions from 5 to 0.',
+	},
+	{
+		q: 'On a real GPU, what limits a good reduction kernel?',
+		options: ['The number of adds', 'Shared memory bank conflicts', 'The number of barriers', 'Memory bandwidth'],
+		answer: 3,
+		why: 'It does one add per element loaded, so the global loads take most of the time. The fixes keep the add tree out of the way of the loads.',
+	},
+	{
+		q: 'With 256 threads per block and one element per thread, how many launches does a multi-pass reduction of `2^24` elements need?',
+		options: ['2', '4', '3', '5'],
+		answer: 2,
+		why: '`2^24 / 256 = 65,536` partial sums, then 256, then 1: three launches.',
+	},
+	{
+		q: 'Why do Harris\'s last kernel and `reduce_atomic` have each thread add many elements in a register first, with a grid-stride loop?',
+		options: [
+			'So that the kernel needs no shared memory at all',
+			'So that the result is the same on every run',
+			'So that the tree runs once per block over values that each summarize many elements',
+			'Because a grid may have at most one block per SM',
+		],
+		answer: 2,
+		why: 'One element per thread spends a whole tree on every 256 elements. The register loop does the cheap part and leaves the tree for a few blocks per SM. It does not fix the order of the atomics.',
+	},
+	{
+		q: '`reduce_atomic` returns slightly different sums on different runs of the same float input. Why?',
+		options: [
+			'`atomicAdd` sometimes drops an update',
+			'Each block computes its own sum in a random order',
+			'The grid-stride loop skips elements at random',
+			'Blocks reach the `atomicAdd` in a changing order, and float addition is not associative',
+		],
+		answer: 3,
+		why: 'Each block sum has a fixed order, but the order of the block sums changes with scheduling, and `(a + b) + c` can round differently from `(a + c) + b`.',
+	},
+	{
+		q: 'Why do the chapter\'s tests use whole numbers from -3 to 3 as input?',
+		options: [
+			'While every partial sum stays below `2^24`, float32 represents them exactly, so every order gives the same answer',
+			'Small numbers make the kernels faster',
+			'The kernels only support integers',
+			'Negative numbers trigger the bounds check',
+		],
+		answer: 0,
+		why: 'Exact partial sums remove rounding, so the tree, the atomics and a CPU loop all agree bit for bit.',
+	},
+	{
+		q: 'Triton\'s `tl.sum` over a block of 1024 elements with 4 warps compiled to a plan like `reduce_atomic`. How many elements does each thread add in registers first?',
+		options: ['4', '8', '32', '1024'],
+		answer: 1,
+		why: '4 warps are 128 threads, and 1024 / 128 = 8. Then each warp reduces with five `shfl.sync.bfly` and two more shuffles combine the four warp sums.',
+	},
+	{
+		q: 'In Nsight Compute, what does `smsp__thread_inst_executed.sum` divided by `smsp__inst_executed.sum` measure?',
+		options: [
+			'Instructions per clock',
+			'The fraction of time spent at barriers',
+			'The average number of lanes doing work per instruction',
+			'Bank conflicts per request',
+		],
+		answer: 2,
+		why: 'Thread instructions over warp instructions is the average active lanes, the measured version of the sim\'s lane slot percentage.',
+	},
+	{
+		q: 'Without a GPU, why are the two Numba shuffle kernels only compiled to PTX and not run?',
+		options: [
+			'Numba cannot compile shuffles',
+			'The kernels need more than 1024 threads',
+			'Numba\'s simulator has no `shfl_down_sync`',
+			'PTX cannot be run on a CPU by any tool',
+		],
+		answer: 2,
+		why: 'The Numba CUDA simulator runs kernels on the CPU but lacks the shuffle function, so those kernels are checked by compiling only.',
+	},
+] satisfies Question[];

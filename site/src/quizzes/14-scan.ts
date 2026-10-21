@@ -1,0 +1,196 @@
+import type { Question } from './types';
+
+export default [
+	{
+		q: 'What is the exclusive scan of 3, 1, 7, 0, 4, 1, 6, 3?',
+		options: [
+			'3, 4, 11, 11, 15, 16, 22, 25',
+			'0, 3, 1, 7, 0, 4, 1, 6',
+			'0, 3, 4, 11, 11, 15, 16, 22',
+			'3, 4, 7, 11, 4, 5, 6, 25',
+		],
+		answer: 2,
+		why: 'Position `i` holds the sum of everything before `in[i]`, with 0 first. The first option is the inclusive scan, and the last is the array after Blelloch\'s up-sweep.',
+	},
+	{
+		q: 'A loop sets `out[i] = sum;` and then `sum += in[i];`. Which scan does it compute?',
+		options: ['Inclusive', 'A reduction', 'Exclusive', 'A reverse scan'],
+		answer: 2,
+		why: '`out[i]` is written before `in[i]` is added, so it excludes `in[i]`. Offsets for writing variable-length output are exclusive scans.',
+	},
+	{
+		q: 'Which operator cannot be used for a parallel scan?',
+		options: ['Maximum', 'Bitwise OR', 'Minimum', 'Subtraction'],
+		answer: 3,
+		why: 'A parallel scan regroups the operations, which needs associativity. `(a - b) - c` is not `a - (b - c)`.',
+	},
+	{
+		q: 'What makes a parallel scan algorithm work-efficient?',
+		options: [
+			'Its total number of operations grows in proportion to `n`, like the sequential loop',
+			'It finishes in `log2(n)` steps',
+			'It uses no barriers',
+			'Every thread does the same number of additions',
+		],
+		answer: 0,
+		why: 'Work-efficiency is about total work. Few steps is a separate cost: Hillis-Steele has the fewest steps and is not work-efficient.',
+	},
+	{
+		q: 'After step `k` of Hillis-Steele, what does element `i` hold?',
+		options: [
+			'The sum of elements `0` to `k`',
+			'The sum of `2k` elements ending at `i`',
+			'The sum of the `2^k` elements ending at `i`, or all of them if there are fewer',
+			'The value of element `i - 2^k`',
+		],
+		answer: 2,
+		why: 'The distance doubles each step, so the window doubles too. After `log2(n)` steps it covers everything up to `i`.',
+	},
+	{
+		q: 'In the Hillis-Steele loop, why is there a `__syncthreads()` between reading `left` and adding it?',
+		options: [
+			'To make the global loads coalesced',
+			'Every thread must read its left neighbour before any thread overwrites it in the same step',
+			'To avoid bank conflicts on `s[tid - offset]`',
+			'To let thread 0 write the block total',
+		],
+		answer: 1,
+		why: 'Without it, a thread can read a value that already belongs to the next step and count elements twice. GPU Gems 3 uses a second buffer instead.',
+	},
+	{
+		q: 'How many additions does Hillis-Steele do for 16 elements?',
+		options: ['15', '30', '64', '49'],
+		answer: 3,
+		why: '`n log2(n) - (n - 1)` = 64 - 15 = 49. Blelloch needs 30 and the loop 15.',
+	},
+	{
+		q: 'How many additions and levels does Blelloch need for 1,024 elements?',
+		options: ['2,046 additions in 20 levels', '1,023 additions in 10 levels', '9,217 additions in 10 levels', '2,046 additions in 10 levels'],
+		answer: 0,
+		why: 'The up-sweep and down-sweep each do `n - 1` additions, so `2(n - 1)` = 2,046, in `2 log2(n)` = 20 levels. 9,217 in 10 is Hillis-Steele.',
+	},
+	{
+		q: 'After Blelloch\'s up-sweep, what happens in the clear step?',
+		options: [
+			'Every element except the last is set to 0',
+			'The total is saved and the last element is set to 0',
+			'The first element is set to 0 and the rest shift right',
+			'The shared array is zeroed for the next tile',
+		],
+		answer: 1,
+		why: 'The last element holds the total after the up-sweep. Setting it to 0 starts the down-sweep, which passes left sums down the tree.',
+	},
+	{
+		q: 'In the down-sweep, what does each node give its children?',
+		options: [
+			'Both children take the node\'s value',
+			'The left child gets the node plus the right child; the right child keeps its value',
+			'The left child takes the node\'s value; the right child gets the node\'s value plus the old left child',
+			'The right child takes the node\'s value; the left child is cleared',
+		],
+		answer: 2,
+		why: 'The value passed to a node is the sum of everything left of its subtree. The right child also needs the left subtree\'s sum, the old left child.',
+	},
+	{
+		q: 'The Hillis-Steele kernel computes an inclusive scan. How does it produce the exclusive one?',
+		options: [
+			'It runs the loop a second time',
+			'It subtracts the total from every element',
+			'It runs Blelloch\'s down-sweep afterward',
+			'It shifts the inclusive result right by one place',
+		],
+		answer: 3,
+		why: 'Exclusive is inclusive shifted by one, with no additions. Blelloch goes the other way: shift left and append the saved total.',
+	},
+	{
+		q: 'Why do warp-level scans typically use the Hillis-Steele construction?',
+		options: [
+			'Lanes that skip an addition free nothing for other work, so its 5 steps are what count',
+			'It does fewer additions than Blelloch',
+			'It is the only scan that works with integers',
+			'It needs no associativity',
+		],
+		answer: 0,
+		why: 'The 32 lanes execute together, so extra additions on idle lanes cost nothing. With shuffles it needs no shared memory either.',
+	},
+	{
+		q: 'At about a million elements, how many times as many additions as Blelloch does Hillis-Steele do?',
+		options: ['2', '9.5', '20', '1'],
+		answer: 1,
+		why: '19,922,945 against 2,097,150 is about 9.5. When there are more additions than threads, runtime follows the work.',
+	},
+	{
+		q: 'In `scan_blelloch`, `a = offset * (2 * tid + 1) - 1`. At the up-sweep level with `offset = 2`, what is the conflict degree of warp 0\'s read of `s[a]`?',
+		options: ['2-way', '8-way', '4-way', '16-way'],
+		answer: 2,
+		why: '`a = 4t + 1`, so lanes are 4 words apart and the bank takes 8 values, each for 4 lanes. It is 2-way at `offset = 1` and doubles each level.',
+	},
+	{
+		q: 'A scan-then-add over `n` elements moves about how much memory traffic, against `2n` for a sequential scan?',
+		options: ['About `n`', 'About `2n`', 'About `3n`', 'About `4n`'],
+		answer: 3,
+		why: 'Phase 1 reads the input and writes the output, and phase 3 reads and writes the output again. Reduce-then-scan gets it to about `3n`.',
+	},
+	{
+		q: 'With 512 elements per Blelloch tile, how many kernels does a scan-then-add of `2^18` elements launch?',
+		options: ['2', '3', '4', '5'],
+		answer: 1,
+		why: '`2^18 / 512 = 512` tiles, whose 512 block sums fit in one tile. That is two scan kernels and one add kernel.',
+	},
+	{
+		q: 'What limits a chained scan, where block `b` waits for block `b - 1` to publish its inclusive prefix?',
+		options: [
+			'Each link in the chain is a round trip through global memory',
+			'Bank conflicts in each tile',
+			'It does twice the additions of Blelloch',
+			'It needs `4n` traffic',
+		],
+		answer: 0,
+		why: 'It is one pass, but the blocks form a chain. In the report\'s example with 600-cycle latency, the chain alone caps it near 490 million elements per second.',
+	},
+	{
+		q: 'During decoupled look-back, a block reads a predecessor descriptor with flag A. What does it do?',
+		options: [
+			'Waits until the flag becomes P',
+			'Adds that tile\'s prefix and stops',
+			'Adds that tile\'s aggregate to its running sum and keeps looking back',
+			'Restarts its look-back from the nearest tile',
+		],
+		answer: 2,
+		why: 'A means only the tile\'s own sum is available. On P it adds the prefix and stops, and on X it waits.',
+	},
+	{
+		q: 'Why does decoupled look-back hand out tile numbers from an atomically incremented counter instead of using `blockIdx.x`?',
+		options: [
+			'`blockIdx.x` can change while a block runs',
+			'CUDA does not promise to run blocks in index order, and a block may only wait on tiles whose blocks have started',
+			'The counter makes the float result deterministic',
+			'Atomics are faster than reading `blockIdx.x`',
+		],
+		answer: 1,
+		why: 'This guarantees forward progress. It does not make floats deterministic: how far a block looks back depends on timing.',
+	},
+	{
+		q: 'In look-back, what must a block do so that others never see its flag before its value?',
+		options: [
+			'Call `__syncthreads()` before the write',
+			'Write the flag first, then the value',
+			'Use shared memory for the descriptor',
+			'Put a memory fence between writing the fields and the flag, or pack them into one word',
+		],
+		answer: 3,
+		why: 'The descriptor fields must be visible before the flag. A barrier only orders threads inside one block.',
+	},
+	{
+		q: 'The Triton kernel computes the exclusive scan as `inclusive - x`. For which operator would that fail?',
+		options: ['Integer addition', 'Maximum', 'Addition of small integers', '`tl.cumsum`'],
+		answer: 1,
+		why: 'Maximum has no inverse, so you cannot undo it by subtracting. For integer addition the subtraction is exact.',
+	},
+	{
+		q: 'The programs report effective bandwidth counting `2n` elements of traffic. If a scan-then-add is limited by memory, about what fraction of the GPU memory bandwidth should it show?',
+		options: ['About half', 'About all of it', 'About a quarter', 'About twice'],
+		answer: 0,
+		why: 'It moves about `4n` but the report counts `2n`, so it reaches about half. That is an estimate from the traffic count, not a measurement.',
+	},
+] satisfies Question[];

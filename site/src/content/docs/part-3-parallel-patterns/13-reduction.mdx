@@ -8,6 +8,8 @@ sidebar:
 import { Code } from '@astrojs/starlight/components';
 import ReductionTree from '@sims/reduction-tree/ReductionTree.astro';
 import CodeTabs from '@components/CodeTabs.astro';
+import Quiz from '@components/Quiz.astro';
+import quiz from '@quizzes/13-reduction';
 import { efficiency, lastStep, steps, totalsAt, warpLanes } from '@sims/reduction-tree/model';
 import cuda from '@kernels/ch13-reduction/cuda/reduce_kernels.cuh?raw';
 import numba from '@kernels/ch13-reduction/numba/reduce.py?raw';
@@ -340,6 +342,10 @@ second stage has 8 values and needs 3, so 5 + 3 = 8. You can check by
 passing `options={"num_warps": 8}` to `triton.compile` in `generate.py`.
 
 </details>
+
+## Quiz
+
+<Quiz questions={quiz} />
 
 ## Further reading
 
