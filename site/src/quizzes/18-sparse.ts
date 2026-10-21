@@ -27,10 +27,10 @@ export default [
 	{
 		q: 'ELL arrays are stored column-major, slot `k` of row `r` at `k * rows + r`. Why?',
 		options: [
-			'It makes the padding slots take no memory',
-			'It lets one warp read one row',
+			'It makes the padding slots take no memory in the arrays',
+			'It lets one warp read one whole row in a single transaction',
 			'It is the layout cuSPARSE requires',
-			'At loop iteration `k`, neighbouring threads then read neighbouring entries',
+			'At step `k`, neighbouring threads read neighbouring entries',
 		],
 		answer: 3,
 		why: 'Each thread owns a row and iterates over its slots. With column-major storage, slot `k` of consecutive rows is contiguous, so a warp\'s reads coalesce.',
@@ -55,9 +55,9 @@ export default [
 	{
 		q: 'Why is SpMV limited by memory rather than compute?',
 		options: [
-			'Each nonzero gives 2 flops for at least 8 bytes of `col` and `val`, at most 0.25 flops per byte',
+			'Each nonzero gives 2 flops for at least 8 bytes read',
 			'GPUs cannot do multiply-add on sparse data',
-			'The kernel needs atomics for every nonzero',
+			'The kernel needs an atomic add on `y` for every nonzero',
 			'The vector `x` does not fit in shared memory',
 		],
 		answer: 0,
@@ -78,7 +78,7 @@ export default [
 		q: 'Why are the CSR scalar kernel\'s reads of `val` scattered?',
 		options: [
 			'`val` is stored column-major',
-			'Each thread reads `val` through `x[col[i]]`',
+			'Each thread reads `val` indirectly through `x[col[i]]`, a gather',
 			'At iteration `j`, neighbouring threads read entries a whole row apart',
 			'The kernel reads `val` backwards',
 		],
@@ -122,10 +122,10 @@ export default [
 	{
 		q: 'What does the HYB format store?',
 		options: [
-			'CSR for short rows and ELL for long ones',
+			'CSR for the short rows and ELL for the few long rows',
 			'COO sorted by column',
-			'Dense blocks for each nonzero tile',
-			'ELL for the first `K` entries of each row and COO for the rest of the long rows',
+			'Dense blocks for each nonzero tile, plus CSR for the rest',
+			'ELL for the first `K` entries per row, COO for the rest',
 		],
 		answer: 3,
 		why: 'Bell and Garland set `K` to a typical row length, so ELL has little padding and the few long rows spill their extra entries into COO.',
@@ -133,9 +133,9 @@ export default [
 	{
 		q: 'What does a COO SpMV kernel with one thread per nonzero need to write `y`?',
 		options: [
-			'Atomic adds or a segmented reduction, because several threads add into the same `y[r]`',
+			'Atomic adds or a segmented reduction across threads',
 			'A warp shuffle per row',
-			'Nothing extra, each thread owns its own `y[r]`',
+			'Nothing extra, since each thread owns its own `y[r]`',
 			'A sort of `y` after the kernel',
 		],
 		answer: 0,
@@ -170,8 +170,8 @@ export default [
 		options: [
 			'Equal for all three kernels',
 			'High for `spmv_ell`, low for `spmv_csr_scalar`',
-			'High for `spmv_csr_scalar`, lower for `spmv_ell` and `spmv_csr_vector`',
-			'High for `spmv_csr_vector`, because of the shuffles',
+			'High for `spmv_csr_scalar`, lower for the other two',
+			'High for `spmv_csr_vector`, because of its warp shuffles',
 		],
 		answer: 2,
 		why: 'The scalar kernel\'s threads read entries a row apart, so each request touches many sectors. ELL and CSR vector have neighbouring lanes read neighbouring entries.',

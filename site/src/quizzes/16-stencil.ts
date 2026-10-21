@@ -10,10 +10,10 @@ export default [
 	{
 		q: 'What makes a convolution a special case of a stencil?',
 		options: [
-			'Its pattern is a full window with a weight for every position',
-			'It only uses the four nearest neighbours',
+			'It uses a full window with a weight for every position',
+			'It only uses the four nearest neighbours of each pixel',
 			'It reads each input pixel exactly once',
-			'It must flip the filter before applying it',
+			'It must flip the filter before applying it to the image',
 		],
 		answer: 0,
 		why: 'A stencil is any fixed pattern around each position; a convolution uses the whole `(2R + 1) x (2R + 1)` window, each position with its own weight. The four neighbour heat update is a stencil but not a full window.',
@@ -56,9 +56,9 @@ export default [
 	{
 		q: 'Why does a stencil kernel want the largest tile its block size and shared memory allow?',
 		options: [
-			'Larger tiles avoid the need for `__syncthreads()`',
+			'Larger tiles avoid the need for `__syncthreads()` after the load',
 			'Larger tiles remove bank conflicts',
-			'The halo grows with the tile border while the outputs grow with its area, so the overhead shrinks',
+			'The halo grows with the border, the outputs with the area',
 			'Larger tiles let the filter fit in constant memory',
 		],
 		answer: 2,
@@ -67,7 +67,7 @@ export default [
 	{
 		q: 'This chapter\'s tiled kernel uses `T²` threads to fill `(T + 2R)²` shared memory slots. How?',
 		options: [
-			'It launches `(T + 2R)²` threads and lets the halo threads idle during compute',
+			'It launches `(T + 2R)²` threads and lets the halo threads idle during the compute loop',
 			'It reads halo pixels straight from global memory and hopes they are cached',
 			'Each thread loads exactly one slot and the halo is left as zero',
 			'Thread `t` fills slots `t`, `t + T²`, `t + 2T²` and so on until the tile is full',
@@ -84,9 +84,9 @@ export default [
 	{
 		q: 'In the simulation\'s corner position with `T = 16, R = 2`, the tiled kernel issues 324 global loads instead of 400. Why fewer?',
 		options: [
-			'The padding slots outside the image get `0.0f` and are not loaded',
-			'Corner blocks use a smaller tile',
-			'The cache serves the halo at the corner',
+			'Padding slots outside the image get `0.0f` without a load',
+			'Corner blocks use a smaller tile that fits inside the image',
+			'The cache serves the overlapping halo loads at the corner',
 			'Corner threads skip the compute loop',
 		],
 		answer: 0,
@@ -112,7 +112,7 @@ export default [
 	{
 		q: 'Why does the filter suit `__constant__` memory?',
 		options: [
-			'In each step all threads of a warp read the same weight, so the constant cache serves them with one broadcast',
+			'All threads of a warp read the same weight, which the cache broadcasts',
 			'Constant memory is faster than shared memory for any access',
 			'Each thread reads a different weight, which constant memory spreads across banks',
 			'Constant memory is the only memory that survives between launches',
@@ -122,7 +122,7 @@ export default [
 	},
 	{
 		q: 'Which call copies the filter into constant memory from the host?',
-		options: ['`cudaMemcpy`', '`cudaMalloc`', '`cuda.shared.array`', '`cudaMemcpyToSymbol`'],
+		options: ['`cudaMemcpy`', '`cudaMalloc`', '`cudaMemcpyFromSymbol`', '`cudaMemcpyToSymbol`'],
 		answer: 3,
 		why: '`cudaMemcpyToSymbol(c_filter, h_filter, bytes)` writes to the `__constant__` variable. In Numba the equivalent is `cuda.const.array_like`, which fixes the values when the kernel compiles.',
 	},
@@ -130,9 +130,9 @@ export default [
 		q: 'The tiled kernel returns early for threads outside the image. Where must that return sit?',
 		options: [
 			'Before the load loop, so idle threads do no work',
-			'After the single `__syncthreads()`, so every thread loads its slots and reaches the barrier',
+			'After the `__syncthreads()`, so every thread loads and reaches the barrier',
 			'Inside the compute loop',
-			'Anywhere, because `__syncthreads()` ignores exited threads',
+			'Anywhere, because `__syncthreads()` ignores threads that have already exited',
 		],
 		answer: 1,
 		why: 'Threads past the image still have shared memory slots to fill, assigned by thread number, and the barrier must be reached by the whole block. Returning before the load loop leaves slots unfilled and can hang.',
@@ -141,9 +141,9 @@ export default [
 		q: 'In the generated PTX, Numba\'s `conv2d_tiled` has no `ld.const` while CUDA\'s has 25. Why?',
 		options: [
 			'Numba puts the filter in shared memory',
-			'Numba does not support constant memory',
+			'Numba does not support constant memory, so the filter stays in global memory',
 			'Numba reads the filter from global memory instead',
-			'`cuda.const.array_like` fixes the values at compile time, and NVVM wrote all 25 weights into the instructions as immediates',
+			'The values are fixed at compile time and written into the instructions',
 		],
 		answer: 3,
 		why: 'The unrolled loop let NVVM see every weight, so no load was needed. In the naive Numba kernel the outer loop stayed a loop, so its weights are still read with `ld.const`.',
@@ -174,9 +174,9 @@ export default [
 		q: 'A variant stores a per-pixel weight `g[y * w + x]` in `__constant__` memory. What happens to its reads?',
 		options: [
 			'They are broadcast like the filter reads',
-			'The 32 threads of a warp read 32 different addresses, so the read splits into 32 requests',
+			'The 32 threads read 32 addresses, so the read splits into 32 requests',
 			'They become shared memory reads',
-			'They are coalesced into one 128 byte transaction',
+			'They are coalesced into one 128 byte transaction per warp, like global reads',
 		],
 		answer: 1,
 		why: 'Constant memory broadcasts only when the warp reads one address. Per-pixel data is also too big for 64 KB of constant memory and belongs in global memory.',

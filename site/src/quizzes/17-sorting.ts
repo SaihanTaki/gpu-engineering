@@ -6,8 +6,8 @@ export default [
 		options: [
 			'It needs more memory than the GPU has',
 			'It only sorts integers',
-			'It cannot be written without recursion',
-			'It decides what to compare next from earlier results, so lanes of a warp branch on their own data',
+			'It cannot be written without recursion, which GPU kernels do not allow',
+			'Its next comparison depends on earlier results, so lanes branch apart',
 		],
 		answer: 3,
 		why: 'Data-dependent control flow makes a warp run both paths. Sorting networks fix every comparison in advance, and radix sort does not compare keys at all.',
@@ -15,8 +15,8 @@ export default [
 	{
 		q: 'In a sorting network, what is a stage?',
 		options: [
-			'One pass of a single comparator along the whole array',
-			'A set of comparators in which every wire is in at most one comparator, so all can run at once',
+			'One pass of a single comparator that walks along the whole array',
+			'A set of comparators on disjoint wires, so all can run at once',
 			'One sorted run of length `k`',
 			'One kernel launch that sorts a tile in shared memory',
 		],
@@ -56,8 +56,8 @@ export default [
 		q: 'In the bitonic loop, what do `k` and `j` stand for?',
 		options: [
 			'`k` is the thread index, `j` the key index',
-			'`k` is the number of keys, `j` the number of stages',
-			'`k` is the length of the sorted runs being built, `j` the comparator distance',
+			'`k` is the number of keys, `j` the number of stages in a phase',
+			'`k` is the sorted run length, `j` the comparator distance',
 			'`k` is the comparator distance, `j` the run length',
 		],
 		answer: 2,
@@ -81,7 +81,7 @@ export default [
 			'It needs no barrier between stages',
 			'It avoids bank conflicts',
 			'It works for any `n`, not only powers of two',
-			'One thread per key idles half the threads; the formula keeps every thread busy',
+			'One thread per key idles half the threads',
 		],
 		answer: 3,
 		why: 'With one thread per key, only threads with `(i ^ j) > i` work. The formula gives each of the `n / 2` threads one comparator.',
