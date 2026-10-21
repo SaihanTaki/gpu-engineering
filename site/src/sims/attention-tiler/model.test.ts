@@ -69,6 +69,13 @@ suite('values', () => {
 		// The default case must show real rescales.
 		expect(rescaled).toBeGreaterThan(3);
 	});
+
+	it('default: row 0 max rises in the second tile, as the chapter says', () => {
+		const tile = simulate(cfg()).frames.find((f) => f.step.kind === 'tile' && f.step.i === 0 && f.step.j === 1)!;
+		const r0 = tile.rows.find((r) => r.row === 0)!;
+		expect(r0.mNew).toBeGreaterThan(r0.mOld);
+		expect(r0.alpha).toBeLessThan(1);
+	});
 });
 
 suite('steps and tiles', () => {

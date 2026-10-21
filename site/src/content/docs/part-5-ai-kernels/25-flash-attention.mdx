@@ -3,8 +3,6 @@ title: 25. FlashAttention
 description: Why standard attention is limited by the N x N score matrix in HBM, and how FlashAttention tiles Q, K and V through on-chip memory with an online softmax so that matrix is never written.
 sidebar:
   order: 25
-banner:
-  content: Draft chapter. If something is wrong or unclear, use the edit link at the bottom of the page.
 ---
 
 import AttentionTiler from '@sims/attention-tiler/AttentionTiler.astro';
@@ -179,7 +177,7 @@ Things to try:
 - **n = 16, d = 8, B<sub>r</sub> = B<sub>c</sub> = 2.** Tiny blocks: K and V
   are read once per Q block, 8 times, and the tiled version moves more bytes
   than standard attention. FlashAttention only wins when B<sub>r</sub> is
-  large compared with d, which is what the SRAM size buys.
+  not much smaller than d, which is what the SRAM size buys.
 - **B<sub>r</sub> = 8.** With n = 12 that is 2 Q blocks instead of 3, so K and
   V are read twice instead of three times. Then
   look at the on-chip line: the score tile and accumulator grow with B<sub>r</sub>.
@@ -279,8 +277,9 @@ loads. `cuda/flash_attention.cu` runs 8 heads, checks two against a CPU
 reference in double precision and prints the time.
 
 The tests in `kernels/ch25-flash-attention/test_correctness.py` check the
-Triton kernel against NumPy softmax attention for N from 1 to 64, causal and
-not, in FP32 and FP16, with equal and unequal block sizes; without a GPU they
+Triton kernel against NumPy softmax attention, causal and not: in FP32 for
+N from 1 to 64 with d = 16 and 32, in FP16 for N = 33 and 64 with d = 32,
+and with unequal block sizes; without a GPU they
 run under `TRITON_INTERPRET=1`. They compile the CUDA header with NVRTC for
 `sm_75`, `sm_80` and `sm_90` and check its PTX: K and V go through shared
 memory, there is no `mma` instruction and no local memory, and the only global stores are the 64
@@ -294,12 +293,15 @@ On a GPU, from `kernels/ch25-flash-attention`:
 ```sh
 python triton/flash_attention.py 4096
 make -C cuda run
-ncu --metrics dram__bytes_read.sum,dram__bytes_write.sum python triton/flash_attention.py 1024
+ncu --kernel-name-base mangled --kernel-name flash_fwd_kernel --metrics dram__bytes_read.sum,dram__bytes_write.sum python triton/flash_attention.py 1024
 ```
 
 The Triton script times the naive version, this chapter's kernel and PyTorch's
 `scaled_dot_product_attention`, which can dispatch to a FlashAttention-2
-kernel on CUDA. Things to look for:
+kernel on CUDA. The `ncu` line profiles only this chapter's Triton kernel:
+PyTorch's FlashAttention kernel is also called `flash_fwd_kernel`, but its
+mangled name carries a C++ namespace, so the exact mangled match skips it.
+Things to look for:
 
 - The rate in TFLOPS of each version, against the FP16 tensor peak of your
   GPU from chapter 19.
