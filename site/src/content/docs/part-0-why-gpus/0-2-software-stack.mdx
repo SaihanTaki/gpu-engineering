@@ -11,6 +11,8 @@ import CodeTabs from '@components/CodeTabs.astro';
 import cuda from '@kernels/ch0-2-software-stack/cuda/saxpy.cu?raw';
 import numba from '@kernels/ch0-2-software-stack/numba/saxpy.py?raw';
 import triton from '@kernels/ch0-2-software-stack/triton/saxpy.py?raw';
+import Quiz from '@components/Quiz.astro';
+import quiz from '@quizzes/0-2-software-stack';
 
 A program built for an A100 years ago can run on an H100, a GPU that did not
 exist when it was compiled, if the program carries PTX. A Python function decorated with `@triton.jit`
@@ -273,6 +275,10 @@ has 4 `ld.global.b32` instead of 16. Restore the files with `git checkout`
 when you are done.
 
 </details>
+
+## Quiz
+
+<Quiz questions={quiz} />
 
 ## Further reading
 
