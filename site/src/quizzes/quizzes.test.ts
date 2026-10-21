@@ -23,4 +23,14 @@ describe.each(quizzes)('%s', (_path, mod) => {
 	it('spreads correct answers over all four positions', () => {
 		expect(new Set(qs.map((q) => q.answer)).size).toBe(4);
 	});
+	// "Pick the longest option" must not beat guessing by much (chance is 25%).
+	it('does not give the answer away by length', () => {
+		const longest = qs.filter((q) => {
+			const others = q.options.filter((_, i) => i !== q.answer).map((o) => o.length);
+			return q.options[q.answer].length > Math.max(...others);
+		});
+		expect(longest.length, `correct option is longest in:\n${longest.map((q) => q.q).join('\n')}`).toBeLessThanOrEqual(
+			Math.ceil(qs.length * 0.3),
+		);
+	});
 });

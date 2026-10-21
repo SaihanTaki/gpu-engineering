@@ -26,6 +26,7 @@ For each chapter:
    - Exactly 4 options, one clearly correct. Distractors are plausible: common misconceptions, off-by-one counts, the wrong unit, a rule from another architecture. No "all of the above", no joke options, no option that is obviously longer or more hedged than the rest.
    - Mix the kinds: concept checks, small calculations with numbers from the chapter (recompute every one yourself), reading code or a kernel line, predicting what the sim shows, and choosing the right tool or command.
    - Put the correct answer in all four positions, spread roughly evenly. Do not follow a pattern.
+   - Length must not give the answer away. Keep the four options about the same length, and make the correct option the strictly longest in at most 30% of questions (the test enforces this). Lengthen distractors with plausible but wrong detail rather than padding, or trim the correct option and move its explanation into `why`.
    - Cover the whole chapter in order, not just the first sections. Do not copy the chapter's exercises verbatim.
    - Plain course style: short sentences, no em or en dashes, no buzzwords, no exclamation marks. Only backticks are formatted; no HTML or other markdown.
 3. In the MDX, add imports next to the existing ones:
