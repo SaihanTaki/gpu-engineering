@@ -123,7 +123,8 @@ suite('halo loader', () => {
 		expect(code[kinds.load[0] - 1]).toContain('for (int i = threadIdx.y * TILE');
 		expect(code[kinds.load[3] - 1]).toContain('inside ? in[yy * w + xx] : 0.0f');
 		expect(code[kinds.sync[0] - 1]).toContain('__syncthreads');
-		expect(code[kinds.compute[3] - 1]).toContain('c_filter[dy * (2 * R + 1) + dx] * tile');
+		expect(code[kinds.compute[1] - 1]).toContain('if (x >= w || y >= h) return;');
+		expect(code[kinds.compute[5] - 1]).toContain('c_filter[dy * (2 * R + 1) + dx] * tile');
 		expect(code[kinds.store[0] - 1]).toContain('out[');
 	});
 
