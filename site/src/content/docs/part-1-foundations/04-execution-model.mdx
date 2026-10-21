@@ -13,6 +13,8 @@ import { gpuById } from '@sim-core/gpu-specs';
 import cuda from '@kernels/ch04-execution-model/cuda/divergence.cu?raw';
 import numba from '@kernels/ch04-execution-model/numba/divergence.py?raw';
 import triton from '@kernels/ch04-execution-model/triton/divergence.py?raw';
+import Quiz from '@components/Quiz.astro';
+import quiz from '@quizzes/04-execution-model';
 
 export const a100 = gpuById('a100');
 export const t4 = gpuById('t4');
@@ -340,6 +342,10 @@ After sorting, the negative values come first and the positive ones after
 them, so at most one warp, the one where the sign changes, diverges.
 
 </details>
+
+## Quiz
+
+<Quiz questions={quiz} />
 
 ## Further reading
 

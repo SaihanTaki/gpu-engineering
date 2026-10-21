@@ -12,6 +12,8 @@ import { analyze, pct } from '@sims/coalescing/model';
 import cuda from '@kernels/ch06-coalescing/cuda/coalescing.cu?raw';
 import numba from '@kernels/ch06-coalescing/numba/coalescing.py?raw';
 import triton from '@kernels/ch06-coalescing/triton/coalescing.py?raw';
+import Quiz from '@components/Quiz.astro';
+import quiz from '@quizzes/06-coalescing';
 
 export const at = (o) => analyze({ pattern: 'strided', elemBytes: 4, stride: 1, offset: 0, fields: 3, ...o });
 export const seq = at({});
@@ -311,6 +313,10 @@ Swap the roles so that `threadIdx.x` walks the contiguous dimension:
 swapped to match. Each warp then reads 32 neighbouring floats in 4 sectors.
 
 </details>
+
+## Quiz
+
+<Quiz questions={quiz} />
 
 ## Further reading
 

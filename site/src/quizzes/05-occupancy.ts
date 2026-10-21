@@ -1,0 +1,196 @@
+import type { Question } from './types';
+
+export default [
+	{
+		q: 'How is occupancy defined?',
+		options: [
+			'Active threads per SM / CUDA cores per SM',
+			'Active warps per SM / maximum warps per SM',
+			'Blocks in the grid / number of SMs',
+			'Registers in use / registers per SM',
+		],
+		answer: 1,
+		why: 'Occupancy is the fraction of an SM\'s warp slots a kernel fills. Register use is one of the limits on it, not its definition.',
+	},
+	{
+		q: 'On an A100, a kernel with 256-thread blocks and no shared memory uses 33 registers per thread. What is its theoretical occupancy?',
+		options: ['100%', '50%', '62.5%', '75%'],
+		answer: 3,
+		why: '33 x 32 = 1,056 rounds up to 1,280 per warp, so 12 warps fit in a partition, 48 per SM, 6 blocks of 8 warps. At 32 registers it would be 100%.',
+	},
+	{
+		q: 'Why does going from 32 to 33 registers per thread cost so much occupancy?',
+		options: [
+			'The 33rd register spills to local memory',
+			'Each thread\'s registers are rounded up to a multiple of 8',
+			'A warp\'s registers are rounded up to a multiple of 256, so 1,056 becomes 1,280',
+			'Register counts above 32 halve the number of block slots',
+		],
+		answer: 2,
+		why: 'Registers are given to whole warps in units of 256. Any count from 33 to 40 rounds up to the same 1,280 per warp.',
+	},
+	{
+		q: 'On an A100, a kernel with 256-thread blocks and no shared memory uses 48 registers per thread. What is its theoretical occupancy?',
+		options: ['62.5%', '75%', '50%', '66.7%'],
+		answer: 0,
+		why: '48 x 32 = 1,536 per warp. 16,384 / 1,536 = 10.7, so 10 warps per partition, 40 per SM, 5 blocks of 8 warps: 40 / 64. 66.7% ignores that blocks are placed whole.',
+	},
+	{
+		q: 'How many warp slots does a block of 100 threads take?',
+		options: ['3', '4', '5', '100'],
+		answer: 1,
+		why: 'A block takes `ceil(n / 32)` warp slots, so 100 threads take 4, the same as 128.',
+	},
+	{
+		q: 'On an A100, a kernel uses blocks of 32 threads, few registers and no shared memory. What is its theoretical occupancy?',
+		options: ['100%', '25%', '12.5%', '50%'],
+		answer: 3,
+		why: 'The A100 holds at most 32 blocks per SM. 32 blocks of one warp each fill 32 of 64 warp slots.',
+	},
+	{
+		q: 'Judged by block slots alone, what is the smallest block size that can reach full occupancy on a T4?',
+		options: ['64 threads', '32 threads', '128 threads', '256 threads'],
+		answer: 0,
+		why: 'The T4 has 1,024 thread slots and 16 block slots, so a block needs 1,024 / 16 = 64 threads. The A100 gives the same number, 2,048 / 32.',
+	},
+	{
+		q: 'On an A100, a kernel with 128-thread blocks and 32 registers asks for 40 KB of shared memory per block. What is its theoretical occupancy?',
+		options: ['18.75%', '31.25%', '25%', '50%'],
+		answer: 2,
+		why: 'Each block takes 40 KB plus the 1 KB reserved, 41 KB. 164 KB holds 4 of them, 16 warps of 64. Forgetting the reserved 1 KB still gives 4 blocks here, but not in general.',
+	},
+	{
+		q: 'Why can one block on an A100 use at most 163 of the SM\'s 164 KB of shared memory?',
+		options: [
+			'The L1 cache always keeps 1 KB for itself',
+			'Shared memory is allocated in 1 KB units',
+			'The driver reserves 1 KB for every block',
+			'Each warp takes 32 bytes of shared memory for its program counter',
+		],
+		answer: 2,
+		why: 'On compute capability 8.0 and later, the driver reserves 1 KB per resident block. The allocation unit on the A100 is 128 bytes.',
+	},
+	{
+		q: 'A kernel\'s occupancy is limited by shared memory per block. Without changing the shared memory each block asks for, which change raises occupancy?',
+		options: [
+			'Smaller blocks with the same shared memory per block',
+			'Larger blocks with the same shared memory per block',
+			'More registers per thread',
+			'A larger grid',
+		],
+		answer: 1,
+		why: 'Shared memory is per block, so the same number of blocks fit, each with more warps. Registers are per thread, so block size does not help with a register limit.',
+	},
+	{
+		q: 'A kernel uses 65 registers per thread and is launched with 1,024 threads per block. What happens?',
+		options: [
+			'The launch fails with `too many resources requested for launch`',
+			'It runs one block per SM at 50% occupancy',
+			'The compiler silently caps it at 64 registers',
+			'It runs, and the extra registers spill to local memory',
+		],
+		answer: 0,
+		why: '65 x 32 = 2,080 rounds up to 2,304 per warp, and 32 warps need 73,728 registers, more than a block may use.',
+	},
+	{
+		q: 'On an A100, a block of 704 threads (22 warps) uses 88 registers per thread. 22 x 2,816 = 61,952 registers, less than 65,536. Does it launch?',
+		options: [
+			'Yes, one block per SM',
+			'Yes, two blocks per SM',
+			'No, because 704 is not a multiple of 32',
+			'No, because the check rounds 22 warps up to 24, and 24 x 2,816 is more than 65,536',
+		],
+		answer: 3,
+		why: '24 x 2,816 = 67,584. Per partition, 16,384 / 2,816 = 5 warps fit, 20 per SM, fewer than the block\'s 22. 704 is 22 x 32, so it is a multiple of 32.',
+	},
+	{
+		q: 'A kernel is marked `__launch_bounds__(512, 2)` for an SM with 65,536 registers. At most how many registers per thread does that allow?',
+		options: ['32', '128', '255', '64'],
+		answer: 3,
+		why: '65,536 / (2 x 512) = 64. The second argument asks for at least 2 blocks of 512 threads on one SM.',
+	},
+	{
+		q: 'You cap a kernel below the number of registers it needs. What does the compiler do?',
+		options: [
+			'It refuses to compile the kernel',
+			'It moves values to local memory, which lives in device memory, and reloads them as needed',
+			'It moves the values into shared memory',
+			'It ignores the cap',
+		],
+		answer: 1,
+		why: 'These spills cost memory traffic, which is why a register cap is a trade and not a free win. Local memory is in device memory, not on chip.',
+	},
+	{
+		q: 'Which runtime call returns the block size with the highest occupancy for a kernel?',
+		options: [
+			'`cudaOccupancyMaxPotentialBlockSize`',
+			'`cudaOccupancyMaxActiveBlocksPerMultiprocessor`',
+			'`cudaFuncGetAttributes`',
+			'`cudaFuncSetAttribute`',
+		],
+		answer: 0,
+		why: '`cudaOccupancyMaxPotentialBlockSize` also returns the smallest grid that reaches it on every SM. `MaxActiveBlocksPerMultiprocessor` answers the reverse question: how many blocks of a given size fit.',
+	},
+	{
+		q: 'On an A100, `cudaOccupancyMaxActiveBlocksPerMultiprocessor` returns 6 for blocks of 256 threads. What is the theoretical occupancy?',
+		options: ['37.5%', '9.4%', '75%', '100%'],
+		answer: 2,
+		why: '6 blocks x 8 warps = 48 warps, out of 64. 9.4% would be 6 of 64 warps, as if each block were one warp.',
+	},
+	{
+		q: 'A Triton kernel is launched with `num_warps=8`. How many threads does one program\'s block have?',
+		options: ['256', '8', '1,024', '32'],
+		answer: 0,
+		why: 'Each program is one block of `32 * num_warps` threads. `num_warps` counts warps, not threads.',
+	},
+	{
+		q: 'Why can a higher `num_stages` lower a Triton kernel\'s occupancy?',
+		options: [
+			'Each stage launches an extra block',
+			'Each stage adds a warp to every program',
+			'Each stage doubles the registers per thread',
+			'Each stage buffers its tiles in shared memory, so shared memory per block grows',
+		],
+		answer: 3,
+		why: 'Pipelined loads need buffers, and more shared memory per block means fewer blocks fit. SAXPY has no loop, so `num_stages` changes nothing for it.',
+	},
+	{
+		q: 'A kernel allows 8 blocks of 256 threads per SM on an A100, which has 108 SMs. You launch 216 blocks. What is the highest achieved occupancy it can reach?',
+		options: ['12.5%', '25%', '100%', '50%'],
+		answer: 1,
+		why: 'At best each SM gets 2 blocks, 16 of 64 warps. Theoretical occupancy says what could fit, not what the grid supplies.',
+	},
+	{
+		q: 'Is higher occupancy always faster?',
+		options: [
+			'Yes, occupancy is directly proportional to speed',
+			'Yes, as long as the grid covers every SM',
+			'No, once enough warps hide the latency more do not help, and more registers per thread can mean more work per thread',
+			'No, low occupancy is usually faster',
+		],
+		answer: 2,
+		why: 'The Best Practices Guide says higher occupancy does not always mean higher performance, but low occupancy always hurts latency hiding. Treat it as a diagnostic.',
+	},
+	{
+		q: 'Which tool shows both the theoretical and the achieved occupancy of a launch?',
+		options: [
+			'`nvcc --resource-usage`',
+			'The Occupancy section of Nsight Compute',
+			'`cudaOccupancyMaxActiveBlocksPerMultiprocessor`',
+			'The occupancy simulation',
+		],
+		answer: 1,
+		why: 'Achieved occupancy has to be measured while the kernel runs. The API and the simulation only compute the theoretical value, and `nvcc` only reports resource use.',
+	},
+	{
+		q: 'Which of these does the chapter\'s occupancy model leave out?',
+		options: [
+			'The 256-register allocation unit per warp',
+			'The limit on blocks per SM',
+			'The 1 KB of shared memory reserved per block',
+			'A smaller shared memory carveout chosen with `cudaFuncAttributePreferredSharedMemoryCarveout`',
+		],
+		answer: 3,
+		why: 'The model assumes the largest carveout. It does cover the four limits, including the allocation units and the per-block reservation.',
+	},
+] satisfies Question[];
