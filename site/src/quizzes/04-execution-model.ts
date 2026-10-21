@@ -23,19 +23,19 @@ export default [
 		q: 'What sets SIMT apart from SIMD vector hardware, according to the chapter?',
 		options: [
 			'SIMT has no shared instruction stream, so each lane fetches its own instructions',
-			'You write the code for one scalar thread, and each thread has its own registers and can branch on its own data',
+			'You write scalar code per thread, and each thread can branch on its own data',
 			'SIMT executes 64 threads per instruction instead of 32',
 			'SIMT lanes can each run a different instruction in the same cycle',
 		],
 		answer: 1,
-		why: 'A warp still issues one instruction at a time for all its lanes. The difference is the programming model: scalar code per thread, with the hardware working out which lanes take part.',
+		why: 'A warp still issues one instruction at a time for all its lanes. The difference is the programming model: scalar code per thread, with the hardware working out which lanes take part. Each thread also has its own registers.',
 	},
 	{
 		q: 'Why does switching from one warp to another cost nothing?',
 		options: [
 			'The scheduler saves the old warp\'s registers to L1 in a single cycle',
-			'Every resident warp keeps its program counters and registers on chip for its whole lifetime',
-			'Only one warp is resident per partition, so there is nothing to switch',
+			'Every resident warp keeps its program counters and registers on chip',
+			'Only one warp is resident per partition at a time, so there is nothing to switch',
 			'Warps are switched only at block boundaries',
 		],
 		answer: 1,
@@ -44,8 +44,8 @@ export default [
 	{
 		q: 'When is a warp not ready to issue?',
 		options: [
-			'When its next instruction needs a value that has not arrived yet, most often the result of a load',
-			'When another warp of the same block is issuing',
+			'When its next instruction needs a value that has not arrived yet',
+			'When another warp of the same block is issuing in the same cycle',
 			'When it has issued an instruction in the previous cycle',
 			'When some of its lanes are masked off',
 		],
@@ -62,12 +62,12 @@ export default [
 		q: 'With the simulation\'s default of four warps, what do you see?',
 		options: [
 			'The scheduler issues an instruction every cycle',
-			'Each warp waits for the previous warp\'s load to return before issuing its own',
-			'Idle cycles appear only at the very end of the run',
-			'All four warps issue their loads in the first four cycles, then the scheduler idles until the first result returns',
+			'Each warp waits for the previous warp\'s load to return before issuing its own load',
+			'Idle cycles appear only at the very end of the run, after the last load returns',
+			'Each warp issues its load, then the scheduler idles until the first result returns',
 		],
 		answer: 3,
-		why: 'Four warps are too few for `L = 20` and `A = 2`, which need 8. Loads from different warps do not wait for each other; the scheduler simply runs out of ready warps.',
+		why: 'All four loads go out in the first four cycles. Four warps are too few for `L = 20` and `A = 2`, which need 8. Loads from different warps do not wait for each other; the scheduler simply runs out of ready warps.',
 	},
 	{
 		q: 'A kernel does fewer arithmetic instructions per load. What does that do to the number of warps needed to hide memory latency?',
@@ -89,10 +89,10 @@ export default [
 	{
 		q: 'Some lanes of a warp take the `if` and the others take the `else`. What does the warp do?',
 		options: [
-			'It splits into two warps that run in parallel',
-			'It runs each path one after the other, with the lanes not on the current path masked off',
-			'It runs only the path most lanes take',
-			'It stalls until all lanes agree',
+			'It splits into two smaller warps that run side by side in parallel',
+			'It runs each path in turn, with the other lanes masked off',
+			'It runs only the path most lanes take, skipping the rest',
+			'It stalls until all of its lanes agree on one path',
 		],
 		answer: 1,
 		why: 'A warp issues one instruction at a time, so it has to run both paths. Masked lanes do nothing for those instructions, and the lanes reconverge afterwards.',
@@ -118,9 +118,9 @@ export default [
 	{
 		q: 'What does independent thread scheduling, from compute capability 7.0 on, change?',
 		options: [
-			'Divergent branches no longer cost anything',
+			'Divergent branches no longer cost anything, because both paths run at the same time',
 			'Threads of a warp are guaranteed to run in lockstep',
-			'Each thread has its own program counter, but the lanes on the other path still sit masked off',
+			'Each thread has its own program counter, but lanes off the path stay masked',
 			'Each lane can execute a different instruction in the same cycle',
 		],
 		answer: 2,
@@ -154,10 +154,10 @@ export default [
 			'An `if` on a block of conditions',
 			'A branch on `tl.program_id(0)`',
 			'A loop over the lanes of the program',
-			'`tl.where(cond, a, b)`, which computes both and keeps one per element',
+			'`tl.where(cond, a, b)`',
 		],
 		answer: 3,
-		why: 'An `if` in a Triton kernel needs one scalar condition for the whole program, and the compiler rejects a block of them. `tl.where` is the same idea as `branch_free`.',
+		why: 'An `if` in a Triton kernel needs one scalar condition for the whole program, and the compiler rejects a block of them. `tl.where` computes both values and keeps one per element, the same idea as `branch_free`.',
 	},
 	{
 		q: 'Why does the Numba version use float32 constants such as `TWO` and `HALF`?',
