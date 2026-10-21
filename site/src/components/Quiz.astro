@@ -82,6 +82,8 @@ const md = (s: string) => esc(s).replace(/`([^`]+)`/g, '<code>$1</code>');
 		min-width: 0;
 	}
 	.quiz legend {
+		max-width: 100%;
+		overflow-wrap: anywhere;
 		font-weight: 600;
 		padding: 0;
 		margin-bottom: 0.5rem;
@@ -132,6 +134,12 @@ const md = (s: string) => esc(s).replace(/`([^`]+)`/g, '<code>$1</code>');
 		font-size: var(--sl-text-xs);
 		color: var(--sl-color-gray-2);
 		white-space: nowrap;
+	}
+	/* Long metric names in `code` must wrap at phone width. */
+	.quiz label span,
+	.quiz-feedback {
+		min-width: 0;
+		overflow-wrap: anywhere;
 	}
 	.quiz-feedback {
 		margin: 0.6rem 0 0;
