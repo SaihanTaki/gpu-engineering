@@ -3,8 +3,6 @@ title: '3. First kernel: vector add'
 description: A complete CUDA program for c = a + b, from allocating GPU memory and copying data over PCIe to launching, checking errors and copying the result back.
 sidebar:
   order: 3
-banner:
-  content: Draft chapter. If something is wrong or unclear, use the edit link at the bottom of the page.
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -86,11 +84,13 @@ will be longest.
 At the last step the simulation adds up the bars. On the {a100.name}, the copies
 take {pct(tA.copyIn + tA.copyOut, tA.total)} of the total. The reason is in the
 two bandwidths. Copying moves {fmtBytes(3 * arrayBytes(DEFAULT_N))} over PCIe
-Gen{a100.pcieGen} at {a100.pcieGbPerS} GB/s each way. The kernel moves the
+Gen{a100.pcieGen} at about {a100.pcieGbPerS} GB/s each way. The kernel moves the
 same {fmtBytes(3 * arrayBytes(DEFAULT_N))} (it reads `a` and `b` and writes
 `c`) between the SMs and {a100.memory} at {fmt(a100.memoryGbPerS)} GB/s, which is
 {ratio(a100)} times faster. Vector add does one addition per 12 bytes, so the
-arithmetic is almost free and only the bytes count.
+arithmetic is almost free and only the bytes count. (Sizes here are in
+binary units, 1 MiB = 2<sup>20</sup> bytes, and bandwidths in decimal units,
+1 GB/s = 10<sup>9</sup> bytes per second, as NVIDIA quotes them.)
 
 Switch to the {h100.name}. Its PCIe Gen{h100.pcieGen} link is {h100.pcieGbPerS / a100.pcieGbPerS} times as fast, but
 its memory is faster too, and the copies still take

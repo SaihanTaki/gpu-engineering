@@ -3,8 +3,6 @@ title: 4. Execution model
 description: How an SM runs threads in warps of 32, how its warp schedulers hide memory latency by switching between warps, and what happens when the lanes of one warp take different branches.
 sidebar:
   order: 4
-banner:
-  content: Draft chapter. If something is wrong or unclear, use the edit link at the bottom of the page.
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -150,9 +148,8 @@ spin lock between two lanes, could deadlock.
 
 From compute capability 7.0 on, the GPU keeps a program counter and call stack
 for every thread. The CUDA Programming Guide calls this **independent thread
-scheduling**: the hardware can switch between the diverged paths of a warp
-at the granularity of single threads, and threads can diverge and reconverge
-within a warp. Two things about it are easy to get wrong:
+scheduling**: threads of a warp can diverge and reconverge at sub-warp
+granularity, and the scheduler can interleave the diverged paths. Two things about it are easy to get wrong:
 
 - **It does not make divergence free.** NVIDIA's Volta whitepaper says
   execution is still SIMT: in any given cycle, the cores execute the same
@@ -179,7 +176,8 @@ The chapter's kernels compute `out = x > 0 ? 2x + 1 : x / 2` in two ways.
 mixed signs. `branch_free` computes both results in every lane and keeps one,
 so every lane runs the same statements. The CUDA version adds `warp_masks`,
 which uses `__ballot_sync` to record, for every warp, which lanes would take
-the `if` path, and counts the warps that diverge. It runs everything on random
+the `if` path. The host code counts how many of those masks show a diverged
+warp. It runs everything on random
 data and again after sorting it. The tests in `kernels/ch04-execution-model/`
 check every version against NumPy.
 
@@ -211,8 +209,8 @@ What changes between the languages:
 
 The two CUDA kernels compute exactly the same values. Whether `branch_free` is
 faster is not obvious: for a branch this short, the compiler may already
-replace the `if/else` with predicated instructions, and Appendix A shows how to
-check in the SASS. Divergence matters when both paths do real work.
+replace the `if/else` with predicated instructions. To check, read the SASS
+with `cuobjdump -sass`, as in chapter 0.2. Divergence matters when both paths do real work.
 
 ## Measure it yourself
 
@@ -318,6 +316,10 @@ __syncwarp();
 s[tid] += t;
 __syncwarp();
 ```
+
+On those older GPUs the code also needed `s` declared `volatile float *`, or
+the compiler could keep `s[]` values in registers and lanes would never see
+each other's writes.
 
 The `s[tid + 32]` line reads only values that lanes 0 to 31 never write, but
 it needs a `__syncwarp()` after it for the next read. Chapter 13 replaces this

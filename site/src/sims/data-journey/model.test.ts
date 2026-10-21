@@ -74,13 +74,13 @@ suite('steps', () => {
 	it('highlighted lines exist in the code', () => {
 		const count = CODE.split('\n').length;
 		for (let s = 0; s <= lastStep; s++) for (const l of stateAt(a100, N, s).lines) expect(l).toBeLessThanOrEqual(count);
-		expect(CODE.split('\n')[13]).toContain('add<<<');
+		expect(CODE.split('\n')[13]).toContain('vector_add<<<');
 	});
 
 	it('every step has a status line, with numbers where it matters', () => {
 		for (const g of GPUS) for (let s = 0; s <= lastStep; s++) expect(describe(g, N, s).length).toBeGreaterThan(40);
 		expect(describe(a100, N, 2)).toContain('64 MiB takes at least 2.10 ms');
-		expect(describe(a100, N, 4)).toContain('add<<<65,536, 256>>>');
+		expect(describe(a100, N, 4)).toContain('vector_add<<<65,536, 256>>>');
 		expect(describe(a100, 1024, 4)).toContain('Only 4 of the 108 SMs');
 		expect(describe(a100, N, lastStep)).toContain('PCIe is 63.7x slower');
 	});

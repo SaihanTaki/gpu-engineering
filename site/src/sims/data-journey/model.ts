@@ -10,7 +10,7 @@ export const DEFAULT_N = 2 ** 24;
 export const THREADS_PER_BLOCK = 256;
 export const FLOAT_BYTES = 4;
 
-export const CODE = `__global__ void add(const float *a, const float *b, float *c, int n) {
+export const CODE = `__global__ void vector_add(const float *a, const float *b, float *c, int n) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) c[i] = a[i] + b[i];
 }
@@ -23,7 +23,7 @@ cudaMalloc(&d_c, bytes);
 cudaMemcpy(d_a, h_a, bytes, cudaMemcpyHostToDevice);
 cudaMemcpy(d_b, h_b, bytes, cudaMemcpyHostToDevice);
 int threads = ${THREADS_PER_BLOCK}, blocks = (n + threads - 1) / threads;
-add<<<blocks, threads>>>(d_a, d_b, d_c, n);
+vector_add<<<blocks, threads>>>(d_a, d_b, d_c, n);
 cudaMemcpy(h_c, d_c, bytes, cudaMemcpyDeviceToHost);
 cudaFree(d_a); cudaFree(d_b); cudaFree(d_c);`;
 
@@ -141,7 +141,7 @@ export function describe(g: GpuSpec, n: number, step: number): string {
 				blocks < g.sms
 					? `Only ${fmt(blocks)} of the ${g.sms} SMs get a block; the rest sit idle.`
 					: `The ${g.sms} SMs take new blocks as earlier ones finish, about ${fmt(Math.round(blocks / g.sms))} per SM in total.`;
-			return `add<<<${fmt(blocks)}, ${THREADS_PER_BLOCK}>>> launches ${fmt(blocks)} block${blocks === 1 ? '' : 's'} of ${THREADS_PER_BLOCK} threads, one thread per element. ${spread} The launch returns to the CPU at once; the GPU runs the kernel on its own.`;
+			return `vector_add<<<${fmt(blocks)}, ${THREADS_PER_BLOCK}>>> launches ${fmt(blocks)} block${blocks === 1 ? '' : 's'} of ${THREADS_PER_BLOCK} threads, one thread per element. ${spread} The launch returns to the CPU at once; the GPU runs the kernel on its own.`;
 		}
 		case 'read':
 			return `Each thread i reads a[i] and b[i] from ${g.memory}: ${fmtBytes(2 * arrayBytes(n))} in all. At ${fmt(g.memoryGbPerS)} GB/s that takes at least ${fmtTime((t.kernel * 2) / 3)}.`;
