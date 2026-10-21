@@ -12,6 +12,8 @@ import { gpuById } from '@sim-core/gpu-specs';
 import { fmtMiB, fmtTime, PAGE_BYTES, pcieSeconds, summary } from '@sims/page-migration/model';
 import cuda from '@kernels/ch10-unified-memory/cuda/unified_memory.cu?raw';
 import numba from '@kernels/ch10-unified-memory/numba/unified_memory.py?raw';
+import Quiz from '@components/Quiz.astro';
+import quiz from '@quizzes/10-unified-memory';
 
 export const a100 = gpuById('a100');
 export const h100 = gpuById('h100');
@@ -455,6 +457,10 @@ the pointer from `cudaHostGetDevicePointer` also works, with every access going
 over PCIe.
 
 </details>
+
+## Quiz
+
+<Quiz questions={quiz} />
 
 ## Further reading
 

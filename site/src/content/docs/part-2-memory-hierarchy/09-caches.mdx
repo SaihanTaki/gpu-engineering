@@ -17,6 +17,8 @@ import ptxas from '@kernels/ch09-caches/generated/ptxas-v.txt?raw';
 import memops from '@kernels/ch09-caches/generated/memory-ops.txt?raw';
 import tritonLoads from '@kernels/ch09-caches/generated/triton-loads.txt?raw';
 import versions from '@kernels/ch09-caches/generated/VERSIONS.txt?raw';
+import Quiz from '@components/Quiz.astro';
+import quiz from '@quizzes/09-caches';
 
 export const run = (pattern, param, accesses, l1Lines = 4, l2Lines = 16) => {
 	const sim = simulate({ pattern, param, accesses, l1Lines, l2Lines });
@@ -471,6 +473,10 @@ raise occupancy (chapter 5); whether it pays off depends on which case you
 are in, so measure both builds.
 
 </details>
+
+## Quiz
+
+<Quiz questions={quiz} />
 
 ## Further reading
 
