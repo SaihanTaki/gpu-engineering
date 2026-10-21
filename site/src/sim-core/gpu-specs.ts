@@ -37,7 +37,7 @@ export interface GpuSpec {
 	/** Largest shared memory one block can opt in to, KB, not counting the reserved part. */
 	maxSharedKbPerBlock: number;
 	pcieGen: 3 | 4 | 5;
-	/** Peak PCIe x16 bandwidth in one direction, GB/s. */
+	/** Peak PCIe x16 bandwidth in one direction, GB/s, rounded (real: 15.75, 31.5, 63). */
 	pcieGbPerS: number;
 	/** Peak rates at boost clock, dense (no structured sparsity). TFLOPS, or TOPS for INT8. */
 	peakFp32Tflops: number;
