@@ -4,10 +4,10 @@ export default [
 	{
 		q: 'On the A100 SXM4 80 GB, NVIDIA lists 19.5 TFLOPS for FP32 on the CUDA cores and 312 TFLOPS for FP16 on the tensor cores. Why can a GEMM tuned on the CUDA cores never come near 312?',
 		options: [
-			'It does not use enough shared memory to hide latency',
+			'It does not use enough shared memory to hide global memory latency',
 			'It runs on the FP32 units, which are limited to 19.5 TFLOPS',
-			'It is memory-bound at every matrix size',
-			'It launches too few warps to fill the tensor cores',
+			'It is memory-bound at every matrix size, even with good tiling',
+			'It launches too few warps to keep the tensor cores busy',
 		],
 		answer: 1,
 		why: 'The 312 TFLOPS come from a different unit doing a different operation. A kernel on the CUDA cores is capped by the FP32 rate, about 16 times lower, however well its tiling hides memory.',
@@ -49,8 +49,8 @@ export default [
 	{
 		q: 'Which statement about TF32 is right?',
 		options: [
-			'Values sit in 32-bit FP32 registers and memory, and the tensor cores use only the top 19 bits',
-			'It is a 19-bit storage format with its own arrays in memory',
+			'Data stays in FP32 registers and memory; tensor cores read the top 19 bits',
+			'It is a 19-bit storage format, so TF32 arrays take less memory than FP32 arrays',
 			'It has FP16\'s exponent and FP32\'s mantissa',
 			'It is the same as BF16 with three extra exponent bits',
 		],
@@ -60,10 +60,10 @@ export default [
 	{
 		q: 'Why does E4M3 reach 448 when IEEE rules would stop its top exponent at 240?',
 		options: [
-			'It uses a larger bias than E5M2',
-			'It drops subnormals and reuses those codes',
-			'It saturates every overflow to 448 in hardware',
-			'It has no infinity and only one NaN pattern per sign, so the top exponent holds ordinary numbers',
+			'It uses a larger exponent bias than E5M2, which shifts its range upward',
+			'It drops subnormals and reuses those bit patterns for extra large finite numbers',
+			'It saturates every overflow to 448 in hardware, whatever the mode',
+			'It has no infinity and one NaN per sign, so its top exponent holds finite values',
 		],
 		answer: 3,
 		why: 'E4M3 gives up infinity and keeps only `S.1111.111` as NaN, so the rest of the top exponent stores finite values up to 448. Saturation to 448 is a separate conversion option, `__NV_SATFINITE`.',
@@ -106,10 +106,10 @@ export default [
 	{
 		q: 'Why does "FP16 inputs, FP32 accumulate" cost little accuracy beyond rounding the inputs?',
 		options: [
-			'FP32 has the same mantissa width as FP16',
-			'Tensor cores compute in FP64 internally',
-			'The products are rounded to FP16 before they are added',
-			'A product of two FP16 numbers has at most 22 significant bits, which fits exactly in FP32\'s 24',
+			'FP32 has the same mantissa width as FP16, so nothing is lost',
+			'Tensor cores compute every product and sum in FP64 internally',
+			'The products are rounded to FP16 first, so the FP32 sum adds no new error',
+			'Products of FP16 values fit exactly in FP32, so only the sum rounds',
 		],
 		answer: 3,
 		why: 'Each FP16 value has 11 significant bits, so a product has at most 22. FP32 holds 24, so the product is exact and only the running sum rounds, at FP32 precision.',
@@ -118,9 +118,9 @@ export default [
 		q: 'On the T4, A100 and H100, what does an FP16 accumulator buy compared with an FP32 one?',
 		options: [
 			'Fewer registers and output bytes, not more tensor-core throughput',
-			'Twice the tensor-core rate',
-			'Better accuracy for long sums',
-			'Access to BF16 inputs',
+			'Twice the tensor-core throughput, at the cost of some accuracy on long sums',
+			'Better accuracy for long sums, at the same tensor-core rate',
+			'Access to BF16 and TF32 inputs on the tensor cores',
 		],
 		answer: 0,
 		why: 'NVIDIA lists the same tensor rate for an FP32 accumulator as for an FP16 one on these GPUs. The FP16 accumulator only saves registers and output bytes, and it loses accuracy.',
@@ -202,8 +202,8 @@ export default [
 		q: 'In Triton, `tl.dot` gets two FP32 blocks and no `input_precision` argument on an NVIDIA GPU. What happens?',
 		options: [
 			'The inputs are rounded to TF32 and the tensor cores do the multiply',
-			'Full FP32 FMAs run on the CUDA cores',
-			'Each value is split into pieces to recover FP32 accuracy',
+			'Full FP32 FMAs run on the CUDA cores, because the inputs are FP32',
+			'Each value is split into three pieces to recover FP32 accuracy on tensor cores',
 			'The compiler raises an error asking for FP16 inputs',
 		],
 		answer: 0,
@@ -212,10 +212,10 @@ export default [
 	{
 		q: '`triton/show_ptx.py` counts 64 `mma.sync` m16n8k16 instructions per thread per loop trip on sm_80, with 128 x 128 x 32 tiles and 4 warps. Where does 64 come from?',
 		options: [
-			'128 x 128 / (16 x 16) = 64',
-			'4 warps x 16 instructions per warp',
-			'Each warp owns 64 x 64: (64 / 16) x (64 / 8) = 32 per 16 of K, times 2 for K = 32',
-			'32 lanes x 2 instructions per lane',
+			'128 x 128 / (16 x 16) = 64 output tiles of 16 x 16 per trip',
+			'4 warps x 16 instructions per warp, one per 16 x 16 piece of its tile',
+			'Each warp owns 64 x 64: (64 / 16) x (64 / 8) = 32, times 2 for K = 32',
+			'32 lanes x 2 instructions per lane, one for each half of K',
 		],
 		answer: 2,
 		why: 'Four warps split the 128 x 128 tile into 64 x 64 each. That is 4 x 8 = 32 m16n8 instructions per 16 of K, and the 32 of K in one loop trip needs two rounds.',

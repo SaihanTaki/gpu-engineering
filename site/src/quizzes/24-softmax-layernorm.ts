@@ -17,8 +17,8 @@ export default [
 		q: 'In the safe softmax you subtract m = max x_j before `exp`. Why can the denominator no longer be zero?',
 		options: [
 			'The largest term is exactly e^0 = 1, so the sum is at least 1',
-			'Subtracting the max makes every exponent positive',
-			'Underflow is impossible once the max is removed',
+			'Subtracting the max makes every exponent positive, so no term is zero',
+			'Underflow is impossible once the max is removed from each score',
 			'The division is done in double precision',
 		],
 		answer: 0,
@@ -39,10 +39,10 @@ export default [
 	{
 		q: 'In the online update `d_new = d * e^(m - m_new) + e^(x - m_new)`, what does the factor `e^(m - m_new)` do?',
 		options: [
-			'It normalizes d so the outputs add up to 1',
-			'It shifts every earlier term to the new max at once, without reading them again',
-			'It protects x from underflow',
-			'It cancels the rounding error of the previous step',
+			'It normalizes d after every element so the outputs always add up to 1',
+			'It shifts all earlier terms to the new max without reading them again',
+			'It protects the new term x from underflow when the max rises',
+			'It cancels the rounding error left over from the previous step',
 		],
 		answer: 1,
 		why: 'd was a sum of terms shifted by the old max. Multiplying by e^(m - m_new) moves all of them to the new max in one step. If the max did not change, the factor is 1.',
@@ -90,10 +90,10 @@ export default [
 	{
 		q: 'With one block per row and 256 threads, how does the block merge its threads\' [m, d] pairs?',
 		options: [
-			'An atomic max and an atomic add in global memory',
-			'One thread loops over all 256 pairs in shared memory',
-			'Five `__shfl_down_sync` steps, then lane 0 broadcasts',
-			'Five `__shfl_xor_sync` steps per warp, one pair per warp through shared memory, then five more steps',
+			'An atomic max and an atomic add on each row\'s pair in global memory',
+			'One thread loops over all 256 pairs after every thread writes its pair to shared memory',
+			'Five `__shfl_down_sync` steps per warp, then lane 0 broadcasts the result',
+			'Five `__shfl_xor_sync` steps per warp, then shared memory and five more steps',
 		],
 		answer: 3,
 		why: 'It is the reduction from chapter 13 with ⊕ in place of `+`. Using `xor` instead of `down` leaves the result in every lane, so no broadcast is needed.',
@@ -118,9 +118,9 @@ export default [
 	{
 		q: 'Why might `softmax_safe` and `softmax_online` run at nearly the same speed on a real GPU?',
 		options: [
-			'The compiler merges the passes automatically',
+			'The compiler merges the separate passes into one automatically',
 			'A 4 KB row read again by the same block is likely to hit in L1 or L2',
-			'`expf` dominates the time in both kernels',
+			'`expf` dominates the time in both kernels, so traffic does not matter',
 			'Both kernels are compute-bound',
 		],
 		answer: 1,
@@ -129,10 +129,10 @@ export default [
 	{
 		q: 'For values near 1000 with a spread of 1, why does the one-pass formula σ^2 = E[x^2] - E[x]^2 lose accuracy in float32?',
 		options: [
-			'E[x^2] overflows float32',
-			'Welford\'s algorithm is needed to compute E[x]',
-			'It subtracts two nearly equal numbers near 10^6 with about 7 decimal digits of precision',
-			'The population variance needs a division by n - 1',
+			'E[x^2] grows past the largest float32 value when the inputs are near 1000',
+			'Welford\'s algorithm is needed to compute E[x] for large values',
+			'It subtracts two nearly equal values near 10^6 in about 7 decimal digits',
+			'The population variance needs a division by n - 1 instead of n',
 		],
 		answer: 2,
 		why: 'Both terms are about 10^6 and agree in most of their digits, so the subtraction leaves few correct digits. The test `test_naive_variance_cancels` shows more than 1% error. 10^6 is far from overflow.',
@@ -163,10 +163,10 @@ export default [
 	{
 		q: 'Why does the Triton LayerNorm kernel use the two-pass variance instead of Welford?',
 		options: [
-			'Triton has no division',
-			'Welford cannot be merged across threads',
-			'The two-pass formula needs fewer registers',
-			'The row is already in registers, so the second pass costs no memory traffic, and two-pass is accurate',
+			'Triton has no division, which Welford needs for every update of the mean',
+			'Welford cannot be merged across threads, so a block-wide reduction would be wrong',
+			'The two-pass formula needs fewer registers than Welford\'s running state',
+			'The row is already in registers, so a second pass costs no memory traffic',
 		],
 		answer: 3,
 		why: 'With the row on chip, reading it twice is free, and the two-pass variance does not suffer the cancellation of E[x^2] - E[x]^2.',
