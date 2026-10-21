@@ -38,10 +38,10 @@ export default [
 	{
 		q: 'In a normal launch, why are blocks not allowed to wait for each other?',
 		options: [
-			'Blocks have no access to global memory',
-			'Each block runs on its own GPU',
-			'Blocks always run in order of `blockIdx`',
-			'So the hardware can hand blocks to whichever SM is free, in any order',
+			'Blocks have no access to global memory while they run',
+			'Each block runs on its own separate GPU in the machine',
+			'Blocks always run one after another, in the order of `blockIdx`',
+			'So the hardware can hand blocks to any free SM, in any order',
 		],
 		answer: 3,
 		why: 'Because blocks are independent, the same kernel runs on a GPU with a few dozen SMs or with more than a hundred. Blocks run in any order, not by `blockIdx`.',
@@ -107,10 +107,10 @@ export default [
 	{
 		q: 'Why does the 2D kernel map `x` to columns rather than rows?',
 		options: [
-			'Threads with consecutive `threadIdx.x` then touch consecutive addresses, which GPU memory serves fastest',
-			'The `x` dimension allows more blocks than `y`',
-			'Rows must always be handled by `blockIdx`',
-			'It avoids the need for a bounds check on rows',
+			'Consecutive `threadIdx.x` values then touch consecutive addresses',
+			'The `x` dimension allows far more blocks than the `y` dimension',
+			'Rows must always be handled by `blockIdx` rather than by the threads',
+			'It avoids the need for a separate bounds check on the rows',
 		],
 		answer: 0,
 		why: 'Neighboring threads in `x` reading neighboring addresses is the access pattern memory serves fastest. Chapter 6 measures it.',
@@ -128,7 +128,7 @@ export default [
 	},
 	{
 		q: 'In the Triton version, what plays the role of the `if (i < n)` bounds check?',
-		options: ['`tl.program_id(0)`', '`num_warps`', '`tl.arange(0, BLOCK)`', 'The mask on the loads and stores'],
+		options: ['`tl.program_id(0)`', 'The `num_warps` launch option', 'The offsets from `tl.arange(0, BLOCK)`', 'The mask on the loads and stores'],
 		answer: 3,
 		why: 'A Triton program handles a whole block of offsets, and the mask turns off the ones past the end. `tl.program_id(0)` plays the role of `blockIdx.x`.',
 	},

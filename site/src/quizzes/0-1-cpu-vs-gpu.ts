@@ -4,10 +4,10 @@ export default [
 	{
 		q: 'What does latency measure?',
 		options: [
-			'How many tasks finish per second',
-			'How many workers a machine has',
+			'How many tasks the machine finishes per second',
+			'How many workers the machine can run at once',
 			'How long one task takes from start to finish',
-			'How much data moves per second',
+			'How much data moves through memory per second',
 		],
 		answer: 2,
 		why: 'Latency is the time for one task. Tasks finished per second is throughput, a different number that can be high even when each task is slow.',
@@ -15,7 +15,7 @@ export default [
 	{
 		q: 'A shop has twenty checkout lanes with slower cashiers. Compared with one lane and a very fast cashier, what does it have?',
 		options: [
-			'Higher throughput, even though each customer waits longer at the till',
+			'Higher throughput, but each customer waits longer',
 			'Lower latency, because more customers are served at once',
 			'Both lower latency and higher throughput',
 			'Lower throughput, because each cashier is slower',
@@ -37,9 +37,9 @@ export default [
 	{
 		q: 'When does a GPU beat a CPU on a program?',
 		options: [
-			'Whenever the GPU has more arithmetic units',
-			'When there is enough work that can run at the same time to keep its lanes busy',
-			'When the program has a large serial part',
+			'Whenever the GPU has more arithmetic units than the CPU has cores',
+			'When enough work can run at the same time to keep its lanes busy',
+			'When the program has a large serial part that runs on one thread',
 			'When each single task must finish as fast as possible',
 		],
 		answer: 1,
@@ -78,8 +78,8 @@ export default [
 		q: 'Why can a GPU run the serial part of a program slower than a CPU does?',
 		options: [
 			'The serial part runs on one of its own threads, which is slow',
-			'The GPU splits the serial part across all its lanes',
-			'The GPU must copy the serial part to the CPU first',
+			'The GPU splits the serial part across all of its many lanes',
+			'The GPU must copy the serial part over to the CPU before running it',
 			'Amdahl\'s law adds a penalty for each extra worker',
 		],
 		answer: 0,
@@ -88,10 +88,10 @@ export default [
 	{
 		q: 'In the race simulation at `p` = 90% with the default settings, which team finishes first?',
 		options: [
-			'The CPU team',
-			'The GPU team',
-			'The team that runs the serial part on a CPU worker and the parallel part on the GPU workers',
-			'The CPU team and the GPU team tie',
+			'The CPU team, with a few fast workers',
+			'The GPU team, because 90% of the job runs in parallel',
+			'The third team, which uses both kinds of worker',
+			'The CPU team and the GPU team tie for first place',
 		],
 		answer: 2,
 		why: 'The third team runs the serial part at CPU speed and the parallel part on many GPU workers, so it is never slower than either of the others. Of the first two, the CPU team wins at 90%.',
@@ -101,8 +101,8 @@ export default [
 		options: [
 			'The simulation adds a fixed launch cost to every team',
 			'The serial part runs twice in the simulation',
-			'The GPU workers slow down as more of them are added',
-			'The last round of parallel work takes a full round even when only some workers have a unit left',
+			'The GPU workers each slow down as more of them join the race',
+			'A partial last round of parallel work still costs a full round',
 		],
 		answer: 3,
 		why: 'Work is handed out in rounds of one unit per worker. A partial last round still costs a whole round, which the formula does not count.',
@@ -110,10 +110,10 @@ export default [
 	{
 		q: 'In a CUDA program, what does the host do?',
 		options: [
-			'Runs the kernels on the GPU',
-			'Runs the serial parts, reads input, makes decisions and launches work',
-			'Copies data between GPU threads',
-			'Compiles kernels while they run',
+			'Runs the kernels on the many GPU threads',
+			'Runs the serial parts and launches the kernels',
+			'Copies data between threads inside a kernel',
+			'Compiles each kernel while it runs on the GPU',
 		],
 		answer: 1,
 		why: 'The host is the CPU, and it handles the serial parts and launches kernels. The device is the GPU, which runs the kernels.',
@@ -122,9 +122,9 @@ export default [
 		q: 'Which real cost does the race simulation leave out?',
 		options: [
 			'Moving data between the CPU\'s memory and the GPU\'s memory',
-			'The serial part of the job',
-			'Running the parallel part in rounds',
-			'The slower speed of each GPU worker',
+			'The serial part of the job, which runs on one worker',
+			'Running the parallel part in rounds of one unit per worker',
+			'The slower speed of each GPU worker compared with a CPU',
 		],
 		answer: 0,
 		why: 'The simulation models serial work, rounds and slow GPU workers, but not the copy between the two memories. For a job with little arithmetic per element, that copy can take longer than the computation.',
@@ -145,8 +145,8 @@ export default [
 		q: 'Why is the first GPU launch in each SAXPY program not timed?',
 		options: [
 			'It always produces a wrong result',
-			'It runs on the CPU instead of the GPU',
-			'It copies the result back, which is timed separately',
+			'It runs on the CPU instead of the GPU while the device starts up',
+			'It copies the result back to the CPU, and that copy is timed separately',
 			'It includes one-time setup, such as loading the kernel or compiling it',
 		],
 		answer: 3,

@@ -61,10 +61,10 @@ export default [
 	{
 		q: 'Why does switching between resident warps cost nothing?',
 		options: [
-			'Every resident warp keeps its own registers in the register file the whole time',
-			'The L2 cache stores the registers of waiting warps',
-			'All warps share the same registers',
-			'The switch happens only when a warp finishes',
+			'Each resident warp keeps its registers in the register file',
+			'The L2 cache holds the registers of the warps that are waiting',
+			'All warps on the SM share one common set of registers',
+			'The switch happens only when a warp has finished its work',
 		],
 		answer: 0,
 		why: 'Each warp\'s state stays in the register file, so there is nothing to save or restore. This is why the register file is so large.',
@@ -78,10 +78,10 @@ export default [
 	{
 		q: 'Why does a GPU need far more threads than it has cores?',
 		options: [
-			'Each core can only run one instruction per thread',
-			'Threads that finish early are thrown away',
-			'With only one warp per partition, little could hide the wait for memory',
-			'The L2 cache needs threads to fill it',
+			'Each core can only run one instruction for each thread it holds',
+			'Threads that finish early are thrown away and must be replaced',
+			'With one warp per partition, little could hide the wait for memory',
+			'The L2 cache needs many threads to keep it filled with useful data',
 		],
 		answer: 2,
 		why: 'Memory loads take far longer than arithmetic. Many resident warps give the scheduler something ready to issue while others wait.',
@@ -89,10 +89,10 @@ export default [
 	{
 		q: 'According to the chapter, why is a single GPU thread slower than a CPU thread?',
 		options: [
-			'Its arithmetic units run at a much lower precision',
-			'It shares its partition with many threads and only gets an instruction issued when it is ready and picked',
-			'It has no access to any cache',
-			'It must copy its data from the CPU first',
+			'Its arithmetic units run at a much lower precision than a CPU',
+			'It waits its turn to issue in a partition shared with many threads',
+			'It has no access to any cache, so it reads from DRAM on every load',
+			'It must copy its data over from the CPU before every instruction',
 		],
 		answer: 1,
 		why: 'The arithmetic itself is not slow. Each thread waits its turn in a busy partition, and the total work done per second is what is fast.',
@@ -117,7 +117,7 @@ export default [
 	{
 		q: 'Which statement about a running block is true?',
 		options: [
-			'It can move between SMs to balance the load',
+			'It can move between SMs while it runs to balance the load',
 			'Its threads are spread over several SMs',
 			'It runs on one SM and does not move while it runs',
 			'It runs on one partition only',
@@ -140,8 +140,8 @@ export default [
 		q: 'What must an SM have free before it can take one more block?',
 		options: [
 			'Only a free block slot',
-			'An idle partition for every thread in the block',
-			'Enough L2 cache for the block\'s data',
+			'An idle partition and a free CUDA core for every thread in the block',
+			'Enough free space in the L2 cache for all of the block\'s data',
 			'A free block slot and enough registers, shared memory and warp slots',
 		],
 		answer: 3,
