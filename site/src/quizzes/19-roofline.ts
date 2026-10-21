@@ -19,7 +19,7 @@ export default [
 			'Half of the dense FP16 tensor figure',
 			'1/2 of the 8.1 TFLOPS FP32 rate, as on the A100',
 			'The INT8 figure divided by the bandwidth',
-			'1/32 of the 8.1 TFLOPS FP32 rate, from the Turing whitepaper',
+			'1/32 of the 8.1 TFLOPS FP32 rate',
 		],
 		answer: 3,
 		why: 'The Turing whitepaper says FP64 runs at 1/32 of FP32, and 8.1 / 32 is about 0.25. The CUDA Programming Guide agrees: 2 FP64 results per clock per SM against 64 FP32 on compute capability 7.5.',
@@ -28,12 +28,12 @@ export default [
 		q: 'Why does the table halve the tensor figures printed on the H100 product page?',
 		options: [
 			'The page quotes two GPUs together',
-			'The page prints only figures with sparsity, which assume two of every four values are zero',
+			'The page prints figures with sparsity, which double the dense rate',
 			'The page quotes FP16 accumulation, which runs at twice the FP32 accumulation rate',
 			'The page quotes base clock, which is half of boost',
 		],
 		answer: 1,
-		why: 'Sparse figures are double the dense ones. An ordinary matrix multiply can only reach the dense rate, so the table halves them. On these data center GPUs FP16 and FP32 accumulation run at the same rate.',
+		why: 'The page prints only sparse figures, which assume two of every four values are zero and double the dense ones. An ordinary matrix multiply can only reach the dense rate, so the table halves them. On these data center GPUs FP16 and FP32 accumulation run at the same rate.',
 	},
 	{
 		q: 'When counting bytes for arithmetic intensity, a kernel reads a value twice and the second read is served from L2. How often does it count?',
@@ -67,10 +67,10 @@ export default [
 	{
 		q: 'The T4 has the lowest FP32 peak of the three GPUs. How does its FP32 ridge compare with the A100 one?',
 		options: [
-			'Lower, because its peak is lower',
+			'Lower, because its peak is lower than the A100 peak',
 			'The same, because both are FP32',
-			'Higher, about 27 against 9.56, because its bandwidth is much lower',
-			'Undefined, because the T4 has no TF32 roof',
+			'Higher, because its bandwidth is much lower',
+			'Undefined, because the T4 has no TF32 tensor roof',
 		],
 		answer: 2,
 		why: 'The ridge is peak over bandwidth: 8.1 TFLOPS over 300 GB/s is 27. The low bandwidth matters more than the low peak, so the T4 needs the most reuse per byte.',
@@ -79,7 +79,7 @@ export default [
 		q: 'Switching the A100 roof from FP32 to FP16 tensor moves the ridge from about 9.56 to about 153 FLOP/byte. Why?',
 		options: [
 			'FP16 data halves the bytes of every kernel',
-			'Tensor cores raise the peak and leave the bandwidth where it was',
+			'Tensor cores raise the peak but not the bandwidth',
 			'Tensor cores read data through a faster memory path',
 			'The tensor roof counts an FMA as 32 FLOPs',
 		],
@@ -100,10 +100,10 @@ export default [
 	{
 		q: 'In the simulation, the default kernel is 2^30 FLOPs over 2^32 bytes. You double the FLOPs. What happens?',
 		options: [
-			'The point moves right along the slope and the modeled time stays the same',
-			'The point moves up to the flat roof',
-			'The modeled time doubles',
-			'The point moves left, because intensity falls',
+			'The point moves right on the slope and the time stays the same',
+			'The point moves up to the flat roof and the kernel becomes compute-bound',
+			'The modeled time doubles, since twice the FLOPs must run',
+			'The point moves left, because the intensity falls',
 		],
 		answer: 0,
 		why: 'Intensity goes from 0.25 to 0.5 FLOP/byte, still on the slope. The time is set by the bytes, which did not change. 0.5 is still far from the ridge.',
@@ -123,13 +123,13 @@ export default [
 	{
 		q: 'Where does the chapter 11 transpose belong on the roofline chart?',
 		options: [
-			'On the flat roof, since it moves no data twice',
-			'Nowhere on a FLOP roofline: it does no arithmetic, so it is judged in GB/s against the bandwidth',
+			'On the flat roof, since it reads and writes each element once',
+			'Nowhere: it does no arithmetic, so it is judged in GB/s',
 			'At 0.25 FLOP/byte, like the sum reduction',
 			'Right of the ridge, since it uses shared memory',
 		],
 		answer: 1,
-		why: 'Zero FLOPs gives zero intensity, which a log axis cannot show. Chapter 11 measured it in GB/s, which is the slope of this chart read in bytes.',
+		why: 'It has no place on a FLOP roofline. Zero FLOPs gives zero intensity, which a log axis cannot show. Chapter 11 measured it in GB/s, which is the slope of this chart read in bytes.',
 	},
 	{
 		q: 'A tiled FP32 GEMM has intensity T / 4 for T x T tiles. What is it for 16 x 16 tiles?',
@@ -154,7 +154,7 @@ export default [
 			'NVIDIA datasheets do not list L1 or L2 bandwidth',
 			'L1 and L2 are never the limit for a GPU kernel',
 			'L1 and L2 have the same bandwidth as DRAM',
-			'A hierarchical roofline only exists for CPUs',
+			'A hierarchical roofline is only defined for CPUs, not GPUs',
 		],
 		answer: 0,
 		why: 'The chart uses datasheet figures, and those give no cache bandwidth. Nsight Compute hierarchical roofline sections draw L1, L2 and DRAM ceilings for the GPU you profile on.',

@@ -15,13 +15,13 @@ export default [
 	{
 		q: 'Which of these is a data race as the chapter defines it?',
 		options: [
-			'Two threads read the same shared value with no barrier',
+			'Two threads read the same shared value with no barrier between',
 			'One thread writes a value and reads it back',
-			'Two threads access the same location, at least one writes, and nothing orders the accesses',
+			'Two unordered accesses to one location, at least one a write',
 			'Two warps write to different elements of one array',
 		],
 		answer: 2,
-		why: 'Two reads cannot conflict, and one thread is ordered with itself. The result of a race depends on the order the hardware happens to run the accesses.',
+		why: 'A race needs two threads accessing the same location, at least one writing, with nothing ordering them. Two reads cannot conflict, and one thread is ordered with itself. The result of a race depends on the order the hardware happens to run the accesses.',
 	},
 	{
 		q: 'In the simulation with 2 threads, thread 1 loads before thread 0 stores. What does `count` hold at the end?',
@@ -34,7 +34,7 @@ export default [
 		options: [
 			'The 32 threads of a warp run the same instruction together',
 			'Shared memory serves loads before stores',
-			'The scheduler always runs threads in reverse order',
+			'The scheduler always runs the threads of a block in reverse order',
 			'Atomics are disabled for shared memory',
 		],
 		answer: 0,
@@ -49,10 +49,10 @@ export default [
 	{
 		q: 'Besides `atomicAdd`, what fix does the chapter give for a shared counter?',
 		options: [
-			'Add `__syncthreads()` before `count += 1`',
+			'Add a `__syncthreads()` barrier right before `count += 1`',
 			'Declare `count` as `volatile`',
 			'Run the kernel with one block',
-			'Give each thread its own partial count and add them in a reduction',
+			'Give each thread a partial count and reduce them',
 		],
 		answer: 3,
 		why: 'If nothing is shared, nothing can race. Chapter 13 covers the reduction, and chapter 15 measured the price of atomics on one address.',
@@ -67,18 +67,18 @@ export default [
 		q: 'Why does the Makefile run memcheck with `--padding 32`?',
 		options: [
 			'It aligns every allocation to 32 bytes for faster access',
-			'Two allocations can sit back to back, so a read one past the end would land in the next buffer undetected',
+			'A read one past the end could land in the next buffer undetected',
 			'It limits the report to 32 errors',
-			'It checks 32 threads at a time to save memory',
+			'It checks 32 threads at a time to keep memory use of the tool low',
 		],
 		answer: 1,
-		why: 'The padding puts a 32 byte guard after every allocation, so an overflow always hits invalid memory.',
+		why: 'Two allocations can sit back to back. The padding puts a 32 byte guard after every allocation, so an overflow always hits invalid memory.',
 	},
 	{
 		q: 'A kernel has a race on a counter in global memory. What does racecheck report?',
 		options: [
-			'A write after write hazard',
-			'A read after write hazard',
+			'A write after write hazard on the counter',
+			'A read after write hazard between the two blocks',
 			'An out-of-bounds write',
 			'Nothing: racecheck only checks shared memory',
 		],
@@ -90,7 +90,7 @@ export default [
 		options: [
 			'The memset clears `n` bytes, not `n` ints; initcheck',
 			'The memset runs in the wrong stream; racecheck',
-			'The memset writes past the end; memcheck',
+			'The memset writes past the end of the array; memcheck',
 			'The memset is not followed by a barrier; synccheck',
 		],
 		answer: 0,
@@ -106,19 +106,19 @@ export default [
 		q: 'A kernel is launched with 2,048 threads per block. Nobody checks for errors. What happens?',
 		options: [
 			'The kernel runs with 1,024 threads',
-			'The kernel does not run, and the program carries on with the old contents of memory',
+			'The kernel silently does not run',
 			'The program crashes at the launch',
 			'The driver splits it into two blocks',
 		],
 		answer: 1,
-		why: 'The limit is 1,024. A launch returns no error code, so only `cudaGetLastError` or `cudaPeekAtLastError` right after it reveals the failure.',
+		why: 'The limit is 1,024, and the program carries on with the old contents of memory. A launch returns no error code, so only `cudaGetLastError` or `cudaPeekAtLastError` right after it reveals the failure.',
 	},
 	{
 		q: 'Why does `CUDA_CHECK_LAUNCH` call `cudaDeviceSynchronize()` after `cudaGetLastError()`?',
 		options: [
-			'`cudaGetLastError` only works after a synchronize',
+			'`cudaGetLastError` only works after a device synchronize',
 			'To reset the sticky error',
-			'Errors that happen while the kernel runs show up only after a synchronization',
+			'Errors during the kernel show up only after a sync',
 			'To free the launch resources',
 		],
 		answer: 2,
@@ -138,18 +138,18 @@ export default [
 	{
 		q: 'In the Numba simulator, a kernel reads `x[i - 1]` with `i = 0`. What happens?',
 		options: [
-			'It silently reads the last element, as NumPy does',
-			'It raises `IndexError`',
+			'It reads the last element',
+			'It raises an `IndexError` exception',
 			'It reads 0',
 			'The simulator stops at a breakpoint',
 		],
 		answer: 0,
-		why: 'Arrays are NumPy arrays, and a negative index wraps around. Only an index past the end raises `IndexError`.',
+		why: 'Arrays are NumPy arrays, and a negative index silently wraps around to the last element. Only an index past the end raises `IndexError`.',
 	},
 	{
 		q: 'Why does `count_racy` almost always give the right count in the Numba simulator?',
 		options: [
-			'The simulator uses atomics for every `+=`',
+			'The simulator turns every `+=` on a shared array into an atomic add',
 			'Python rarely switches threads in the middle of `count[0] += 1`',
 			'The simulator runs one thread per block',
 			'NumPy arrays cannot be shared',
@@ -167,12 +167,12 @@ export default [
 		q: 'What is the first step of the profiling workflow in the chapter?',
 		options: [
 			'Profile every kernel with `--set full`',
-			'Time the whole thing, with wall clock or CUDA events',
+			'Time the whole thing end to end',
 			'Read the warp stall reasons',
 			'Run racecheck',
 		],
 		answer: 1,
-		why: 'You need to know what you are trying to shrink. Then Nsight Systems finds the kernel that matters, and only then Nsight Compute profiles it.',
+		why: 'Use wall clock or CUDA events. You need to know what you are trying to shrink. Then Nsight Systems finds the kernel that matters, and only then Nsight Compute profiles it.',
 	},
 	{
 		q: 'Which `nsys stats` report gives the time per kernel?',
@@ -189,24 +189,24 @@ export default [
 	{
 		q: 'Why does the chapter use `--launch-count 2` with `--kernel-name regex:count_` on `./bugs race`?',
 		options: [
-			'`./bugs race` launches `count_racy` once and `count_atomic` once, so 2 covers both',
-			'Each kernel needs two replay passes',
+			'`./bugs race` launches each counter kernel once',
+			'Each kernel needs two replay passes to collect its sections',
 			'The first launch is a warm-up and is discarded',
 			'Two is the minimum for the Speed Of Light section',
 		],
 		answer: 0,
-		why: '`--launch-count` stops after that many matching launches, and `regex:` makes the name a partial match for both counters.',
+		why: 'It launches `count_racy` once and `count_atomic` once, so 2 covers both. `--launch-count` stops after that many matching launches, and `regex:` makes the name a partial match for both counters.',
 	},
 	{
 		q: 'Speed Of Light shows memory at 12% and compute at 9%. What does the chapter suggest?',
 		options: [
 			'The kernel is memory-bound; check Memory Workload Analysis',
 			'The kernel is compute-bound; check Compute Workload Analysis',
-			'The kernel is waiting; check the launch, Occupancy and warp stall reasons',
+			'The kernel is waiting; check Occupancy and stall reasons',
 			'The profiler overhead hides the real numbers; use Nsight Systems',
 		],
 		answer: 2,
-		why: 'Both low means neither limit is the problem. Too few blocks, too few warps per SM, or loads that cannot hide latency are the usual causes.',
+		why: 'Both low means neither limit is the problem, so check the launch, Occupancy and warp stall reasons. Too few blocks, too few warps per SM, or loads that cannot hide latency are the usual causes.',
 	},
 	{
 		q: 'Most samples in a kernel are Long Scoreboard stalls. What are the warps waiting for?',
@@ -240,11 +240,11 @@ export default [
 		q: 'A kernel takes noticeably different times in Nsight Compute and in your CUDA event timer. Why?',
 		options: [
 			'CUDA events have a resolution of only 1 ms',
-			'Nsight Compute runs the kernel on fewer SMs',
-			'Nsight Compute replays the kernel, locks the SM clocks and flushes caches between passes by default',
+			'Nsight Compute runs the kernel on fewer SMs to reduce overhead',
+			'Nsight Compute locks clocks and flushes caches by default',
 			'Nsight Compute skips the first launch',
 		],
 		answer: 2,
-		why: 'Compare kernels with `gpu__time_duration` from the same tool, and measure end-to-end time without it. Nsight Systems records one normal run, so its times are closer to what the program sees.',
+		why: 'By default it replays the kernel, locks the SM clocks and flushes caches between passes. Compare kernels with `gpu__time_duration` from the same tool, and measure end-to-end time without it. Nsight Systems records one normal run, so its times are closer to what the program sees.',
 	},
 ] satisfies Question[];
