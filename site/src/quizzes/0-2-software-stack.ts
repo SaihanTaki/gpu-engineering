@@ -5,9 +5,9 @@ export default [
 		q: 'Which statement about the NVIDIA driver is true?',
 		options: [
 			'It is part of the CUDA Toolkit and installed with `nvcc`',
-			'It is only used by CUDA programs, not graphics',
-			'It is installed separately from the CUDA tools, and every use of the GPU goes through it',
-			'It is linked into each program statically by `nvcc`',
+			'It is only used by CUDA programs, not by graphics',
+			'It is installed separately and handles every use of the GPU',
+			'It is linked into each program statically by `nvcc` at build time',
 		],
 		answer: 2,
 		why: 'The driver is installed on the machine on its own and handles all GPU use, graphics included. The toolkit is a separate product, and the runtime is what `nvcc` links statically.',
@@ -37,10 +37,10 @@ export default [
 	{
 		q: 'Why does PTX exist?',
 		options: [
-			'It runs faster than SASS on every GPU',
-			'It is a stable virtual instruction set, so programs do not need rebuilding for every new GPU',
-			'It is the only format the driver can load',
-			'It lets the CPU run GPU kernels',
+			'It runs faster than SASS on every GPU generation',
+			'It stays stable, so programs need no rebuild for each new GPU',
+			'It is the only code format the driver can load onto a GPU at run time',
+			'It lets the CPU run GPU kernels when no GPU is present',
 		],
 		answer: 1,
 		why: 'PTX is documented, plain text and kept stable across generations. Without it, every program would have to be recompiled to new SASS for each new GPU.',
@@ -48,10 +48,10 @@ export default [
 	{
 		q: 'What does `ptxas` do?',
 		options: [
-			'Compiles CUDA C++ source to PTX',
-			'Lists the cubins inside a fatbin',
-			'Compiles PTX to SASS for one GPU and packs it into a cubin',
-			'Loads a cubin onto the GPU at run time',
+			'Compiles CUDA C++ source code into PTX text',
+			'Lists the cubins and PTX versions inside a fatbin',
+			'Compiles PTX to SASS and packs it into a cubin',
+			'Loads a cubin onto the GPU when the program runs',
 		],
 		answer: 2,
 		why: '`ptxas` is the PTX assembler, the second compile step. The front end writes PTX first, and the driver is what loads code at run time.',
@@ -59,9 +59,9 @@ export default [
 	{
 		q: 'What is the difference between `compute_80` and `sm_80`?',
 		options: [
-			'`compute_80` is PTX for a virtual architecture, `sm_80` is SASS for a real one',
-			'`compute_80` is for the A100, `sm_80` is for the H100',
-			'`compute_80` is SASS, `sm_80` is PTX',
+			'`compute_80` is PTX for a virtual GPU, `sm_80` is SASS for a real one',
+			'`compute_80` targets the A100 GPU, while `sm_80` targets the H100 GPU',
+			'`compute_80` is SASS for a real GPU, `sm_80` is PTX for a virtual GPU',
 			'They are two names for the same target',
 		],
 		answer: 0,
@@ -115,9 +115,9 @@ export default [
 	{
 		q: 'The driver JIT compiles PTX when a program starts. What happens to the result?',
 		options: [
-			'It is thrown away when the program exits',
-			'It is kept in a cache on disk, which is emptied when the driver is upgraded',
-			'It is written back into the program\'s fatbin',
+			'It is thrown away as soon as the program exits',
+			'It is kept in a disk cache until the driver is upgraded',
+			'It is written back into the fatbin inside the program\'s executable',
 			'It is uploaded to NVIDIA for reuse',
 		],
 		answer: 1,
@@ -126,19 +126,19 @@ export default [
 	{
 		q: 'What is a fatbin?',
 		options: [
-			'A single cubin for the newest GPU',
+			'A single cubin built for the newest GPU in the machine',
 			'The PTX text file written by `nvcc -ptx`',
-			'A container in the executable that can hold several cubins and PTX versions',
-			'The driver\'s cache of JIT compiled code',
+			'A container that can hold several cubins and PTX versions',
+			'The driver\'s on-disk cache of JIT compiled SASS for each GPU',
 		],
 		answer: 2,
 		why: '`nvcc` embeds all the GPU code in a fatbin, and at run time the driver picks the best code in it for the GPU it finds.',
 	},
 	{
 		q: 'What does Numba hand to NVIDIA\'s NVVM compiler?',
-		options: ['NVVM IR, which is LLVM IR with NVIDIA\'s rules', 'CUDA C++ source', 'TritonGPU IR', 'SASS'],
+		options: ['NVVM IR', 'CUDA C++ source', 'TritonGPU IR', 'SASS'],
 		answer: 0,
-		why: 'Numba compiles the Python function to NVVM IR, and NVVM turns it into PTX. Neither Numba nor Triton needs `nvcc`.',
+		why: 'Numba compiles the Python function to NVVM IR, which is LLVM IR with NVIDIA\'s rules, and NVVM turns it into PTX. Neither Numba nor Triton needs `nvcc`.',
 	},
 	{
 		q: 'In Triton\'s pipeline, at which stage does it first decide which thread holds which elements?',
@@ -172,10 +172,10 @@ export default [
 	{
 		q: 'Why does Triton\'s PTX start with `.version 8.8` while Numba\'s starts with `.version 9.4`?',
 		options: [
-			'Triton targets an older GPU than Numba',
+			'Triton targets an older GPU architecture than Numba does',
 			'The PTX version is fixed by the GPU\'s compute capability',
 			'Numba runs `nvcc` and Triton does not',
-			'Triton derives the PTX version from the `ptxas` it bundles, which is from CUDA 12.9',
+			'Triton matches the PTX version to its bundled `ptxas`',
 		],
 		answer: 3,
 		why: 'Both listings target `sm_80`. The version depends on the tool: Numba\'s NVVM from `nvidia-nvvm` 13.4.92 writes 9.4, and Triton matches its bundled CUDA 12.9 `ptxas`.',
@@ -191,10 +191,10 @@ export default [
 		options: [
 			'Call the kernel\'s `inspect_sass()`',
 			'Read the kernel\'s `asm` dictionary',
-			'Call `numba.cuda.compile_ptx(fn, signature, cc=(8, 0))`',
+			'Call `numba.cuda.compile_ptx`',
 			'Run `nvcc -ptx` on the Python file',
 		],
 		answer: 2,
-		why: '`compile_ptx` returns PTX for a chosen compute capability without a GPU. `inspect_sass()` needs a GPU, and the `asm` dictionary belongs to Triton.',
+		why: '`numba.cuda.compile_ptx(fn, signature, cc=(8, 0))` returns PTX for a chosen compute capability without a GPU. `inspect_sass()` needs a GPU, and the `asm` dictionary belongs to Triton.',
 	},
 ] satisfies Question[];
