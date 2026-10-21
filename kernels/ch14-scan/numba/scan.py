@@ -98,18 +98,25 @@ def add_offsets(out, offsets, per_block):
 ALGOS = {"hillis-steele": (scan_hillis_steele, BLOCK), "blelloch": (scan_blelloch, ITEMS)}
 
 
-def scan_device(algo, inclusive, d_in, d_out):
+def scratch_for(n):
+    # 2 ints per tile at every level, as in scan.cu.
+    return cuda.device_array(n // 64 + 64, dtype=np.int32)
+
+
+def scan_device(algo, inclusive, d_in, d_out, scratch=None):
     """Scan-then-add: scan every tile, scan the tile totals, add each tile's offset."""
     kernel, per_block = ALGOS[algo]
     n = d_in.size
     tiles = (n + per_block - 1) // per_block
-    sums = cuda.device_array(tiles, dtype=np.int32)
+    if scratch is None:
+        scratch = scratch_for(n)
+    sums = scratch[:tiles]
     kernel[tiles, BLOCK](d_in, d_out, sums, inclusive)
     if tiles == 1:
         return
-    offsets = cuda.device_array(tiles, dtype=np.int32)
+    offsets = scratch[tiles : 2 * tiles]
     # The same scan, exclusive, on the tile totals; recursion handles more than one tile of them.
-    scan_device(algo, False, sums, offsets)
+    scan_device(algo, False, sums, offsets, scratch[2 * tiles :])
     add_offsets[(n + 255) // 256, 256](d_out, offsets, per_block)
 
 
@@ -126,6 +133,7 @@ if __name__ == "__main__":
     x = np.random.default_rng(0).integers(0, 10, n, dtype=np.int32)
     d_in = cuda.to_device(x)
     d_out = cuda.device_array(n, dtype=np.int32)
+    scratch = scratch_for(n)
     incl = np.cumsum(x, dtype=np.int64).astype(np.int32)
 
     # Effective bandwidth counts each element read once and written once.
@@ -133,13 +141,13 @@ if __name__ == "__main__":
     for algo in ALGOS:
         for inclusive in (True, False):
             # The first call compiles the kernels and is checked, not timed.
-            scan_device(algo, inclusive, d_in, d_out)
+            scan_device(algo, inclusive, d_in, d_out, scratch)
             want = incl if inclusive else incl - x
             np.testing.assert_array_equal(d_out.copy_to_host(), want)
             cuda.synchronize()
             t0 = time.perf_counter()
             for _ in range(reps):
-                scan_device(algo, inclusive, d_in, d_out)
+                scan_device(algo, inclusive, d_in, d_out, scratch)
             cuda.synchronize()
             seconds = (time.perf_counter() - t0) / reps
             kind = "inclusive" if inclusive else "exclusive"
