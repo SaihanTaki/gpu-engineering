@@ -3,8 +3,6 @@ title: 24. Softmax and LayerNorm
 description: Why exp overflows and how subtracting the max fixes it, how the online softmax finds the max and the sum in one pass and merges partial results, and how LayerNorm computes mean and variance with Welford's algorithm in one fused kernel.
 sidebar:
   order: 24
-banner:
-  content: Draft chapter. If something is wrong or unclear, use the edit link at the bottom of the page.
 ---
 
 import OnlineSoftmax from '@sims/online-softmax/OnlineSoftmax.astro';
@@ -150,7 +148,7 @@ Things to try:
   every chunk after the first rescales the old sum, by e<sup>-3.2</sup> =
   {fmt(inc[1].rescale)} each time. The final m is {fmt(inc.at(-1).m)}.
 - **Online, one 100, chunk 4.** The third chunk holds the 100. Its rescale
-  factor is e<sup>3.9 - 100</sup> = {fmt(huge[2].rescale)}: everything
+  factor is e<sup>{fmt(huge[2].mOld)} - {fmt(huge[2].m)}</sup> = {fmt(huge[2].rescale)}: everything
   before it is now negligible, and the 100 ends up with probability 1.
 - **Naive, one 100, FP32.** `exp(100)` overflows, d becomes inf and the
   output has a NaN where the 100 was and zeros everywhere else. Safe and
@@ -162,8 +160,8 @@ Things to try:
   twice, safe three times.
 
 The sim computes in double precision and models only the range of each
-format: values above its largest finite number become inf, values below its
-smallest become 0. It does not model rounding, caches, or the threads inside
+format: values above its largest finite number become inf, values below half its
+smallest subnormal become 0. It does not model rounding, caches, or the threads inside
 a chunk.
 
 ## Mapping rows to threads
@@ -193,9 +191,11 @@ own kernel (chapter 12). The Triton softmax tutorial does this for
 `x - x.max(dim=1)`, `exp`, `sum` and the divide, and finds that it reads
 5MN + 2M elements and writes 3MN + 2M for an M x N matrix. One fused kernel
 that reads the row, keeps it on chip and writes the result moves MN of each.
-The tutorial's Triton kernel does exactly that: one program per row, the
-whole row loaded into registers as one block, max, `exp`, sum and divide on
-chip, one store. On a row that fits, it reads each element once.
+The tutorial's Triton kernel does that: it launches a fixed number of
+programs, and each loops over rows with a stride of `tl.num_programs(0)`,
+loading a whole row into registers as one block, doing max, `exp`, sum and
+divide on chip, and storing it once. On a row that fits, it reads each
+element once.
 
 Per float32 element, the kernels in this chapter move:
 
@@ -291,8 +291,8 @@ the two-pass variance is accurate.
 >
 	<div slot="triton-note">
 		Triton programs a whole block of data at once, so there is no thread-level reduction to write. `softmax_kernel` is
-		the fused softmax from the Triton tutorial: one program per row, `BLOCK` the next power of two above the row
-		length, padding loaded as `-inf` so it never wins `tl.max` and its `exp` is 0. `tl.max` and `tl.sum` build the
+		the fused softmax from the Triton tutorial, simplified to one program per row instead of a loop over rows with a
+		stride, `BLOCK` the next power of two at or above the row length, padding loaded as `-inf` so it never wins `tl.max` and its `exp` is 0. `tl.max` and `tl.sum` build the
 		reductions. `layernorm_kernel` does the same for LayerNorm and uses the two-pass variance, because the row is
 		already on chip. Both need the row to fit in one block; longer rows need a loop, as in the CUDA kernels.
 	</div>

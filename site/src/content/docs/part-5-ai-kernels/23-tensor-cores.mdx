@@ -3,8 +3,6 @@ title: 23. Tensor cores and mixed precision
 description: FP32, TF32, FP16, BF16 and FP8 bit by bit, why tensor cores multiply in low precision and add in FP32, which lane of a warp holds which matrix element, and a WMMA GEMM in CUDA C++ next to tl.dot in Triton.
 sidebar:
   order: 23
-banner:
-  content: Draft chapter. If something is wrong or unclear, use the edit link at the bottom of the page.
 ---
 
 import BitLayout from '@sims/bit-layout/BitLayout.astro';
@@ -89,7 +87,9 @@ Read the table in pairs:
   is rounding off the low 16 bits.
 - **TF32** has FP32's exponent and FP16's mantissa, 19 bits in all. It is not
   a storage format: values sit in ordinary 32-bit FP32 registers and memory,
-  and the tensor cores use only the top 19 bits.
+  and the tensor cores use only the top 19 bits. PTX's `cvt.rna.tf32.f32`
+  rounds ties away from zero; the simulation below rounds TF32 ties to even
+  like the other formats.
 - **FP8** comes in two encodings, both 8 bits. E4M3 has more precision, E5M2
   more range. The FP8 paper by Micikevicius et al. recommends "E4M3 for
   weight and activation tensors, and E5M2 for gradient tensors". E5M2
@@ -160,8 +160,9 @@ saves registers and output bytes, not tensor-core time.
 
 Training a network in FP16 needs two more measures, from Micikevicius et al.,
 *Mixed Precision Training*: an FP32 master copy of the weights that the
-updates are added to, and **loss scaling**. Some gradients are smaller than
-2<sup>-24</sup>, the smallest FP16 subnormal, and would become 0.
+updates are added to, and **loss scaling**. The smallest FP16 subnormal is
+2<sup>-24</sup>. Gradients at or below 2<sup>-25</sup> become 0, and those
+in between round up to 2<sup>-24</sup>.
 Multiplying the loss by a factor S, often a power of two, scales every
 gradient by S by the chain rule and lifts them into FP16's range; the
 optimizer divides by S in FP32 before the update. Dynamic loss scaling, as
@@ -246,7 +247,7 @@ C and D, 16 x 8, c0..c3 in four .f32 registers
 Pick a lane and see its 8 + 4 + 4 elements, or click any cell to see which
 lane holds it and in which register. Steps 4 to 7 follow the four outputs
 of the selected lane: each needs a row of A held by 4 lanes and a column of
-B held by 4 other lanes.
+B held by 4 lanes.
 
 <MmaFragment />
 
@@ -289,9 +290,9 @@ FP16 with `cuda.fp16.hfma` in the other. These run on the CUDA cores.
 </CodeTabs>
 
 The tests in `test_correctness.py` compare every kernel against an FP64
-NumPy product of the same FP16 inputs, with error bounds set by the
-accumulator's precision: about K x 2<sup>-24</sup> of the sum of
-|a| x |b| for FP32, K x 2<sup>-11</sup> for FP16. They include the
+product of the same inputs, with error bounds set by the accumulator's
+precision: about K x 2<sup>-24</sup> of the sum of |a| x |b| for FP32,
+2K x 2<sup>-11</sup> for FP16. They include the
 2,048 stall above. Without a GPU, they run the Numba kernels on the
 simulator and the Triton kernel in its interpreter, compile the WMMA header
 with NVRTC for sm_75, sm_80 and sm_90, and compile the Numba kernels to PTX.
@@ -307,8 +308,9 @@ instructions in the PTX. With Triton 3.8.0:
 The counts are per thread for one trip around the K loop.
 
 - **sm_80**, FP16: the `mma.sync` m16n8k16 instruction from the simulation
-  above. Four warps share a 128 x 128 tile, 64 x 64 each; that is 8 x 8
-  instructions per 16 of K, 64 for the 32 of K in one loop trip.
+  above. Four warps share a 128 x 128 tile, 64 x 64 each; that is
+  (64 / 16) x (64 / 8) = 4 x 8 = 32 instructions per 16 of K, 64 for the 32
+  of K in one loop trip.
 - **sm_90**: `wgmma` on 64 x 128 tiles for the whole warpgroup.
 - **TF32**: a separate instruction with k = 8, because a TF32 value takes
   32 bits in a register where FP16 takes 16.
