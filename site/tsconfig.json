@@ -8,6 +8,7 @@
       "@components/*": ["src/components/*"],
       "@sims/*": ["src/sims/*"],
       "@sim-core/*": ["src/sim-core/*"],
+      "@quizzes/*": ["src/quizzes/*"],
       "@kernels/*": ["../kernels/*"]
     }
   }
