@@ -262,8 +262,10 @@ and look at `generated/triton.ttgir` and `triton.ptx`.
 <details>
 <summary>Answer</summary>
 
-With the tool versions in `generated/VERSIONS.txt`, nothing changes: for the
-same input and target the compilers write the same files. A different NVVM or
+With the tool versions in `generated/VERSIONS.txt`, no text listing changes: for the
+same input and target the compilers write the same TTIR, TTGIR, PTX and SASS.
+The binary `triton.cubin` can still differ byte for byte, so `git status` may
+list it. A different NVVM or
 `ptxas` can change the listings, which is why the versions are recorded. With `BLOCK` = 256 the TTIR tensors become
 `tensor<256x...>` and the TTGIR layout changes to `sizePerThread = [2]`. The
 128 threads now cover the block in one pass with 2 elements each, so the PTX
