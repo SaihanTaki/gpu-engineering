@@ -15,6 +15,8 @@ import cuda from '@kernels/ch23-tensor-cores/cuda/wmma_gemm.cuh?raw';
 import numba from '@kernels/ch23-tensor-cores/numba/fp16_gemm.py?raw';
 import triton from '@kernels/ch23-tensor-cores/triton/matmul.py?raw';
 import ptxCounts from '@kernels/ch23-tensor-cores/triton/show_ptx.out.txt?raw';
+import Quiz from '@components/Quiz.astro';
+import quiz from '@quizzes/23-tensor-cores';
 
 export const t4 = gpuById('t4');
 export const a100 = gpuById('a100');
@@ -425,6 +427,10 @@ inside one instruction is not specified for WMMA, so this argument only
 covers the rounding into C.
 
 </details>
+
+## Quiz
+
+<Quiz questions={quiz} />
 
 ## Further reading
 

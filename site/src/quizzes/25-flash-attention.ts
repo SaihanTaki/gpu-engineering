@@ -1,0 +1,213 @@
+import type { Question } from './types';
+
+export default [
+	{
+		q: 'One head with N = 4,096 and d = 64 in FP16. How large is the score matrix S?',
+		options: ['2 MiB', '8 MiB', '32 MiB', '64 MiB'],
+		answer: 2,
+		why: '4,096 x 4,096 = 16,777,216 entries at 2 bytes each is 32 MiB, sixteen times the 2 MiB of Q, K, V and O together.',
+	},
+	{
+		q: 'A causal mask sets which scores to -∞?',
+		options: ['S_ij for j > i', 'S_ij for j < i', 'S_ij for i = j', 'S_ij for |i - j| > d'],
+		answer: 0,
+		why: 'Token i may only see tokens 0 to i, so every key after the query, j > i, is masked.',
+	},
+	{
+		q: 'How many FLOPs does attention take, counting as the FlashAttention-2 paper does?',
+		options: ['2N^2d', 'N^2d', '4Nd^2', '4N^2d'],
+		answer: 3,
+		why: 'S = QKᵀ and O = PV are 2N^2d each, so 4N^2d in total. The softmax adds only a few operations per entry of S. For N = 4,096 and d = 64 that is about 4.29 GFLOPs per head.',
+	},
+	{
+		q: 'In Algorithm 0, standard attention, how many elements are read in total?',
+		options: ['3Nd + 2N^2', '2Nd + N^2', '3Nd + 4N^2', '4Nd'],
+		answer: 0,
+		why: 'S = QKᵀ reads Q and K (2Nd), the softmax reads S (N^2), and O = PV reads P and V (N^2 + Nd). That sums to 3Nd + 2N^2.',
+	},
+	{
+		q: 'Why does a causal mask not reduce the HBM traffic of standard attention?',
+		options: [
+			'The mask is applied after O is written',
+			'S and P are still full N x N matrices, with -∞ and 0 above the diagonal',
+			'The mask doubles the work of the softmax',
+			'The masked scores are recomputed in the backward pass',
+		],
+		answer: 1,
+		why: 'The three kernels still write and read the full S and P. Only a tiled kernel that skips whole tiles can save the traffic.',
+	},
+	{
+		q: 'At N = 4,096, d = 64 in FP16, standard attention moves 130 MiB per head. About what share of that is S and P?',
+		options: ['50%', '75%', '90%', 'About 98%'],
+		answer: 3,
+		why: 'S and P are each written once and read once, 4N^2 elements, 128 MiB. 128 / 130 is about 98%.',
+	},
+	{
+		q: 'Standard attention at this size has about 31.5 FLOP/byte, and the A100 FP16 tensor ridge is about 153 FLOP/byte. What does that make it?',
+		options: [
+			'Compute-bound on the tensor cores',
+			'Compute-bound on the CUDA cores',
+			'Memory-bound: its time is set by the trips through HBM',
+			'Latency-bound by kernel launches',
+		],
+		answer: 2,
+		why: 'An intensity below the ridge point means the kernel waits on memory, not arithmetic.',
+	},
+	{
+		q: 'What does the FlashAttention paper mean by IO-awareness?',
+		options: [
+			'Design the algorithm around reads and writes between HBM and on-chip SRAM, not around FLOPs',
+			'Overlap disk reads with GPU compute',
+			'Use asynchronous copies for every tile',
+			'Reduce the FLOP count by approximating the softmax',
+		],
+		answer: 0,
+		why: 'The goal is to run S, P and O on chip one tile at a time so that only Q, K, V and O cross to HBM. The result stays exact.',
+	},
+	{
+		q: 'In the FlashAttention-2 inner loop, when a new K/V block raises a row\'s max from m to m_new, what happens to acc?',
+		options: [
+			'It is divided by l',
+			'It is multiplied by exp(m_new - m)',
+			'It is reset to zero and recomputed',
+			'It is multiplied by alpha = exp(m - m_new) before p V_j is added',
+		],
+		answer: 3,
+		why: 'acc holds terms scaled to the old max, so it gets the same rescale factor as l. exp(m_new - m) would be larger than 1 and push the old terms the wrong way.',
+	},
+	{
+		q: 'A row has m = 0 and l = 3.0 after one tile. The next tile\'s largest score in that row is 2.0 and its exp(s - 2.0) sum to 1.0. What is the new l?',
+		options: ['4.0', '3.0e^-2 + 1.0, about 1.41', '3.0e^2 + 1.0, about 23.2', '3.0 + e^-2, about 3.14'],
+		answer: 1,
+		why: 'm_new = 2.0, alpha = exp(0 - 2.0) = e^-2, about 0.135. l = 3.0 x 0.135 + 1.0, about 1.41.',
+	},
+	{
+		q: 'Is the FlashAttention output an approximation of softmax(QKᵀ)V?',
+		options: [
+			'Yes, the error grows with the number of K/V blocks',
+			'Yes, unless the blocks are 128 x 128',
+			'No, it is exact, because every term in acc and l is scaled to the same final max',
+			'No, but only with a causal mask',
+		],
+		answer: 2,
+		why: 'Theorem 1 states the algorithm returns O = softmax(QKᵀ)V with O(N^2d) FLOPs and O(N) extra memory for m and l.',
+	},
+	{
+		q: 'Why does FlashAttention-2 divide by l once at the end instead of after every block?',
+		options: [
+			'On an A100, non-matmul FLOPs cost about 16 times more than matmul FLOPs',
+			'Dividing after each block is numerically unstable',
+			'l is not known until the backward pass',
+			'Tensor cores cannot do division',
+		],
+		answer: 0,
+		why: 'The paper counts 312 TFLOPS of FP16 matmul against 19.5 TFLOPS of FP32 non-matmul arithmetic, so it removes a division per element per block.',
+	},
+	{
+		q: 'What is the FlashAttention-2 loop order, and why?',
+		options: [
+			'K/V outside, Q inside, so each K/V block is read once',
+			'Q outside, K/V inside, so Q_i, m, l and acc stay on chip and O_i is written once',
+			'Both loops fused into one over all tiles in row-major order',
+			'Q outside, K/V inside, so that K and V are read only once in total',
+		],
+		answer: 1,
+		why: 'The outer iterations are independent, so each Q block runs as its own thread block. The original FlashAttention had K/V outside and read and wrote O_i, m_i and l_i in HBM on every inner step. K and V are still read once per Q block.',
+	},
+	{
+		q: 'In the tiler, n = 16, d = 8 and B_r = B_c = 2. Why does the tiled version move more bytes than standard attention?',
+		options: [
+			'The causal mask is off',
+			'O is written once per K/V block',
+			'The score tiles are written to HBM',
+			'K and V are read once per Q block, 8 times, and B_r is much smaller than d',
+		],
+		answer: 3,
+		why: 'The K/V term is 2N^2d / B_r. With tiny Q blocks it outgrows the N^2 terms of standard attention. FlashAttention wins when B_r is not much smaller than d.',
+	},
+	{
+		q: 'How many elements does the tiled forward pass read, with T_r Q blocks?',
+		options: ['Nd + T_r · 2Nd', '3Nd', 'Nd + T_c · 2Nd', 'T_r · 3Nd'],
+		answer: 0,
+		why: 'Q is read once and K and V once per Q block. O is written once, Nd. Reading Q per K/V block would only happen with the other loop order.',
+	},
+	{
+		q: 'N = 4,096, d = 64, FP16, B_r = 128, B_c = 64. How much HBM traffic does the tiled pass move per head?',
+		options: ['2 MiB', '65 MiB', '33 MiB', '130 MiB'],
+		answer: 2,
+		why: 'T_r = 32. Reads are Nd + 64Nd = 65Nd and writes Nd, so 66Nd elements at 2 bytes: 66 x 262,144 x 2 bytes = 33 MiB. 65 MiB is B_r = 64, and 130 MiB is standard attention.',
+	},
+	{
+		q: 'By Theorem 2, how many HBM accesses does FlashAttention need, with SRAM size M?',
+		options: ['Θ(Nd + N^2)', 'Θ(N^2 d^2 M^-1)', 'Θ(N d M^-1)', 'Θ(N^2 M^-1)'],
+		answer: 1,
+		why: 'B_r and B_c are about M / d, and the K/V term 2N^2d / B_r becomes about N^2d^2 / M. Θ(Nd + N^2) is standard attention.',
+	},
+	{
+		q: 'If L2 served every repeated K/V read, DRAM would see only Q, K, V and O once, 2 MiB per head. What would the intensity be at 4.29 GFLOPs?',
+		options: ['About 31 FLOP/byte', 'About 124 FLOP/byte', 'About 153 FLOP/byte', 'About 2,048 FLOP/byte'],
+		answer: 3,
+		why: '4 x 4,096^2 x 64 / 2,097,152 bytes = 2,048 FLOP/byte, far past the 153 ridge. That is why the arithmetic has to run on tensor cores.',
+	},
+	{
+		q: 'With a causal mask, N = 4,096, B_r = 128 and B_c = 64, how many tiles does the inner loop visit?',
+		options: ['2,048', '1,024', '1,056', '1,088'],
+		answer: 2,
+		why: 'Q block i visits tiles j ≤ 2i + 1, which is 2i + 2 tiles. Summed over i = 0 to 31 that is 2 x 496 + 64 = 1,056 of 2,048. Only 64 of them cross the diagonal and need the element-wise mask.',
+	},
+	{
+		q: 'In the chapter\'s Triton kernel, what do `tl.program_id(0)` and `tl.program_id(1)` select?',
+		options: [
+			'The K/V block and the Q block',
+			'The Q block and the head (batch x heads)',
+			'The row and the column of the score tile',
+			'The head and the batch index',
+		],
+		answer: 1,
+		why: 'The grid is (Q blocks, batch x heads). Parallelizing over Q blocks is FlashAttention-2\'s parallelism over the sequence. The K/V loop runs inside each program.',
+	},
+	{
+		q: 'An inner loop updates `l_i = l_i * tl.exp(m_i - m_new) + tl.sum(p, 1)` and then `acc = acc + tl.dot(p.to(v.dtype), v)`. It passes some tests and fails others. Which input is guaranteed to pass?',
+		options: [
+			'Any input with N a multiple of B_c',
+			'Any input in FP32',
+			'Any input with a causal mask',
+			'An input with only one K/V block, N ≤ B_c',
+		],
+		answer: 3,
+		why: 'acc is never rescaled, so it is wrong whenever a row\'s max rises after the first K/V block. With one K/V block the max never rises. That is why tests need several blocks and a ragged end.',
+	},
+	{
+		q: 'The CUDA kernel in this chapter keeps each Q row and its accumulator in registers. How does it map the work?',
+		options: [
+			'One thread per row of Q, FP32, K and V tiles of 32 rows in shared memory, no tensor cores',
+			'One warp per row of Q with `mma.sync`',
+			'One block per head, with S stored in global memory',
+			'One thread per score, with atomics into O',
+		],
+		answer: 0,
+		why: 'It shows where everything lives, not top speed. Its PTX has no `mma` and no local memory, and the only global stores are the 64 output values of each row.',
+	},
+	{
+		q: 'What does the FlashAttention-2 backward pass do about P, which the forward pass never stored?',
+		options: [
+			'It reads P from a compressed copy in HBM',
+			'It recomputes each tile of S and P on chip from Q, K and the saved logsumexp L = m + log l',
+			'It approximates P with the row max only',
+			'It stores P during the forward pass after all, but only for training',
+		],
+		answer: 1,
+		why: 'It trades extra FLOPs for fewer bytes. The paper proves the same Θ(N^2d^2M^-1) bound for the backward pass.',
+	},
+	{
+		q: 'FlashAttention-3 targets the H100. Which of these is among the Hopper features it uses?',
+		options: [
+			'The Tensor Memory Accelerator for asynchronous tile copies',
+			'TF32 inputs on m16n8k8',
+			'Storing S in L2 instead of HBM',
+			'One thread per row of Q',
+		],
+		answer: 0,
+		why: 'FlashAttention-3 uses TMA, asynchronous `wgmma`, warp specialization and FP8. Its paper reports 1.5 to 2.0 times the speed of FlashAttention-2 in FP16, up to 740 TFLOPS.',
+	},
+] satisfies Question[];
