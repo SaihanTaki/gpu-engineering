@@ -3,8 +3,6 @@ title: 14. Scan (prefix sum)
 description: How a running total, which looks sequential, runs in parallel. Hillis-Steele against Blelloch, work against step count, scanning many blocks, and the single-pass decoupled look-back that libraries use.
 sidebar:
   order: 14
-banner:
-  content: Draft chapter. If something is wrong or unclear, use the edit link at the bottom of the page.
 ---
 
 import Scan from '@sims/scan/Scan.astro';
@@ -325,6 +323,7 @@ make -C cuda run
 python numba/scan.py
 python triton/scan.py
 nsys profile --stats=true ./cuda/scan
+ncu --kernel-name regex:scan_blelloch --metrics l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum ./cuda/scan
 ```
 
 Each program scans 2<sup>24</sup> integers and prints the time and effective
@@ -335,7 +334,7 @@ bandwidth of each variant, counting `2n` elements of traffic, the minimum. Thing
   memory, expect it to reach about half. That is an estimate from the traffic
   count, not a measurement.
 - Hillis-Steele against Blelloch. Blelloch does far fewer additions, but its
-  tiles have bank conflicts and twice the barriers, and both kernels may be
+  tiles have bank conflicts and about as many barriers for twice the elements, and both kernels may be
   waiting on memory anyway.
 - In the `nsys` kernel summary, how many kernels one scan launches and which
   one takes the time.
