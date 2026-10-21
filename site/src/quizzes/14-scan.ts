@@ -27,21 +27,21 @@ export default [
 	{
 		q: 'What makes a parallel scan algorithm work-efficient?',
 		options: [
-			'Its total number of operations grows in proportion to `n`, like the sequential loop',
+			'Its total work grows in proportion to `n`',
 			'It finishes in `log2(n)` steps',
-			'It uses no barriers',
+			'It uses no barriers between its levels',
 			'Every thread does the same number of additions',
 		],
 		answer: 0,
-		why: 'Work-efficiency is about total work. Few steps is a separate cost: Hillis-Steele has the fewest steps and is not work-efficient.',
+		why: 'Work-efficiency is about total work: the operation count grows like the sequential loop.  Few steps is a separate cost: Hillis-Steele has the fewest steps and is not work-efficient.',
 	},
 	{
 		q: 'After step `k` of Hillis-Steele, what does element `i` hold?',
 		options: [
-			'The sum of elements `0` to `k`',
-			'The sum of `2k` elements ending at `i`',
-			'The sum of the `2^k` elements ending at `i`, or all of them if there are fewer',
-			'The value of element `i - 2^k`',
+			'The sum of elements `0` to `k`, the first `k + 1` values',
+			'The sum of the `2k` elements ending at `i`',
+			'The sum of up to `2^k` elements ending at `i`',
+			'The old value of element `i - 2^k`, shifted right',
 		],
 		answer: 2,
 		why: 'The distance doubles each step, so the window doubles too. After `log2(n)` steps it covers everything up to `i`.',
@@ -49,13 +49,13 @@ export default [
 	{
 		q: 'In the Hillis-Steele loop, why is there a `__syncthreads()` between reading `left` and adding it?',
 		options: [
-			'To make the global loads coalesced',
-			'Every thread must read its left neighbour before any thread overwrites it in the same step',
+			'To make the global loads of the input coalesced',
+			'All reads of a step must finish before any write',
 			'To avoid bank conflicts on `s[tid - offset]`',
-			'To let thread 0 write the block total',
+			'To let thread 0 write the block total at the end',
 		],
 		answer: 1,
-		why: 'Without it, a thread can read a value that already belongs to the next step and count elements twice. GPU Gems 3 uses a second buffer instead.',
+		why: 'Every thread must read its left neighbour before any thread overwrites it. Without it, a thread can read a value that already belongs to the next step and count elements twice. GPU Gems 3 uses a second buffer instead.',
 	},
 	{
 		q: 'How many additions does Hillis-Steele do for 16 elements?',
@@ -83,10 +83,10 @@ export default [
 	{
 		q: 'In the down-sweep, what does each node give its children?',
 		options: [
-			'Both children take the node\'s value',
+			'Both children take the node\'s value, and the old values are dropped',
 			'The left child gets the node plus the right child; the right child keeps its value',
-			'The left child takes the node\'s value; the right child gets the node\'s value plus the old left child',
-			'The right child takes the node\'s value; the left child is cleared',
+			'The left child takes the node\'s value; the right child gets it plus the old left',
+			'The right child takes the node\'s value; the left child is cleared to 0',
 		],
 		answer: 2,
 		why: 'The value passed to a node is the sum of everything left of its subtree. The right child also needs the left subtree\'s sum, the old left child.',
@@ -94,9 +94,9 @@ export default [
 	{
 		q: 'The Hillis-Steele kernel computes an inclusive scan. How does it produce the exclusive one?',
 		options: [
-			'It runs the loop a second time',
+			'It runs the loop a second time with offset 1',
 			'It subtracts the total from every element',
-			'It runs Blelloch\'s down-sweep afterward',
+			'It runs Blelloch\'s down-sweep afterward on the tile',
 			'It shifts the inclusive result right by one place',
 		],
 		answer: 3,
@@ -105,10 +105,10 @@ export default [
 	{
 		q: 'Why do warp-level scans typically use the Hillis-Steele construction?',
 		options: [
-			'Lanes that skip an addition free nothing for other work, so its 5 steps are what count',
-			'It does fewer additions than Blelloch',
-			'It is the only scan that works with integers',
-			'It needs no associativity',
+			'Idle lanes free nothing, so only its 5 steps count',
+			'It does fewer additions than Blelloch on 32 values',
+			'It is the only scan that works with integer values',
+			'It needs no associativity from the operator',
 		],
 		answer: 0,
 		why: 'The 32 lanes execute together, so extra additions on idle lanes cost nothing. With shuffles it needs no shared memory either.',
@@ -141,9 +141,9 @@ export default [
 		q: 'What limits a chained scan, where block `b` waits for block `b - 1` to publish its inclusive prefix?',
 		options: [
 			'Each link in the chain is a round trip through global memory',
-			'Bank conflicts in each tile',
-			'It does twice the additions of Blelloch',
-			'It needs `4n` traffic',
+			'Bank conflicts in the shared memory scan of each tile',
+			'It does twice the additions of Blelloch in every tile',
+			'It needs `4n` traffic, like scan-then-add',
 		],
 		answer: 0,
 		why: 'It is one pass, but the blocks form a chain. In the report\'s example with 600-cycle latency, the chain alone caps it near 490 million elements per second.',
@@ -151,9 +151,9 @@ export default [
 	{
 		q: 'During decoupled look-back, a block reads a predecessor descriptor with flag A. What does it do?',
 		options: [
-			'Waits until the flag becomes P',
-			'Adds that tile\'s prefix and stops',
-			'Adds that tile\'s aggregate to its running sum and keeps looking back',
+			'Waits until the flag of that tile becomes P',
+			'Adds that tile\'s inclusive prefix and stops looking',
+			'Adds that tile\'s aggregate and keeps looking back',
 			'Restarts its look-back from the nearest tile',
 		],
 		answer: 2,
@@ -162,24 +162,24 @@ export default [
 	{
 		q: 'Why does decoupled look-back hand out tile numbers from an atomically incremented counter instead of using `blockIdx.x`?',
 		options: [
-			'`blockIdx.x` can change while a block runs',
-			'CUDA does not promise to run blocks in index order, and a block may only wait on tiles whose blocks have started',
+			'`blockIdx.x` can change while a block is running',
+			'CUDA does not promise to run blocks in index order',
 			'The counter makes the float result deterministic',
-			'Atomics are faster than reading `blockIdx.x`',
+			'Atomics are faster than reading `blockIdx.x` each time',
 		],
 		answer: 1,
-		why: 'This guarantees forward progress. It does not make floats deterministic: how far a block looks back depends on timing.',
+		why: 'A block may only wait on tiles whose blocks have started, so this guarantees forward progress. It does not make floats deterministic: how far a block looks back depends on timing.',
 	},
 	{
 		q: 'In look-back, what must a block do so that others never see its flag before its value?',
 		options: [
-			'Call `__syncthreads()` before the write',
-			'Write the flag first, then the value',
-			'Use shared memory for the descriptor',
-			'Put a memory fence between writing the fields and the flag, or pack them into one word',
+			'Call `__syncthreads()` before writing the descriptor',
+			'Write the flag first, then the value right after it',
+			'Keep the descriptor in shared memory, not global',
+			'Fence between the fields and the flag, or use one word',
 		],
 		answer: 3,
-		why: 'The descriptor fields must be visible before the flag. A barrier only orders threads inside one block.',
+		why: 'Put a memory fence between writing the fields and the flag, or pack them into one word. The descriptor fields must be visible before the flag. A barrier only orders threads inside one block.',
 	},
 	{
 		q: 'The Triton kernel computes the exclusive scan as `inclusive - x`. For which operator would that fail?',

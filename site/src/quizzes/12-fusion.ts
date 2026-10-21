@@ -65,7 +65,7 @@ export default [
 		options: [
 			'Rounded from the 0.9 µs gap in a V100 measurement in the CUDA Graphs post',
 			'From an NVIDIA specification for all GPUs',
-			'From the 2.9 µs kernel time in that measurement, divided by three',
+			'From the 2.9 µs kernel time in that same measurement, divided by three and rounded',
 			'From the A100 datasheet',
 		],
 		answer: 0,
@@ -108,9 +108,9 @@ export default [
 	{
 		q: 'How does the model err for a kernel that moves only a few kilobytes?',
 		options: [
-			'It overestimates the time, because it charges the launch twice',
+			'It overestimates the time, because it charges the launch cost twice per kernel',
 			'It ignores the bytes entirely',
-			'It underestimates the time, because real kernels that small never reach peak bandwidth',
+			'It underestimates the time, since tiny kernels never reach peak bandwidth',
 			'It is exact, because peak bandwidth holds at every size',
 		],
 		answer: 2,
@@ -125,13 +125,13 @@ export default [
 	{
 		q: 'Why can the fused and unfused results differ in the last bit?',
 		options: [
-			'The fused kernel uses half precision for the intermediate',
-			'ReLU is computed with a different rounding mode',
-			'The unfused version reads stale data from L2',
-			'The fused multiply-add rounds once, while `scale` stores a rounded `a * x` before `add` sees it',
+			'The fused kernel keeps the intermediate in half precision',
+			'ReLU is computed with a different rounding mode in the fused kernel',
+			'The unfused version reads stale intermediate data from L2',
+			'The FMA rounds once, while `scale` stores a rounded `a * x` first',
 		],
 		answer: 3,
-		why: '`nvcc` and NVRTC contract the multiply and add into one FMA by default. That is why the tests compare with a small tolerance.',
+		why: 'The fused multiply-add rounds once, while `scale` stores a rounded `a * x` before `add` sees it. `nvcc` and NVRTC contract the multiply and add into one FMA by default. That is why the tests compare with a small tolerance.',
 	},
 	{
 		q: 'Which compiler option controls the contraction of a multiply and an add into an FMA, and what is its default?',
@@ -152,8 +152,13 @@ export default [
 	},
 	{
 		q: 'What generates fused Triton kernels from PyTorch code without writing them by hand?',
-		options: ['`torch.compile` with its default TorchInductor backend', 'CUDA Graphs', 'NVRTC', 'Running PyTorch eagerly'],
+		options: [
+			'`torch.compile` with TorchInductor',
+			'CUDA Graphs capturing the eager kernels',
+			'NVRTC compiling CUDA source at run time',
+			'Running PyTorch eagerly with default settings',
+		],
 		answer: 0,
-		why: 'TorchInductor generates Triton kernels and fuses elementwise operations. CUDA Graphs cut launch cost but do not fuse.',
+		why: 'TorchInductor is the default `torch.compile` backend. It generates Triton kernels and fuses elementwise operations. CUDA Graphs cut launch cost but do not fuse.',
 	},
 ] satisfies Question[];
