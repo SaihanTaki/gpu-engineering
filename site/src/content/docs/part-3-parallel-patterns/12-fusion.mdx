@@ -8,6 +8,8 @@ sidebar:
 import { Code } from '@astrojs/starlight/components';
 import Fusion from '@sims/fusion/Fusion.astro';
 import CodeTabs from '@components/CodeTabs.astro';
+import Quiz from '@components/Quiz.astro';
+import quiz from '@quizzes/12-fusion';
 import { gpuById } from '@sim-core/gpu-specs';
 import { PEAK_FP32_TFLOPS } from '@sims/transpose/model';
 import { arrayBytes, DEFAULT_LAUNCH_US, final, fmt, fmtBytes, fmtUs, speedup } from '@sims/fusion/model';
@@ -297,6 +299,10 @@ elements, each array is 64 MiB, larger than L2, and the counts come close to
 the model. Fusion still saves the launches and the L2 traffic.
 
 </details>
+
+## Quiz
+
+<Quiz questions={quiz} />
 
 ## Further reading
 

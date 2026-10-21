@@ -7,6 +7,8 @@ sidebar:
 
 import Scan from '@sims/scan/Scan.astro';
 import CodeTabs from '@components/CodeTabs.astro';
+import Quiz from '@components/Quiz.astro';
+import quiz from '@quizzes/14-scan';
 import { countsAt, depth, fmt, lastStep, phases, reference, work } from '@sims/scan/model';
 import cuda from '@kernels/ch14-scan/cuda/scan_kernels.cuh?raw';
 import numba from '@kernels/ch14-scan/numba/scan.py?raw';
@@ -415,6 +417,10 @@ tile: 65,536 tiles, then 256, then 1, also five. The level counts are small
 because each level divides by the tile size.
 
 </details>
+
+## Quiz
+
+<Quiz questions={quiz} />
 
 ## Further reading
 

@@ -1,0 +1,197 @@
+import type { Question } from './types';
+
+export default [
+	{
+		q: 'A copy and a transpose of the same matrix move exactly the same bytes. Why did the naive transpose run at about 40% of the copy speed on the K20c?',
+		options: [
+			'A transpose does more arithmetic per element than a copy',
+			'A transpose reads every element twice, once per dimension',
+			'One side of the transpose walks a column, so most of each sector it moves is thrown away',
+			'The copy kernel stages its data through shared memory and the transpose does not',
+		],
+		answer: 2,
+		why: 'Both kernels read and write each element once. The naive transpose writes a column of `out`, so each 32-byte sector carries only 4 useful bytes. There is no extra arithmetic and no second read.',
+	},
+	{
+		q: 'The 32 lanes of a warp load 32 consecutive 4-byte words from an aligned address. How many 32-byte sectors does that request touch?',
+		options: ['1', '4', '8', '32'],
+		answer: 1,
+		why: '32 x 4 = 128 bytes, which is 4 sectors of 32 bytes. 32 sectors is the count when the 32 words are far apart.',
+	},
+	{
+		q: 'Every kernel in the chapter uses 32 x 32 tiles and blocks of 32 x 8 threads. How many elements does each thread move?',
+		options: ['8', '32', '1', '4'],
+		answer: 3,
+		why: 'A tile has 1,024 elements and the block has 256 threads, so each thread loops 4 times, with `j = 0, 8, 16, 24`.',
+	},
+	{
+		q: 'In the naive kernel, `out[x * rows + (y + j)] = in[(y + j) * cols + x]`, and `x` runs over 32 consecutive values in a warp. Which access is strided?',
+		options: [
+			'The read of `in`',
+			'The write of `out`',
+			'Both the read and the write',
+			'Neither, because `x` is consecutive across the warp',
+		],
+		answer: 1,
+		why: 'Consecutive `x` gives consecutive words in `in`, but in `out` it multiplies `rows`, so the lanes write 32 words that are `rows` floats apart: a column.',
+	},
+	{
+		q: 'For a 1024 x 1024 matrix, one naive warp transfers 256 bytes of data per loop iteration. How many bytes of sectors does it move?',
+		options: ['256', '512', '1,152', '1,024'],
+		answer: 2,
+		why: 'The read is 4 sectors and the write is 32, so 36 sectors of 32 bytes: 1,152 bytes. Only 256 of them are useful.',
+	},
+	{
+		q: 'What happens if you swap the roles in the naive kernel so that the lanes walk down a column of `in` and along a row of `out`?',
+		options: [
+			'The read becomes the strided access, so nothing is gained',
+			'Both accesses become coalesced',
+			'Both accesses become strided',
+			'The write becomes a bank conflict instead of a strided access',
+		],
+		answer: 0,
+		why: 'One side of a transpose always walks a column. Swapping only moves the strided access from the write to the read.',
+	},
+	{
+		q: 'In the tiled kernel, why is the `__syncthreads()` between filling the tile and reading it required?',
+		options: [
+			'It flushes the tile from shared memory to global memory',
+			'It makes the global loads of `in` coalesced',
+			'It prevents bank conflicts on the column read',
+			'The column a lane reads was written by 32 different threads in all 8 warps of the block',
+		],
+		answer: 3,
+		why: 'Without the barrier, nothing makes the other warps finish their stores into the tile first. The barrier does nothing for coalescing or bank conflicts.',
+	},
+	{
+		q: 'After the barrier, the tiled kernel rebuilds `x` and `y` from `blockIdx.y` and `blockIdx.x` swapped. Why?',
+		options: [
+			'Tile `(bx, by)` of `in` becomes tile `(by, bx)` of `out`',
+			'It avoids bank conflicts on the column read',
+			'It lets the kernel skip the bounds check on the write',
+			'The grid is launched with its dimensions reversed',
+		],
+		answer: 0,
+		why: 'The block writes the mirrored tile, so the block coordinates swap. Inside the tile, the transpose itself happens in the shared memory column read.',
+	},
+	{
+		q: 'With `__shared__ float tile[32][32]`, all 32 lanes read one column, `tile[lane][k]`. What is the conflict degree?',
+		options: ['1', '2', '16', '32'],
+		answer: 3,
+		why: 'Word `32 * i + k` is in bank `k`, so every lane asks the same bank for a different word: 32 passes instead of 1.',
+	},
+	{
+		q: 'With the padded tile `float tile[32][33]`, which bank holds `tile[i][k]`?',
+		options: ['`k`', '`i`', '`(i + k) % 32`', '`(33 * i + k) % 33`'],
+		answer: 2,
+		why: 'The word index is `33 * i + k`, and `33 * i % 32 = i`, so the bank is `(i + k) % 32`. Down a column `i` changes by one per lane, so every lane hits a different bank.',
+	},
+	{
+		q: 'How much shared memory does the extra padding column cost per block?',
+		options: ['4 bytes', '128 bytes', '132 bytes', '4,096 bytes'],
+		answer: 1,
+		why: 'One extra float in each of 32 rows is 32 x 4 = 128 bytes. That column is never read.',
+	},
+	{
+		q: 'Does padding the tile to 33 columns cause conflicts when the block stores a row of `in` into the tile?',
+		options: [
+			'Yes, a 2-way conflict on every row',
+			'Yes, but only on the last row of the tile',
+			'Only when the matrix size is not a multiple of 32',
+			'No, a row still maps to 32 different banks',
+		],
+		answer: 3,
+		why: 'Along a row `k` runs over 32 consecutive values, so `(i + k) % 32` takes all 32 banks. The store stays conflict free.',
+	},
+	{
+		q: 'In the simulation at size 1001, the coalesced read of a row that is not a multiple of 8 touches how many sectors?',
+		options: ['4', '5', '8', '32'],
+		answer: 1,
+		why: 'A row of 1001 floats is 4,004 bytes, not a multiple of 32, so most rows start partway into a sector and 128 bytes then spill into a fifth one.',
+	},
+	{
+		q: 'At size 1000, the last tile covers columns 992 to 1023. How many lanes of the warp for row 0 pass the bounds check?',
+		options: ['8', '24', '32', '0'],
+		answer: 0,
+		why: 'Only columns 992 to 999 exist, so 8 lanes are on and the other 24 are turned off.',
+	},
+	{
+		q: 'For the default warp, how many shared memory passes does the model count for the tiled kernel?',
+		options: ['2', '32', '33', '64'],
+		answer: 2,
+		why: '1 pass for the conflict-free row store and 32 for the column load. The padded kernel needs 2.',
+	},
+	{
+		q: 'What does the bandwidth model assume about shared memory speed?',
+		options: [
+			'Each bank delivers 4 bytes per clock, so one SM serves one conflict-free warp request per clock',
+			'Shared memory runs at the same bandwidth as DRAM',
+			'Each bank delivers 32 bytes per clock, one sector',
+			'Shared memory time is ignored and only sectors are counted',
+		],
+		answer: 0,
+		why: '32 banks of 4 bytes per clock is one 128-byte warp request per clock. A 32-way conflict therefore costs 32 clocks.',
+	},
+	{
+		q: 'On the A100, the model gives the tiled kernel about 58% of peak memory bandwidth. What limits it?',
+		options: [
+			'Its global stores, which are still strided',
+			'The 32-way bank conflict on the column read, which makes shared memory slower than the sector traffic',
+			'The cost of the `__syncthreads()` barrier',
+			'L2 cache misses on the reads of `in`',
+		],
+		answer: 1,
+		why: 'Both global sides are coalesced, 256 bytes of sectors. The 33 shared passes take longer than those sectors, so shared memory sets the time. The model does not count barrier cost or caches.',
+	},
+	{
+		q: 'Why are the tiled and padded bars equal on the Tesla T4 in the model?',
+		options: [
+			'The T4 has more shared memory banks than the A100',
+			'The T4 hardware removes bank conflicts automatically',
+			'Its memory is slow relative to its SMs, so the sector time is longer than even the conflicted shared memory time',
+			'The model treats the T4 as having no shared memory',
+		],
+		answer: 2,
+		why: 'At 300 GB/s for 40 SMs, the sectors take longer than the 33 passes, so the conflicts are hidden behind memory traffic in this model. Real hardware does not promise that.',
+	},
+	{
+		q: 'Which effect left out of the model can make the real naive kernel do better than the model predicts?',
+		options: [
+			'Bank conflicts on its shared memory store',
+			'The cost of its barrier',
+			'Extra warps added by the bounds check',
+			'L1 and L2 merging the partial sector writes of neighbouring warps before they reach DRAM',
+		],
+		answer: 3,
+		why: 'The naive kernel uses no shared memory and no barrier. Its waste is partial sector writes, and the caches can combine those from neighbouring warps.',
+	},
+	{
+		q: 'Which tile width gives a conflict-free column read with 32 banks?',
+		options: ['`float tile[32][32]`', '`float tile[32][35]`', '`float tile[32][34]`', '`float tile[32][48]`'],
+		answer: 1,
+		why: 'Any odd pitch works, because an odd number and 32 share no factor. Pitch 34 gives a 2-way conflict and 48 is worse.',
+	},
+	{
+		q: 'Triton has no shared memory in its language. Why are both of its transpose kernels still fast?',
+		options: [
+			'The compiler picks a thread layout per load and store and converts between them through shared memory',
+			'Triton reads `in` with strided loads that the L2 cache merges',
+			'`tl.trans` calls `cudaMemcpy` with a transposed layout',
+			'Triton launches one thread per element, so there are no sectors to waste',
+		],
+		answer: 0,
+		why: 'Each kernel compiles to one `ttg.convert_layout`, lowered to shared memory stores, a `bar.sync` and shared memory loads. The staging is generated, not written by hand.',
+	},
+	{
+		q: 'In the Nsight Compute memory tables, what sectors per request do you expect for the global stores of `transpose_naive`?',
+		options: ['Near 1', 'Near 4', 'Near 8', 'Near 32'],
+		answer: 3,
+		why: 'Each naive store writes a column, one sector per lane. The tiled and padded kernels store rows, near 4 sectors per request.',
+	},
+	{
+		q: 'Which kernel should show large values of `l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum`?',
+		options: ['`transpose_naive`', '`transpose_shared<1>`', '`transpose_shared<0>`', 'All three equally'],
+		answer: 2,
+		why: '`transpose_shared<0>` has no padding, so its column loads conflict. `transpose_shared<1>` is padded, and the naive kernel does not use shared memory.',
+	},
+] satisfies Question[];
