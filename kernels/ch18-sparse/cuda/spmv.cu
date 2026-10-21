@@ -48,10 +48,14 @@ static Csr make_matrix(int rows, int cols, bool skewed) {
     return a;
 }
 
-// Column-major ELL: slot k of row r at k * rows + r, padded with column 0 and value 0.
-static int to_ell(const Csr &a, std::vector<int> &col, std::vector<float> &val) {
+static int ell_width(const Csr &a) {
     int width = 0;
     for (int r = 0; r < a.rows; ++r) width = std::max(width, a.row_ptr[r + 1] - a.row_ptr[r]);
+    return width;
+}
+
+// Column-major ELL: slot k of row r at k * rows + r, padded with column 0 and value 0.
+static void to_ell(const Csr &a, int width, std::vector<int> &col, std::vector<float> &val) {
     col.assign((size_t)width * a.rows, 0);
     val.assign((size_t)width * a.rows, 0.0f);
     for (int r = 0; r < a.rows; ++r) {
@@ -61,7 +65,6 @@ static int to_ell(const Csr &a, std::vector<int> &col, std::vector<float> &val) 
             val[slot] = a.val[i];
         }
     }
-    return width;
 }
 
 template <typename T>
@@ -132,13 +135,14 @@ static int run(const char *name, const Csr &a) {
         spmv_csr_vector<<<vector_grid, BLOCK>>>(rows, d_row_ptr, d_col, d_val, d_x, d_y);
     }));
 
-    std::vector<int> ell_col;
-    std::vector<float> ell_val;
-    int width = to_ell(a, ell_col, ell_val);
+    int width = ell_width(a);
     double slots = (double)width * rows;
     std::printf("  ELL width %d: %.0f slots, %.1f per nonzero\n", width, slots, slots / nnz);
     // Padding a few very long rows can need far more memory than the matrix itself.
     if (slots <= 4.0 * nnz) {
+        std::vector<int> ell_col;
+        std::vector<float> ell_val;
+        to_ell(a, width, ell_col, ell_val);
         int *d_ell_col = upload(ell_col);
         float *d_ell_val = upload(ell_val);
         report("ell", time_ms([&] {
