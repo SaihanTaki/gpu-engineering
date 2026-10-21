@@ -51,7 +51,7 @@ export function memoryLevels(g: GpuSpec): MemoryLevel[] {
 			id: 'l1',
 			name: 'L1 cache and shared memory',
 			totalKb: t.l1SharedKb,
-			scope: `${g.l1SharedKbPerSm} KB per SM x ${g.sms} SMs. Shared by the threads of one block.`,
+			scope: `${g.l1SharedKbPerSm} KB per SM x ${g.sms} SMs. L1 serves the whole SM. Shared memory is shared by the threads of one block.`,
 		},
 		{ id: 'l2', name: 'L2 cache', totalKb: g.l2Mb * 1024, scope: 'One cache shared by every SM.' },
 		{

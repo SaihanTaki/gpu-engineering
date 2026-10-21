@@ -3,8 +3,6 @@ title: 2. The programming model
 description: How a CUDA kernel launch turns into a grid of blocks and threads, and how each thread works out which data is its own.
 sidebar:
   order: 2
-banner:
-  content: Draft chapter. If something is wrong or unclear, use the edit link at the bottom of the page.
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -27,7 +25,7 @@ A **kernel** is a function marked `__global__`. The CPU (the **host**) launches
 it, and the GPU (the **device**) runs it once per thread:
 
 ```cpp
-whoami<<<gridDim, blockDim>>>(out, n);
+whoami<<<gridDim, blockDim>>>(out, block, thread, n);
 ```
 
 The two numbers in the triple angle brackets say how many threads to start.
@@ -127,7 +125,7 @@ is 256 threads and `dim3(32, 32)` is 1024, the maximum.
 
 ## The code
 
-Here is the complete chapter code in each language. Each file launches a 1D
+Here is the complete chapter code in each language. Each file defines a 1D
 and a 2D kernel, and the tests in `kernels/ch02-programming-model/` check every
 version against NumPy.
 
@@ -216,6 +214,6 @@ One block of 8 threads launches. Threads 5, 6 and 7 fail `i < out.size`, so
 
 ## Further reading
 
-- [CUDA C++ Programming Guide](https://docs.nvidia.com/cuda/cuda-c-programming-guide/), the sections on the programming model and on thread hierarchy.
+- [CUDA C++ Programming Guide](https://docs.nvidia.com/cuda/cuda-programming-guide/), the sections on the programming model and on thread hierarchy.
 - [Numba CUDA: writing kernels](https://nvidia.github.io/numba-cuda/user/kernels.html), for `cuda.grid` and launch configuration.
 - [Triton tutorial: vector addition](https://triton-lang.org/main/getting-started/tutorials/01-vector-add.html), the block-level version of the same idea.

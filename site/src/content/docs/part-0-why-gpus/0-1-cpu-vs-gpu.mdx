@@ -3,8 +3,6 @@ title: 0.1 CPU vs GPU
 description: Why a CPU is built to finish one task quickly and a GPU to finish many tasks at once, and how Amdahl's law decides which one wins for a given program.
 sidebar:
   order: 1
-banner:
-  content: Draft chapter. If something is wrong or unclear, use the edit link at the bottom of the page.
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -141,8 +139,8 @@ match, and prints the times:
   the GPU, and the kernel. Copying the result back is not timed. The program
   checks the GPU result against its own CPU loop and exits with 1 on a
   mismatch.
-- `numba/saxpy.py` and `triton/saxpy.py` call each version twice and time the
-  second call. Their GPU time is one number: copy in, kernel, and copy out.
+- `numba/saxpy.py` calls each version twice and times the second call.
+  `triton/saxpy.py` times NumPy once and the second of two GPU calls. Their GPU time is one number: copy in, kernel, and copy out.
 
 The tests in `kernels/ch0-1-cpu-vs-gpu/` check the Numba and Triton versions
 against NumPy. The CUDA test builds and runs `saxpy.cu` and checks that it
