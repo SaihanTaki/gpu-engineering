@@ -5,8 +5,8 @@ export default [
 		q: 'Why can `hist[b]++` lose counts when many GPU threads run it?',
 		options: [
 			'The compiler drops increments it proves redundant',
-			'It is a read, an add and a write, and two threads can both read before either writes',
-			'Global memory only accepts one write per warp per cycle',
+			'Two threads can both read the old value before either writes back',
+			'Global memory accepts only one write per warp per cycle, so the rest are dropped',
 			'Integer counters overflow when many threads add at once',
 		],
 		answer: 1,
@@ -17,7 +17,7 @@ export default [
 		options: [
 			'Within one warp',
 			'Within one block',
-			'Across the CPU and other GPUs',
+			'Across the CPU, the GPU and other GPUs in the system',
 			'Across all blocks of the grid on the device',
 		],
 		answer: 3,
@@ -26,8 +26,8 @@ export default [
 	{
 		q: 'CUDA atomics such as `atomicAdd` have ordering `cuda::memory_order_relaxed`. What does that mean for a histogram?',
 		options: [
-			'Counts are exact, but other memory accesses are not ordered around the atomic, which a histogram does not need',
-			'Counts can be lost unless a `__threadfence()` follows each atomic',
+			'Counts stay exact; only other memory accesses are not ordered around it',
+			'Counts can be lost unless a `__threadfence()` follows each atomic in the loop',
 			'The atomic only works on shared memory, not global memory',
 			'Each atomic waits for all earlier writes of the grid to finish',
 		],
@@ -59,8 +59,8 @@ export default [
 	{
 		q: 'A kernel sums `float` values into one counter with `atomicAdd`. Why can the result differ in its last bits from run to run?',
 		options: [
-			'Floating point addition is not associative, and the order of the queued atomics is undefined',
-			'Float atomics are not atomic, so some additions are lost',
+			'Float addition is not associative and the atomic order is undefined',
+			'Float atomics are not truly atomic, so some additions get lost under contention',
 			'The GPU rounds each atomic result to half precision',
 			'Shared memory stores floats with fewer bits than global memory',
 		],
@@ -70,8 +70,8 @@ export default [
 	{
 		q: 'Which order of steps matches the chapter\'s privatized kernel?',
 		options: [
-			'Shared atomics into the copy, zero the copy, `__syncthreads()`, merge',
-			'Zero the copy, `__syncthreads()`, shared atomics into the copy, `__syncthreads()`, merge nonzero bins with global atomics',
+			'Shared atomics into the copy, zero the copy, `__syncthreads()`, merge with global atomics',
+			'Zero the copy, `__syncthreads()`, shared atomics, `__syncthreads()`, merge',
 			'Global atomics, `__syncthreads()`, copy the global histogram into shared memory',
 			'Zero the copy, shared atomics into the copy, merge, `__syncthreads()`',
 		],
@@ -99,9 +99,9 @@ export default [
 		q: 'Why did the shared memory histogram win on Maxwell but usually lose on Kepler in Sakharnykh\'s tests?',
 		options: [
 			'Kepler had no shared memory',
-			'Maxwell had a larger L2 cache that held the whole histogram',
+			'Maxwell had a much larger L2 cache that could hold the whole histogram at once',
 			'Kepler serialized global atomics but not shared ones',
-			'Kepler emulates shared memory atomics in software, while Maxwell supports them in hardware',
+			'Kepler emulated shared atomics in software; Maxwell had them in hardware',
 		],
 		answer: 3,
 		why: 'On Kepler the shared atomics were slow and its global atomics got help from conflict resolution in the L2 cache. A private copy only pays off when updating it is cheap.',
@@ -121,7 +121,7 @@ export default [
 	{
 		q: 'With the hot bin input and a single block, the shared kernel takes 129 slots against 128 for the global kernel. Why?',
 		options: [
-			'The private copy is just a second histogram with all 32 threads on it, plus one merge atomic',
+			'All 32 threads queue on the one copy, plus one merge atomic',
 			'Shared atomics cost one slot more than global ones in the model',
 			'The barrier costs one slot',
 			'One thread is left idle in each round',
@@ -139,7 +139,7 @@ export default [
 		q: 'On the uniform input the shared kernel takes 16 slots with 4 blocks but 18 with 8. What causes the increase?',
 		options: [
 			'Each round has longer queues with 8 blocks',
-			'With 8 blocks almost every bin is nonzero in every block, so the merge queues up to 8 atomics on one bin',
+			'Up to 8 merge atomics now queue on one nonzero bin',
 			'The model charges extra for every block launch',
 			'Uniform data has fewer distinct values with 8 blocks',
 		],
@@ -149,10 +149,10 @@ export default [
 	{
 		q: 'Someone deletes the second `__syncthreads()` in `hist_shared`, the one before the merge, and their test still passes. What is the problem?',
 		options: [
-			'Nothing, because shared memory atomics already order the merge',
+			'Nothing, because shared memory atomics already order the merge against the adds',
 			'The kernel deadlocks on larger inputs',
 			'The global histogram counts some elements twice',
-			'A thread can merge `local[b]` before other threads finish adding to it, so counts go missing depending on scheduling',
+			'A thread can merge `local[b]` while others still add to it, losing counts',
 		],
 		answer: 3,
 		why: 'Without the barrier the merge can read a bin that is still growing, and the later additions are never merged. Whether it happens depends on warp scheduling, so a test can pass by luck; `compute-sanitizer --tool racecheck` reports it.',
@@ -166,7 +166,7 @@ export default [
 	{
 		q: 'The Triton kernels pass `sem="relaxed"` to `tl.atomic_add`. Why?',
 		options: [
-			'Relaxed is required for `tl.histogram` to compile',
+			'Relaxed is required for `tl.histogram` to compile on every backend',
 			'It is the only ordering Triton supports',
 			'It matches the ordering of CUDA\'s `atomicAdd`, while Triton\'s default is `acq_rel`',
 			'It makes the atomics run in shared memory',
