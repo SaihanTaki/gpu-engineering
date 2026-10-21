@@ -3,8 +3,6 @@ title: 6. Global memory and coalescing
 description: How the 32 addresses of one warp's load turn into 32-byte sector transactions, and why offsets, strides and array-of-structs layouts make a kernel fetch bytes it never uses.
 sidebar:
   order: 6
-banner:
-  content: Draft chapter. If something is wrong or unclear, use the edit link at the bottom of the page.
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -182,7 +180,7 @@ against NumPy.
 		`copy_strided_kernel` shows this with plain pointer arithmetic. `get_x_aos_kernel` describes the AoS array to
 		Triton as an `n x 3` matrix with `tl.make_block_ptr`, giving its shape, strides and which dimension is
 		contiguous (`order`), and loads a `BLOCK x 1` block of it: one field of `BLOCK` particles, still a stride-3
-		read. Triton 3.8 marks `make_block_ptr` deprecated in favour of tensor descriptors
+		read. Since Triton 3.7, `make_block_ptr` gives a deprecation warning in favour of tensor descriptors
 		(`tl.make_tensor_descriptor`), whose documentation requires the last dimension to be contiguous and the other
 		strides to be multiples of 16 bytes. A 12-byte struct does not meet that, which is one more reason to store
 		fields as separate arrays. When the compiler cannot prove that offsets are contiguous, for example after
@@ -226,8 +224,9 @@ ncu --section MemoryWorkloadAnalysis_Tables kernels/ch06-coalescing/cuda/coalesc
   **Sectors/Req** column for global loads is the simulation's sector count
   per warp. Expect 4 for the aligned copy, close to 5 with an offset of 1,
   and 32 from stride 8 on.
-- The stride-32 copy reads 32 times as much input as the stride-1 copy, so
-  the L2 hit rate and DRAM traffic differ as well as the sector count.
+- The stride-32 copy spans 32 times the address range of the stride-1 copy
+  and fetches 8 times the sectors (32 per warp against 4), so the L2 hit rate
+  and DRAM traffic differ as well as the sector count.
 
 No measured numbers are quoted here, because they depend on the GPU, its
 clocks and the array size.

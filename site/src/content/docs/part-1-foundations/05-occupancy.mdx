@@ -3,8 +3,6 @@ title: 5. Occupancy
 description: How registers per thread, shared memory per block and block size decide how many warps an SM can keep resident, and how that theoretical occupancy differs from what a profiler measures.
 sidebar:
   order: 5
-banner:
-  content: Draft chapter. If something is wrong or unclear, use the edit link at the bottom of the page.
 ---
 
 import { Aside, Code } from '@astrojs/starlight/components';
@@ -80,7 +78,7 @@ free. Whichever runs out first sets the number of resident blocks.
 
 These rules are the ones NVIDIA's own occupancy calculator uses. The
 calculator ships with the CUDA Toolkit as the header `cuda_occupancy.h`, and
-the simulation follows it line by line for these three GPUs.
+the simulation follows its rules for these limits on these three GPUs.
 
 <table>
 	<thead>
@@ -244,8 +242,8 @@ be counted:
 - **The tail.** The last blocks of a grid run while other SMs have already gone
   idle, so the average over the run drops.
 - **Uneven blocks.** If some warps finish early, for example because they skip
-  most of a loop, their slots stay empty until the whole block finishes and a
-  new one takes its place.
+  most of a loop, a new block may not fit until the slow warps finish, because
+  registers and shared memory are released per block.
 
 The simulation cannot show achieved occupancy, because it depends on how long
 each warp runs. Measure it.
@@ -291,9 +289,7 @@ Things to look for:
 The simulation and `occupancy_calc.py` cover the four limits above. They
 assume the kernel uses the largest shared memory carveout and has opted in to
 more than 48 KB. They leave out: a smaller carveout chosen with
-`cudaFuncAttributePreferredSharedMemoryCarveout`, the hardware barrier limit
-`cuda_occupancy.h` applies on Hopper for kernels that use extra barriers,
-thread block clusters, partitioned global caching, and anything about how long
+`cudaFuncAttributePreferredSharedMemoryCarveout`, thread block clusters, partitioned global caching, and anything about how long
 warps run. The simulation deals each block's warps to the four partitions in
 turn; NVIDIA does not document the hardware's placement, and the block counts
 do not depend on it.
@@ -354,9 +350,8 @@ less than 65,536. Does it launch?
 
 No. The check rounds 25 warps up to 28, a multiple of the four partitions, and
 28 x 2,560 = 71,680 is more than 65,536. Per partition, 16,384 / 2,560 = 6
-warps fit, 24 per SM, fewer than the block's 25. 800 is not a slider step in
-the simulation; try 768 threads (24 warps, which fit exactly) and 832 (26
-warps, which fail).
+warps fit, 24 per SM, fewer than the block's 25. Set the simulation to 800
+threads and 80 registers to see the launch fail.
 
 </details>
 
