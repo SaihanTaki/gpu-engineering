@@ -23,11 +23,11 @@ export default [
 		options: [
 			'The 33rd register spills to local memory',
 			'Each thread\'s registers are rounded up to a multiple of 8',
-			'A warp\'s registers are rounded up to a multiple of 256, so 1,056 becomes 1,280',
+			'A warp\'s registers are rounded up to a multiple of 256',
 			'Register counts above 32 halve the number of block slots',
 		],
 		answer: 2,
-		why: 'Registers are given to whole warps in units of 256. Any count from 33 to 40 rounds up to the same 1,280 per warp.',
+		why: 'Registers are given to whole warps in units of 256, so 1,056 becomes 1,280. Any count from 33 to 40 rounds up to the same 1,280 per warp.',
 	},
 	{
 		q: 'On an A100, a kernel with 256-thread blocks and no shared memory uses 48 registers per thread. What is its theoretical occupancy?',
@@ -97,11 +97,11 @@ export default [
 		options: [
 			'Yes, one block per SM',
 			'Yes, two blocks per SM',
-			'No, because 704 is not a multiple of 32',
-			'No, because the check rounds 22 warps up to 24, and 24 x 2,816 is more than 65,536',
+			'No, because 704 threads is not a multiple of the 32-thread warp size',
+			'No, the check rounds the block up to 24 warps, which is too many',
 		],
 		answer: 3,
-		why: '24 x 2,816 = 67,584. Per partition, 16,384 / 2,816 = 5 warps fit, 20 per SM, fewer than the block\'s 22. 704 is 22 x 32, so it is a multiple of 32.',
+		why: 'The check rounds 22 warps up to 24, and 24 x 2,816 = 67,584, more than 65,536. Per partition, 16,384 / 2,816 = 5 warps fit, 20 per SM, fewer than the block\'s 22. 704 is 22 x 32, so it is a multiple of 32.',
 	},
 	{
 		q: 'A kernel is marked `__launch_bounds__(512, 2)` for an SM with 65,536 registers. At most how many registers per thread does that allow?',
@@ -112,10 +112,10 @@ export default [
 	{
 		q: 'You cap a kernel below the number of registers it needs. What does the compiler do?',
 		options: [
-			'It refuses to compile the kernel',
-			'It moves values to local memory, which lives in device memory, and reloads them as needed',
+			'It refuses to compile the kernel and reports an error',
+			'It moves values to local memory and reloads them',
 			'It moves the values into shared memory',
-			'It ignores the cap',
+			'It ignores the cap and uses what it needs',
 		],
 		answer: 1,
 		why: 'These spills cost memory traffic, which is why a register cap is a trade and not a free win. Local memory is in device memory, not on chip.',
@@ -148,11 +148,11 @@ export default [
 		options: [
 			'Each stage launches an extra block',
 			'Each stage adds a warp to every program',
-			'Each stage doubles the registers per thread',
-			'Each stage buffers its tiles in shared memory, so shared memory per block grows',
+			'Each stage doubles the registers each thread uses',
+			'Each stage adds tile buffers in shared memory',
 		],
 		answer: 3,
-		why: 'Pipelined loads need buffers, and more shared memory per block means fewer blocks fit. SAXPY has no loop, so `num_stages` changes nothing for it.',
+		why: 'Pipelined loads need buffers, so shared memory per block grows, and more shared memory per block means fewer blocks fit. SAXPY has no loop, so `num_stages` changes nothing for it.',
 	},
 	{
 		q: 'A kernel allows 8 blocks of 256 threads per SM on an A100, which has 108 SMs. You launch 216 blocks. What is the highest achieved occupancy it can reach?',
@@ -164,12 +164,12 @@ export default [
 		q: 'Is higher occupancy always faster?',
 		options: [
 			'Yes, occupancy is directly proportional to speed',
-			'Yes, as long as the grid covers every SM',
-			'No, once enough warps hide the latency more do not help, and more registers per thread can mean more work per thread',
+			'Yes, as long as the grid is large enough to cover every SM',
+			'No, once enough warps hide the latency, more do not help',
 			'No, low occupancy is usually faster',
 		],
 		answer: 2,
-		why: 'The Best Practices Guide says higher occupancy does not always mean higher performance, but low occupancy always hurts latency hiding. Treat it as a diagnostic.',
+		why: 'The Best Practices Guide says higher occupancy does not always mean higher performance, but low occupancy always hurts latency hiding. More registers per thread can also mean more work per thread. Treat it as a diagnostic.',
 	},
 	{
 		q: 'Which tool shows both the theoretical and the achieved occupancy of a launch?',
@@ -188,9 +188,9 @@ export default [
 			'The 256-register allocation unit per warp',
 			'The limit on blocks per SM',
 			'The 1 KB of shared memory reserved per block',
-			'A smaller shared memory carveout chosen with `cudaFuncAttributePreferredSharedMemoryCarveout`',
+			'A smaller shared memory carveout',
 		],
 		answer: 3,
-		why: 'The model assumes the largest carveout. It does cover the four limits, including the allocation units and the per-block reservation.',
+		why: 'The model assumes the largest carveout, so a smaller one chosen with `cudaFuncAttributePreferredSharedMemoryCarveout` is not modelled. It does cover the four limits, including the allocation units and the per-block reservation.',
 	},
 ] satisfies Question[];

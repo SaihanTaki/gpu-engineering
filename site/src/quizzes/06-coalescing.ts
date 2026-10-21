@@ -22,7 +22,7 @@ export default [
 		q: 'On compute capability 6.0 and later, what decides the cost of one warp\'s load?',
 		options: [
 			'The number of active lanes',
-			'The number of distinct cache lines its addresses touch',
+			'The number of distinct 128-byte cache lines that its addresses touch',
 			'The number of bytes the lanes ask for',
 			'The number of distinct 32-byte sectors its addresses fall into',
 		],
@@ -57,12 +57,12 @@ export default [
 		q: 'How does a float load with stride 16 compare with one at stride 8?',
 		options: [
 			'Stride 16 needs 64 sectors',
-			'Both need 32 sectors; stride 16 only spreads them over more lines',
+			'Both need 32 sectors',
 			'Stride 16 needs 16 sectors',
 			'Stride 8 needs 16 sectors and stride 16 needs 32',
 		],
 		answer: 1,
-		why: 'From stride 8 on, lanes are at least 32 bytes apart and each needs its own sector. A warp has only 32 lanes, so it cannot need more than 32 sectors.',
+		why: 'From stride 8 on, lanes are at least 32 bytes apart and each needs its own sector. A warp has only 32 lanes, so it cannot need more than 32 sectors. Stride 16 only spreads them over more lines.',
 	},
 	{
 		q: 'A full warp loads 16-byte `float4` values with `in[i]`. How many sectors does it touch, and how much of the fetched data is used?',
@@ -73,13 +73,13 @@ export default [
 	{
 		q: 'A kernel reads a whole `struct { float x, y, z; }` per thread. What does the 12.4 Programming Guide imply for it?',
 		options: [
-			'It compiles to one 12-byte load instruction',
-			'It always compiles to one 16-byte load instruction',
+			'It compiles to one 12-byte load instruction per thread',
+			'It always compiles to one 16-byte load instruction, padded by the compiler',
 			'Structs cannot be read from global memory',
-			'It takes several instructions, and `__align__(16)` pads it so one 16-byte load can fetch it',
+			'It takes several load instructions unless padded with `__align__(16)`',
 		],
 		answer: 3,
-		why: 'A single global memory instruction needs a size of 1, 2, 4, 8 or 16 bytes, naturally aligned. 12 bytes is neither, so padding to 16 bytes is the fix.',
+		why: 'A single global memory instruction needs a size of 1, 2, 4, 8 or 16 bytes, naturally aligned. 12 bytes is neither, so padding to 16 bytes lets one 16-byte load fetch it.',
 	},
 	{
 		q: 'Particles are stored as an array of `struct { float x, y, z; }`. A warp reads only `p[i].x`. How many sectors does it touch?',
@@ -103,7 +103,7 @@ export default [
 		options: [
 			'A kernel reads one field of a 12-byte struct',
 			'A kernel reads every field of an aligned 16-byte struct',
-			'A kernel reads one field out of eight',
+			'A kernel reads one field out of the eight in every struct',
 			'A kernel updates positions and never reads masses',
 		],
 		answer: 1,
@@ -114,11 +114,11 @@ export default [
 		options: [
 			'Nothing extra, because stores are buffered',
 			'Half the cost of a strided load',
-			'Nothing extra, because stores always coalesce',
-			'The same as a strided load, because stores follow the same 32-byte rule',
+			'Nothing extra, because stores always coalesce in hardware',
+			'The same as a strided load, under the same sector rule',
 		],
 		answer: 3,
-		why: 'Stores are served by 32-byte sectors too. The kernels keep the writes contiguous so that only the loads change.',
+		why: 'Stores follow the same 32-byte rule as loads. The kernels keep the writes contiguous so that only the loads change.',
 	},
 	{
 		q: 'Which Nsight Compute number corresponds to the simulation\'s sector count per warp?',
@@ -126,7 +126,7 @@ export default [
 			'Achieved Occupancy in the Occupancy section',
 			'Branch efficiency in Source Counters',
 			'Sectors/Req for global loads in the L1/TEX cache table',
-			'Stall Long Scoreboard in Warp State Statistics',
+			'Stall Long Scoreboard in the Warp State Statistics section',
 		],
 		answer: 2,
 		why: 'Sectors/Req in the Memory Workload Analysis tables is the number of sectors per load request. Expect 4 for the aligned copy and 32 from stride 8 on.',
@@ -135,12 +135,12 @@ export default [
 		q: 'A strided kernel over a small array causes less DRAM traffic than its sector count suggests. Why?',
 		options: [
 			'The sector count overestimates how many sectors a float load touches',
-			'A sector one warp fetched and did not use may still be in L1 or L2 when a neighbouring warp asks for it',
+			'A neighbouring warp may find the unused sectors still in L1 or L2',
 			'DRAM compresses unused bytes before sending them',
 			'Small arrays are always aligned to 256 bytes',
 		],
 		answer: 1,
-		why: 'The simulation counts the sectors one load instruction touches and leaves out the caches. Reuse across warps can make the real DRAM cost lower.',
+		why: 'A sector one warp fetched and did not use may still be cached when a neighbouring warp asks for it. The simulation counts the sectors one load instruction touches and leaves out the caches. Reuse across warps can make the real DRAM cost lower.',
 	},
 	{
 		q: 'A row-major float matrix has 512 columns. One warp reads column `c`, one row per lane. How many sectors does the load touch?',
@@ -173,7 +173,7 @@ export default [
 	{
 		q: 'Why does the CUDA `copy_strided` compute its index as `size_t`?',
 		options: [
-			'`size_t` loads are faster than `int` loads',
+			'`size_t` loads are faster than `int` loads on 64-bit hardware',
 			'So that `i * stride` cannot overflow `int` for large arrays',
 			'Numba requires 64-bit indices',
 			'It aligns the load to 8 bytes',

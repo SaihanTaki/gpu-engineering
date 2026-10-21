@@ -43,13 +43,13 @@ export default [
 	{
 		q: 'On the A100, the copies take far longer than the kernel in the simulation. Why?',
 		options: [
-			'The copies move more bytes than the kernel does',
+			'The copies move about three times more bytes than the kernel does',
 			'`cudaMemcpy` runs on a single CPU thread',
-			'Both move the same bytes, but GPU memory is about 64 times faster than the PCIe link',
+			'GPU memory is about 64 times faster than the PCIe link',
 			'A floating point addition is slow compared with a copy',
 		],
 		answer: 2,
-		why: 'The kernel reads `a` and `b` and writes `c`, the same 192 MiB the copies move, at 2,039 GB/s instead of 32 GB/s. Vector add does one addition per 12 bytes, so the arithmetic barely counts.',
+		why: 'Both move the same bytes. The kernel reads `a` and `b` and writes `c`, the same 192 MiB the copies move, at 2,039 GB/s instead of 32 GB/s. Vector add does one addition per 12 bytes, so the arithmetic barely counts.',
 	},
 	{
 		q: 'You switch the simulation from the A100 to the H100, whose PCIe link is twice as fast. What happens to the share of time spent on copies?',
@@ -77,18 +77,18 @@ export default [
 		q: 'What is the chapter\'s rule for real programs that use the GPU?',
 		options: [
 			'Move every vector add to the GPU, however small',
-			'Copy data in once, keep it on the GPU across many kernels, and copy back only the final result',
+			'Copy data in once, keep it on the GPU, and copy back only the result',
 			'Copy each kernel\'s output back to the host to check it before the next kernel',
 			'Use smaller blocks so that the copies finish sooner',
 		],
 		answer: 1,
-		why: 'The copies are the expensive part. A chain of kernels on data that already lives on the GPU pays for the copies once.',
+		why: 'The copies are the expensive part. A chain of many kernels on data that already lives on the GPU pays for the copies once.',
 	},
 	{
 		q: 'Why does a real `cudaMemcpy` from ordinary (pageable) host memory run slower than the PCIe peak?',
 		options: [
 			'The driver first copies the data into a staging buffer',
-			'The link can only carry one array at a time',
+			'The PCIe link can only carry one array in each direction at a time',
 			'GPU memory accepts writes at half its read bandwidth',
 			'The data is compressed before it crosses the link',
 		],
@@ -111,7 +111,7 @@ export default [
 		q: 'Why is 256 threads per block a common starting point?',
 		options: [
 			'It is the largest block size CUDA allows',
-			'It matches the number of CUDA cores in one SM',
+			'It matches the number of CUDA cores in a single SM of recent NVIDIA GPUs',
 			'The PCIe link transfers data in units of 256 elements',
 			'It is a multiple of the 32-thread warp and well under the 1,024 limit',
 		],
@@ -154,8 +154,8 @@ export default [
 	{
 		q: 'The CUDA program launches the kernel once, untimed, before the timed phases. Why?',
 		options: [
-			'To fill the L2 cache with `a` and `b`',
-			'Because the first launch includes loading the kernel onto the GPU',
+			'To fill the L2 cache with `a` and `b` before the timed kernel runs',
+			'Because the first launch also loads the kernel onto the GPU',
 			'To allocate the device arrays',
 			'To check the result before the copies',
 		],
@@ -165,7 +165,7 @@ export default [
 	{
 		q: 'In Numba, what happens when you pass NumPy arrays straight to a kernel?',
 		options: [
-			'Numba copies each array to the device before the launch and back after it, every time',
+			'Numba copies each array to the device and back on every launch',
 			'Numba copies back only the arrays the kernel writes',
 			'The kernel reads host memory directly over PCIe',
 			'Numba raises an exception, because it accepts only device arrays',
@@ -188,7 +188,7 @@ export default [
 		q: 'You have no NVIDIA GPU. How can you still run the Python versions of the vector add?',
 		options: [
 			'Build the CUDA version with `ARCH=75`',
-			'Pass a small count to `./cuda/vector_add`',
+			'Pass a small count to `./cuda/vector_add`, which then falls back to the CPU',
 			'Set `NUMBA_ENABLE_CUDASIM=1` or `TRITON_INTERPRET=1` and use a small count',
 			'Run `make -C cuda run` with the CPU backend',
 		],
