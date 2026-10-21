@@ -1,0 +1,186 @@
+import type { Question } from './types';
+
+export default [
+	{
+		q: 'A lane reads the 4-byte word at shared memory byte address 260. Which bank serves it?',
+		options: ['1', '4', '8', '65'],
+		answer: 0,
+		why: 'The word index is 260 / 4 = 65, and the bank is 65 % 32 = 1. 65 forgets the modulo, and 4 takes the bank from the byte address instead of the word.',
+	},
+	{
+		q: 'How much can one bank deliver per clock cycle?',
+		options: ['One byte', 'One 128-byte line', 'One word per lane of the warp', 'One 32-bit word'],
+		answer: 3,
+		why: 'Each bank has a bandwidth of 32 bits per clock cycle, so a bank asked for several different words has to send them one after the other.',
+	},
+	{
+		q: 'Which of these is a bank conflict?',
+		options: [
+			'Two warps read different words in the same bank at the same time',
+			'All 32 lanes of a warp read the same word',
+			'Two lanes of one warp read different words in the same bank in one instruction',
+			'One warp reads bank 0 in two consecutive instructions',
+		],
+		answer: 2,
+		why: 'Conflicts are between lanes of the same warp in the same instruction, asking for different words. Different warps or different instructions never conflict, and the same word is broadcast.',
+	},
+	{
+		q: 'In one shared load, bank 0 must send 4 distinct words and every other bank sends 1. How many wavefronts does the request take?',
+		options: ['1', '4', '32', '35'],
+		answer: 1,
+		why: 'Only the busiest bank counts. The conflict degree is the largest number of distinct words any one bank has to send.',
+	},
+	{
+		q: 'All 32 lanes of a warp read `tile[0][0]`. How many wavefronts does the read take?',
+		options: ['1', '2', '16', '32'],
+		answer: 0,
+		why: 'Lanes that read the same 32-bit word do not conflict; the word is broadcast to all of them in one wavefront.',
+	},
+	{
+		q: 'Several lanes of a warp write different values to the same shared memory address. What happens?',
+		options: [
+			'Only one write lands, and which one is undefined',
+			'The writes are serialized and the last lane wins',
+			'The values are added together',
+			'The kernel stops with a bank conflict error',
+		],
+		answer: 0,
+		why: 'For writes to one address only one lands and the guide leaves the winner undefined. Use one writing lane or an atomic.',
+	},
+	{
+		q: 'A warp reads `s[lane * 8]` from a float array. What is the conflict degree?',
+		options: ['1', '4', '8', '32'],
+		answer: 2,
+		why: 'The degree is the greatest common divisor of the stride and 32, here 8. The lanes use only 4 banks, each sending 8 words.',
+	},
+	{
+		q: 'A warp reads `s[lane * 12]` from a float array. What is the conflict degree?',
+		options: ['12', '2', '1', '4'],
+		answer: 3,
+		why: 'gcd(12, 32) = 4. The stride is not a power of two, but it shares the factor 4 with 32, so 8 banks each send 4 words.',
+	},
+	{
+		q: 'Why is every odd stride conflict-free?',
+		options: [
+			'An odd number shares no factor with 32, so the 32 lanes hit 32 different banks',
+			'Odd strides make neighbouring lanes read the same word, which is broadcast',
+			'The hardware reorders odd-strided requests into one wavefront',
+			'Odd strides skip the banks that other warps are using',
+		],
+		answer: 0,
+		why: 'With gcd(S, 32) = 1, `(i * S) % 32` takes every value once for i from 0 to 31. No words are shared, so broadcast plays no part.',
+	},
+	{
+		q: 'In `float tile[32][32]`, lane `i` reads `tile[i][c]`. What happens?',
+		options: [
+			'A conflict-free read, since each lane reads a different row',
+			'A 2-way conflict, since only 16 banks are used',
+			'A 32-way conflict, since the whole column sits in bank `c`',
+			'A broadcast, since every lane reads column `c`',
+		],
+		answer: 2,
+		why: 'Element `tile[r][c]` is word `r * 32 + c`, in bank `c` for every row. The 32 words are different, so there is no broadcast.',
+	},
+	{
+		q: 'With `float tile[32][33]`, which bank holds `tile[5][30]`?',
+		options: ['30', '3', '5', '35'],
+		answer: 1,
+		why: 'The word is 5 x 33 + 30 = 195 and 195 % 32 = 3, the same as `(r + c) % 32`. 30 is the bank in the unpadded tile, and 35 forgets the modulo.',
+	},
+	{
+		q: 'Which access gets worse when a 32 x 32 tile is padded to 32 x 33?',
+		options: [
+			'The row read, `tile[r][i]`',
+			'The column read, `tile[i][c]`',
+			'The broadcast read, `tile[0][0]`',
+			'The diagonal read, `tile[i][i]`',
+		],
+		answer: 3,
+		why: 'The diagonal is word `33i`, bank `i`, in the plain tile and word `34i`, bank `2i % 32`, in the padded one, a 2-way conflict. Rows stay conflict-free and the column is fixed.',
+	},
+	{
+		q: 'Besides the extra column, what other cost of `float tile[32][33]` does the chapter name?',
+		options: [
+			'Three rows in four no longer start on a 16-byte boundary, so aligned `float4` loads stop working',
+			'The tile no longer fits in 48 KB of static shared memory',
+			'The row stores become 2-way conflicts',
+			'Every index needs an extra XOR',
+		],
+		answer: 0,
+		why: 'Row `r` starts at word `33r`, which is a multiple of 4 only when `r` is. The XOR is the cost of swizzling, not padding.',
+	},
+	{
+		q: 'With the XOR swizzle `tile[r][c ^ r]`, in which column of row 3 is element `(3, 5)` stored?',
+		options: ['8', '2', '6', '15'],
+		answer: 2,
+		why: '5 is binary 101 and 3 is 011, so 5 ^ 3 = 110, which is 6. 8 is 5 + 3 and 2 is 5 - 3, both arithmetic instead of XOR.',
+	},
+	{
+		q: 'Lane `i` reads the diagonal element `(i, i)` of a swizzled 32-column tile. What is the conflict degree?',
+		options: ['1', '2', '16', '32'],
+		answer: 3,
+		why: 'Element `(r, c)` is stored at column `c ^ r`, and `i ^ i = 0`, so every lane lands in bank 0. The swizzle fixes columns but makes the diagonal the worst case.',
+	},
+	{
+		q: 'A swizzled tile has 64 rows of 32 floats. Which column holds element `(r, c)`?',
+		options: ['`c ^ r`', '`(c + r) % 32`', '`c ^ (r % 32)`', '`(c ^ r) % 64`'],
+		answer: 2,
+		why: 'With more than 32 rows, the row number is reduced first so the XOR stays within the 32 columns. `(c + r) % 32` is the bank formula for padding.',
+	},
+	{
+		q: 'In the simulation, each lane reads element `(lane / G) * S`. With `S = 32` and `G = 2` on the plain tile, how many wavefronts does the read take?',
+		options: ['16', '2', '32', '1'],
+		answer: 0,
+		why: 'Pairs of lanes share a word, so there are 16 distinct words, all in bank 0. Broadcast halves the work, but bank 0 still sends 16 words.',
+	},
+	{
+		q: 'With stride 64 on the padded 32 x 33 tile, what is the conflict degree?',
+		options: ['1', '2', '16', '32'],
+		answer: 1,
+		why: 'Stride 64 reads every other row of column 0, rows 0 to 62. Padding shifts row `r` by `r` banks, so rows 0 and 32 meet in bank 0, rows 2 and 34 in bank 2, and so on.',
+	},
+	{
+		q: 'In the plain `row_sums` kernel, which shared memory access is the 32-way conflict?',
+		options: [
+			'The row-by-row stores that fill the tile',
+			'The global loads that read the matrix',
+			'The final store of each row sum',
+			'Step `j` of the sum loop, where lane `i` reads `tile[i][j]`',
+		],
+		answer: 3,
+		why: 'In step `j` the warp reads column `j`, which sits in one bank. The stores write whole rows and are conflict-free.',
+	},
+	{
+		q: 'The plain kernel shows about 32 times as many shared load wavefronts as the padded one. Why is it not 32 times slower?',
+		options: [
+			'Nsight Compute counts wavefronts that never execute',
+			'The kernel also reads global memory and adds numbers, and other warps run while one waits',
+			'The hardware pads the tile automatically at run time',
+			'Only the first column read conflicts; later ones are cached',
+		],
+		answer: 1,
+		why: 'Shared loads are only part of the work, and the SM hides some of the wait by switching to other warps. The chapter quotes no speedup for that reason.',
+	},
+	{
+		q: 'Where in Nsight Compute do you find shared memory requests, wavefronts and bank conflicts?',
+		options: [
+			'The Launch Statistics section',
+			'The Occupancy section',
+			'The shared memory table of Memory Workload Analysis',
+			'The Speed Of Light section',
+		],
+		answer: 2,
+		why: 'The Memory Workload Analysis tables list them per shared load and store. Source Counters shows the same per line of source.',
+	},
+	{
+		q: 'The Numba tests run in the CUDA simulator without a GPU. What can they tell you about bank conflicts?',
+		options: [
+			'Nothing, because the simulator does not model banks',
+			'The conflict degree of every shared memory access',
+			'Only conflicts on shared memory stores',
+			'The number of wavefronts per request, but not the time',
+		],
+		answer: 0,
+		why: 'The simulator runs the kernels correctly but has no banks, so the three versions look the same there. Use Nsight Compute on a GPU to see the difference.',
+	},
+] satisfies Question[];

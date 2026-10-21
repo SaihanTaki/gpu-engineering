@@ -1,0 +1,221 @@
+import type { Question } from './types';
+
+export default [
+	{
+		q: 'Why can a pageable host buffer not be the source of the GPU copy engine DMA directly?',
+		options: [
+			'Pageable memory is too slow for PCIe',
+			'The operating system may move or swap the page in the middle of the transfer',
+			'DMA can only read memory allocated by `cudaMalloc`',
+			'Pageable pages are larger than the DMA engine can handle',
+		],
+		answer: 1,
+		why: 'DMA works on physical addresses with no CPU involved, so the page must stay put. Pinned memory is page-locked for exactly that reason.',
+	},
+	{
+		q: 'What does the driver do when you `cudaMemcpy` from a pageable buffer to the device?',
+		options: [
+			'It pins the buffer for the duration of the copy and unpins it afterwards',
+			'It maps the buffer so the kernel reads it over PCIe',
+			'It copies the data with the CPU into a pinned staging buffer, and the DMA reads from there',
+			'It migrates the pages on demand when the kernel touches them',
+		],
+		answer: 2,
+		why: 'The runtime API notes describe the staging copy, and the driver overlaps it with the DMA in pieces. Migrating on demand is what managed memory does.',
+	},
+	{
+		q: 'You already have a large buffer from `malloc` and want to pin it without reallocating. Which call does that?',
+		options: ['`cudaHostRegister`', '`cudaMallocHost`', '`cudaHostAlloc`', '`cudaMallocManaged`'],
+		answer: 0,
+		why: '`cudaHostRegister` pins memory you already have, and `cudaHostUnregister` undoes it. `cudaMallocHost` and `cudaHostAlloc` allocate new pinned memory.',
+	},
+	{
+		q: 'What does the Best Practices Guide say pinned copies reach on PCIe x16 Gen3?',
+		options: [
+			'Exactly the 16 GB/s peak',
+			'Roughly 5 GB/s, against a 16 GB/s peak',
+			'Roughly 32 GB/s, the sum of both directions',
+			'Roughly 12 GB/s, against a 16 GB/s peak',
+		],
+		answer: 3,
+		why: 'The guide quotes roughly 12 GB/s. The 32 GB/s datasheet figure adds both directions together; the course uses one direction.',
+	},
+	{
+		q: 'A program calls `cudaHostRegister` and `cudaHostUnregister` around every copy in its main loop. What is wrong with that?',
+		options: [
+			'Registered memory cannot be used with `cudaMemcpy`',
+			'Nothing, it is the recommended pattern',
+			'Pinning is a heavyweight operation; pin once and reuse the buffer',
+			'Unregistering frees the memory, so the next iteration crashes',
+		],
+		answer: 2,
+		why: 'The Best Practices Guide warns that pinning is heavyweight and that pinned memory should not be overused. Allocate or register pinned buffers once.',
+	},
+	{
+		q: 'A kernel uses mapped (zero-copy) host memory. What happens on each access?',
+		options: [
+			'The page migrates to the GPU on the first access and stays there',
+			'The access goes over PCIe to host memory, with nothing copied in advance',
+			'The driver copies the whole buffer before the kernel starts',
+			'The access is served from a copy in L2 kept coherent with the host',
+		],
+		answer: 1,
+		why: 'The data never moves closer to the GPU, which is why the guide says mapped memory is not a performant alternative to unified memory. It suits data touched once, in a coalesced pattern.',
+	},
+	{
+		q: 'Memory pinned with `cudaHostRegister` should be read directly by a kernel. What do you need first?',
+		options: [
+			'A call to `cudaMemPrefetchAsync`',
+			'A call to `cudaMallocManaged` on the same range',
+			'Nothing, the host pointer works in the kernel as is',
+			'The device pointer from `cudaHostGetDevicePointer`',
+		],
+		answer: 3,
+		why: 'Memory from `cudaMallocHost` or `cudaHostAlloc` is mapped already, but registered memory needs `cudaHostGetDevicePointer` to get the pointer a kernel can use.',
+	},
+	{
+		q: 'Which device attribute tells you whether pages of managed memory can migrate on demand while kernels run?',
+		options: [
+			'`cudaDevAttrConcurrentManagedAccess`',
+			'`cudaDevAttrPageableMemoryAccess`',
+			'`cudaDevAttrPageableMemoryAccessUsesHostPageTables`',
+			'`cudaDevAttrManagedMemory`',
+		],
+		answer: 0,
+		why: 'It is 1 for full Unified Memory support, Linux on compute capability 6.0 and later. `cudaDevAttrPageableMemoryAccess` is about `malloc` memory, HMM or ATS.',
+	},
+	{
+		q: 'On Windows, where `concurrentManagedAccess` is 0, which rule applies to managed memory?',
+		options: [
+			'GPU page faults move each page on first access',
+			'The CPU must not access managed memory while the GPU is active',
+			'Managed memory is first allocated in GPU memory',
+			'You can allocate more managed memory than the GPU has',
+		],
+		answer: 1,
+		why: 'With limited support, managed memory starts in CPU memory, moves to the GPU before a launch, and only the CPU side can fault. Allocations cannot exceed GPU memory.',
+	},
+	{
+		q: 'A program calls `cudaMallocManaged` and then fills the array on the CPU with `x[i] = i`. Where are the pages?',
+		options: [
+			'In GPU memory, where `cudaMallocManaged` allocated them',
+			'Half in CPU RAM and half in GPU memory',
+			'In CPU RAM, because a page gets physical memory where it is first touched',
+			'Nowhere yet, until a kernel reads them',
+		],
+		answer: 2,
+		why: 'A managed allocation reserves addresses, not memory. The CPU loop touches every page first, so they all land in CPU RAM and the kernel will fault them over.',
+	},
+	{
+		q: 'What page size does managed memory use while it is on the GPU, according to NVIDIA allocator table?',
+		options: ['4 KiB', '2 MiB', '64 KiB', '896 KB'],
+		answer: 1,
+		why: 'On the GPU it is 2 MiB; on the CPU it uses the system page size, 4 KiB on x86-64. 896 KB is a chunk size a 2017 blog post measured on one system.',
+	},
+	{
+		q: 'How much data does one GPU page fault move in practice?',
+		options: [
+			'NVIDIA does not document it; the driver groups faults and prefetches by its own heuristics',
+			'Exactly one 4 KiB page',
+			'Exactly one 2 MiB page',
+			'Always 896 KB',
+		],
+		answer: 0,
+		why: 'The 896 KB figure came from one test system in 2017, with a warning that the heuristics might change. The simulation assumes one 2 MiB page per fault and says so.',
+	},
+	{
+		q: 'In the simulation, managed on-demand mode runs with 12 pages. How many faults does the run take?',
+		options: ['12', '2', '36', '24'],
+		answer: 3,
+		why: 'Each page faults once on the GPU while the kernel runs and once on the CPU while the host reads the result: 12 + 12 = 24. Prefetching would take 0 faults and 2 transfers.',
+	},
+	{
+		q: 'On-demand and prefetch modes move the same bytes over PCIe. With 8 pages of 2 MiB, how many MiB is that in total?',
+		options: ['16 MiB', '2 MiB', '32 MiB', '64 MiB'],
+		answer: 2,
+		why: 'The 16 MiB array crosses PCIe once to the GPU and once back, 32 MiB. The PCIe part of the time bar is the same in both modes; the difference is fault handling.',
+	},
+	{
+		q: 'The simulation charges 20 µs per fault. With 8 pages in on-demand mode, how much time do the faults add?',
+		options: ['160 µs', '20 µs', '640 µs', '320 µs'],
+		answer: 3,
+		why: '8 GPU faults plus 8 CPU faults is 16, and 16 x 20 µs = 320 µs. 160 µs counts only the faults on one side.',
+	},
+	{
+		q: 'Why does the simulation call its pageable copy time an upper estimate?',
+		options: [
+			'It assumes the staging buffer is as large as the array',
+			'It counts each page fault twice',
+			'It charges the staging copy at the PCIe rate with no overlap, and real drivers overlap part of it',
+			'It ignores the kernel time',
+		],
+		answer: 2,
+		why: 'The data crosses CPU memory once more before PCIe. NVIDIA does not document how much of that the driver hides, so the model assumes none of it.',
+	},
+	{
+		q: 'CUDA 12 code calls `cudaMemPrefetchAsync(x, bytes, device, stream)`. What happens when it is built against CUDA 13?',
+		options: [
+			'It compiles and prefetches to device 0',
+			'It does not compile, because the location is now a `cudaMemLocation` struct',
+			'It compiles but the prefetch is ignored',
+			'It compiles and treats `device` as a flags value',
+		],
+		answer: 1,
+		why: 'In CUDA 13 the location is a struct with `type` and `id`, and `flags` comes after it and must be 0. Code that passes an `int` device does not compile.',
+	},
+	{
+		q: 'A prefetch to the GPU is still in flight when a kernel in another stream reads the same managed range. What happens?',
+		options: [
+			'The kernel reads stale data',
+			'The kernel fails with an illegal address error',
+			'The prefetch is cancelled and the data stays on the host',
+			'The accesses stay correct; prefetching is only a performance hint',
+		],
+		answer: 3,
+		why: 'The guide says accesses are correct without a prefetch and also while a migration is in flight. In the same stream, the prefetch would also wait for prior work and the kernel would wait for it.',
+	},
+	{
+		q: 'A lookup table in managed memory is read by the CPU and the GPU and rarely written. Which hint gives each processor its own copy?',
+		options: [
+			'`cudaMemAdviseSetReadMostly`',
+			'`cudaMemAdviseSetPreferredLocation`',
+			'`cudaMemAdviseSetAccessedBy`',
+			'`cudaMemPrefetchAsync` to the host',
+		],
+		answer: 0,
+		why: 'With read mostly, a reading processor gets a read-only copy instead of taking the page away, and a write invalidates the copies. Accessed by keeps a mapping without moving or copying.',
+	},
+	{
+		q: 'Which is a requirement for HMM, so that a PCIe GPU can use plain `malloc` memory?',
+		options: [
+			'A GPU of compute capability 6.0 or later with the proprietary driver',
+			'An Arm CPU with 64 KiB pages',
+			'A driver of version 535 or later installed with the open kernel modules',
+			'An NVLink C2C link between CPU and GPU',
+		],
+		answer: 2,
+		why: 'HMM also needs a recent Linux kernel, compute capability 7.5 or later and x86-64. NVLink C2C belongs to ATS systems like Grace Hopper, where HMM is disabled.',
+	},
+	{
+		q: 'Without HMM or ATS, a kernel dereferences a pointer from `malloc`. What happens?',
+		options: [
+			'The driver migrates the pages on the first fault',
+			'The kernel reads the data over PCIe, like mapped memory',
+			'The kernel reads zeros',
+			'The kernel fails with an illegal address error',
+		],
+		answer: 3,
+		why: 'The GPU has no mapping for that address. Use `cudaMallocManaged`, copy to a `cudaMalloc` buffer, or pin and map the memory with `cudaHostRegister`.',
+	},
+	{
+		q: 'You run the program under `nsys` with `--cuda-um-gpu-page-faults=true`. Which numbers from that run can you trust?',
+		options: [
+			'The fault counts and migration sizes, but not the times',
+			'The times, but not the fault counts',
+			'Both the times and the fault counts',
+			'Neither, the trace only shows kernel launches',
+		],
+		answer: 0,
+		why: 'Nsight Systems warns that fault tracing may cause significant runtime overhead. Count faults in the traced run and time an untraced one.',
+	},
+] satisfies Question[];

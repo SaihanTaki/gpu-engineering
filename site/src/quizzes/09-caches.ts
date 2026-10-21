@@ -1,0 +1,206 @@
+import type { Question } from './types';
+
+export default [
+	{
+		q: 'Where does local memory physically live?',
+		options: [
+			'In the register file of the SM',
+			'In device memory, cached in L1 and L2',
+			'In shared memory, one slice per thread',
+			'In the constant cache of the SM',
+		],
+		answer: 1,
+		why: 'Local memory is local only in scope. It sits in the same DRAM as global memory, and the Best Practices Guide says it is as expensive to access.',
+	},
+	{
+		q: 'What makes constant memory fast when it is fast?',
+		options: [
+			'It is stored on chip next to the registers',
+			'It bypasses L2 and reads DRAM directly',
+			'It lives in device memory, with a small cache in front of it on each SM',
+			'It is copied into shared memory at kernel launch',
+		],
+		answer: 2,
+		why: 'Constant memory is off chip like global memory. The per SM constant cache is what makes a uniform read cheap.',
+	},
+	{
+		q: 'On the GPUs in this course, how many 32-bit registers does an SM have, and how many can one thread use at most?',
+		options: ['65,536 and 255', '65,536 and 1,024', '32,768 and 255', '256 and 64'],
+		answer: 0,
+		why: 'Every SM has 65,536 registers (256 KB), and a thread can use at most 255. 1,024 is the maximum number of threads per block, not registers.',
+	},
+	{
+		q: 'A kernel uses only 28 registers, yet its 16-entry array `bins` ends up in local memory because of `bins[key % 16]++`. Why?',
+		options: [
+			'The array is larger than the register limit of 255',
+			'The kernel was compiled with a register cap',
+			'Arrays are always placed in local memory',
+			'Registers have no addresses, so an array indexed by data needs real memory',
+		],
+		answer: 3,
+		why: 'The compiler cannot prove the index is a constant, so it cannot map each entry to a fixed register. This is not a spill; there is no register shortage.',
+	},
+	{
+		q: 'Which command prints the register count, stack frame and spill bytes for each kernel at compile time?',
+		options: [
+			'`nvcc -Xptxas -v`',
+			'`nvcc --ptx`',
+			'`cuobjdump -sass`',
+			'`ncu --section MemoryWorkloadAnalysis`',
+		],
+		answer: 0,
+		why: 'The `-v` flag asks `ptxas`, the step that assigns registers, for its report. `--ptx` stops before registers are assigned.',
+	},
+	{
+		q: 'A spill store sits inside a loop that runs 100 times. The `ptxas` report says 8 bytes spill stores. How many bytes does each thread store?',
+		options: ['8', '100', '800', '108'],
+		answer: 2,
+		why: 'The report counts the bytes of spill instructions in the code, not how often they run. Inside the loop the 8 bytes are written on every iteration.',
+	},
+	{
+		q: 'In the report, `poly_readonly` has 384 bytes of `cmem[0]` and `poly_constant` has 376. Where do the extra 8 bytes come from?',
+		options: [
+			'The nine coefficients stored as doubles',
+			'The `__constant__` array, which moves into `cmem[0]`',
+			'Padding added by `__restrict__`',
+			'One more pointer parameter',
+		],
+		answer: 3,
+		why: '`cmem[0]` includes the kernel parameters, and `poly_readonly` takes the coefficients as one more pointer. The `__constant__` array is the 36 bytes in `cmem[3]`.',
+	},
+	{
+		q: 'Using the report, how many bytes of extra memory traffic does each thread of `mirror_capped` cause?',
+		options: ['440', '512', '1,056', '544'],
+		answer: 2,
+		why: 'It stores 512 bytes and loads 544, and the code has no loops, so each spill runs once: 1,056 bytes. 440 is the stack frame size, not traffic.',
+	},
+	{
+		q: 'The PTX of `mirror_capped` has no `ld.local` or `st.local`, yet `ptxas` reports spills. Why?',
+		options: [
+			'Spills appear only when `ptxas` assigns registers, after the PTX is written',
+			'The spills go to shared memory, which PTX does not show',
+			'The PTX was generated without the `.maxnreg` line',
+			'`ptxas` reports spills that the hardware later removes',
+		],
+		answer: 0,
+		why: 'The PTX differs from `mirror` only by `.maxnreg 32`. Spill code is created in the register allocation step, so check the `-v` report or the SASS, where it shows up as `STL` and `LDL`.',
+	},
+	{
+		q: 'All 32 threads of a warp spill the same variable. How well does that local memory access coalesce?',
+		options: [
+			'Not at all, each thread hits a different 128-byte line',
+			'Fully, because consecutive thread IDs access consecutive 32-bit words',
+			'Only if the spill happens inside a loop',
+			'Half, because spills are 64-bit',
+		],
+		answer: 1,
+		why: 'Local memory is interleaved so the 32 copies of one variable are adjacent. A data-dependent index like `bins[key % 16]` coalesces only as well as the keys line up.',
+	},
+	{
+		q: 'How much constant memory does the device have, and what is the working set of the constant cache on each SM?',
+		options: ['48 KB and 8 KB', '64 KB and 64 KB', '64 KB and 8 KB', '8 KB and 1 KB'],
+		answer: 2,
+		why: 'There are 64 KB of constant memory and an 8 KB constant cache working set per SM. 48 KB is the static shared memory limit per block.',
+	},
+	{
+		q: 'A warp runs `float c = c_coef[threadIdx.x / 8];` with `c_coef` in `__constant__` memory. How many separate requests does the load become?',
+		options: ['1', '8', '32', '4'],
+		answer: 3,
+		why: '`threadIdx.x / 8` takes 4 values across 32 lanes, and the request is split into one per distinct address. 8 is the number of lanes sharing each address.',
+	},
+	{
+		q: 'The Numba `poly_constant` uses `cuda.const.array_like(COEF)`, but its PTX has no `ld.const`. Why?',
+		options: [
+			'Numba places constant arrays in shared memory',
+			'NVVM unrolled the loop and wrote the known coefficients into the instructions as immediates',
+			'Numba loads constant arrays with `ld.global.nc`',
+			'The kernel reads the coefficients from local memory',
+		],
+		answer: 1,
+		why: 'The values are fixed when the kernel compiles, so nothing is left to load. A table indexed by data would stay in constant memory.',
+	},
+	{
+		q: 'Which two source changes ask for the read-only data path in CUDA C++?',
+		options: [
+			'`__constant__` and `cudaMemcpyToSymbol`',
+			'`__shared__` and `__syncthreads()`',
+			'`volatile` and `__threadfence()`',
+			'`__ldg(&p[i])` and `const float *__restrict__ p`',
+		],
+		answer: 3,
+		why: '`__ldg` loads through the read-only cache explicitly, and `const __restrict__` lets the compiler pick that path by itself. In PTX both show up as `ld.global.nc`.',
+	},
+	{
+		q: 'What does non-coherent mean for an `ld.global.nc` load?',
+		options: [
+			'Writes made during the kernel may not be visible to it',
+			'The load is never cached',
+			'Lanes of a warp may receive values in any order',
+			'The load may return data from another GPU',
+		],
+		answer: 0,
+		why: 'That is why the data must stay read-only for the whole kernel. The load is cached, through the read-only path.',
+	},
+	{
+		q: 'Each thread reads `w[threadIdx.x]` from a small table that no thread writes. Which choice fits best?',
+		options: [
+			'Constant memory, because the table is small',
+			'Local memory, because each thread reads its own entry',
+			'The read-only path, because the threads read different addresses near each other',
+			'Mapped host memory, because the table never changes',
+		],
+		answer: 2,
+		why: 'Constant memory suits a warp reading one address; 32 different addresses become 32 requests. The read-only path handles nearby distinct addresses well.',
+	},
+	{
+		q: 'Which PTX cache operator caches a load in L2 only, bypassing L1?',
+		options: ['`.ca`', '`.cs`', '`.cv`', '`.cg`'],
+		answer: 3,
+		why: '`.cg` caches globally, in L2. `.ca` is the default and allocates in L1 and L2, `.cs` marks streaming data and `.cv` does not cache.',
+	},
+	{
+		q: 'Which call sets aside part of L2 for persisting accesses on compute capability 8.0 and later?',
+		options: [
+			'`cudaFuncSetAttribute(kernel, cudaFuncAttributePreferredSharedMemoryCarveout, ...)`',
+			'`cudaDeviceSetLimit(cudaLimitPersistingL2CacheSize, bytes)`',
+			'`cudaMemAdvise(ptr, bytes, cudaMemAdviseSetPreferredLocation, ...)`',
+			'`nvcc -Xptxas -dlcm=cg`',
+		],
+		answer: 1,
+		why: 'The limit reserves the L2 space, and an access policy window on a stream or graph node marks which range persists. The carveout attribute splits L1 and shared memory instead.',
+	},
+	{
+		q: 'In the simulation, a thread reads 128 consecutive floats with 32-byte lines. How many accesses hit L1?',
+		options: ['16', '112', '120', '128'],
+		answer: 1,
+		why: 'A line holds 8 floats, so 16 lines each miss once and hit 7 times: 112 hits, 87.5%. 16 is the number of DRAM reads.',
+	},
+	{
+		q: 'With the default caches (L1 4 lines, L2 16 lines), the thread reads `a[i % 64]` for 192 values of `i`. How many DRAM reads does it make?',
+		options: ['8', '16', '24', '192'],
+		answer: 0,
+		why: '64 floats are 8 lines. Each is read from DRAM once in the first pass, and later passes find it in L2. 24 would mean L2 gave no reuse, which happens only when the window outgrows L2.',
+	},
+	{
+		q: 'The window shrinks to 40 floats, 5 lines, with a 4-line LRU L1. What happens to L1 on later passes?',
+		options: [
+			'It keeps 4 of the 5 lines, so 4 in 5 lines hit',
+			'It hits every line after the first pass',
+			'It misses the first access to every line on every pass',
+			'It hits only the first line of each pass',
+		],
+		answer: 2,
+		why: 'LRU evicts each line just before the loop returns to it. A loop one line bigger than the cache gets no reuse from it at all; the lines are found in L2 instead.',
+	},
+	{
+		q: 'In Triton, how does a kernel ask for a load to be treated as streaming, read once?',
+		options: [
+			'`tl.load(ptr, eviction_policy="evict_last")`',
+			'`tl.load(ptr, cache_modifier=".ca")`',
+			'`tl.load(ptr, volatile=True)`',
+			'`tl.load(ptr, eviction_policy="evict_first")`',
+		],
+		answer: 3,
+		why: '`evict_first` marks data to evict first, which maps to the PTX eviction hint. `evict_last` is for data that should stay, like the shared table `w` in the chapter.',
+	},
+] satisfies Question[];

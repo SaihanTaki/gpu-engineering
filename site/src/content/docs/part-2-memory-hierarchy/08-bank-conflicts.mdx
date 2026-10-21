@@ -12,6 +12,8 @@ import { BANKS, BANK_BYTES } from '@sims/bank-grid/model';
 import cuda from '@kernels/ch08-bank-conflicts/cuda/row_sums.cu?raw';
 import numba from '@kernels/ch08-bank-conflicts/numba/row_sums.py?raw';
 import triton from '@kernels/ch08-bank-conflicts/triton/row_sums.py?raw';
+import Quiz from '@components/Quiz.astro';
+import quiz from '@quizzes/08-bank-conflicts';
 
 Here are two declarations of a shared memory tile:
 
@@ -307,6 +309,10 @@ column reads, so the plain kernel's shared load wavefronts should be close to 32
 times the padded kernel's. The swizzled kernel should match the padded one.
 
 </details>
+
+## Quiz
+
+<Quiz questions={quiz} />
 
 ## Further reading
 

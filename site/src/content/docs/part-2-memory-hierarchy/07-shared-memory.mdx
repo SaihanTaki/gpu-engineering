@@ -15,6 +15,8 @@ import cuda from '@kernels/ch07-shared-memory/cuda/matmul.cu?raw';
 import numba from '@kernels/ch07-shared-memory/numba/matmul.py?raw';
 import triton from '@kernels/ch07-shared-memory/triton/matmul.py?raw';
 import sharedOps from '@kernels/ch07-shared-memory/generated/shared_ops.txt?raw';
+import Quiz from '@components/Quiz.astro';
+import quiz from '@quizzes/07-shared-memory';
 
 export const a100 = gpuById('a100');
 export const big = gridTotals({ mode: 'shared', n: 1024, tile: 16 });
@@ -328,6 +330,10 @@ even though its 32 KB of tiles would fit. Going further needs each thread to
 compute more than one output.
 
 </details>
+
+## Quiz
+
+<Quiz questions={quiz} />
 
 ## Further reading
 
