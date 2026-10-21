@@ -1,5 +1,5 @@
 import { gpuById, type GpuSpec } from '@sim-core/gpu-specs';
-import { clockGhz, PEAK_FP32_TFLOPS } from '../transpose/model';
+import { clockGhz } from '../transpose/model';
 
 /**
  * The GEMM kernels of chapter 20, C = A * B with square M = N = K float32
@@ -212,7 +212,7 @@ export interface Analysis {
 	res: Resources;
 }
 
-export const peakGflops = (g: GpuSpec) => PEAK_FP32_TFLOPS[g.id] * 1000;
+export const peakGflops = (g: GpuSpec) => g.peakFp32Tflops * 1000;
 
 export function analyze(g: GpuSpec, size: number, s: StepId, t: Tile): Analysis {
 	const K = size;
