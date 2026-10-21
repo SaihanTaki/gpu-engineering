@@ -5,9 +5,9 @@ export default [
 		q: 'Why can a pageable host buffer not be the source of the GPU copy engine DMA directly?',
 		options: [
 			'Pageable memory is too slow for PCIe',
-			'The operating system may move or swap the page in the middle of the transfer',
+			'The operating system may move or swap the page during the transfer',
 			'DMA can only read memory allocated by `cudaMalloc`',
-			'Pageable pages are larger than the DMA engine can handle',
+			'Pageable pages are larger than the DMA engine can handle in one transfer',
 		],
 		answer: 1,
 		why: 'DMA works on physical addresses with no CPU involved, so the page must stay put. Pinned memory is page-locked for exactly that reason.',
@@ -15,9 +15,9 @@ export default [
 	{
 		q: 'What does the driver do when you `cudaMemcpy` from a pageable buffer to the device?',
 		options: [
-			'It pins the buffer for the duration of the copy and unpins it afterwards',
+			'It pins the buffer for the duration of the copy and unpins it again afterwards',
 			'It maps the buffer so the kernel reads it over PCIe',
-			'It copies the data with the CPU into a pinned staging buffer, and the DMA reads from there',
+			'It copies the data with the CPU into a pinned staging buffer for the DMA',
 			'It migrates the pages on demand when the kernel touches them',
 		],
 		answer: 2,
@@ -57,7 +57,7 @@ export default [
 			'The page migrates to the GPU on the first access and stays there',
 			'The access goes over PCIe to host memory, with nothing copied in advance',
 			'The driver copies the whole buffer before the kernel starts',
-			'The access is served from a copy in L2 kept coherent with the host',
+			'The access is served from a copy in L2 that is kept coherent with the host',
 		],
 		answer: 1,
 		why: 'The data never moves closer to the GPU, which is why the guide says mapped memory is not a performant alternative to unified memory. It suits data touched once, in a coalesced pattern.',
@@ -98,9 +98,9 @@ export default [
 	{
 		q: 'A program calls `cudaMallocManaged` and then fills the array on the CPU with `x[i] = i`. Where are the pages?',
 		options: [
-			'In GPU memory, where `cudaMallocManaged` allocated them',
+			'In GPU memory, since that is where `cudaMallocManaged` allocated them',
 			'Half in CPU RAM and half in GPU memory',
-			'In CPU RAM, because a page gets physical memory where it is first touched',
+			'In CPU RAM, because pages get memory where they are first touched',
 			'Nowhere yet, until a kernel reads them',
 		],
 		answer: 2,
@@ -115,13 +115,13 @@ export default [
 	{
 		q: 'How much data does one GPU page fault move in practice?',
 		options: [
-			'NVIDIA does not document it; the driver groups faults and prefetches by its own heuristics',
-			'Exactly one 4 KiB page',
-			'Exactly one 2 MiB page',
-			'Always 896 KB',
+			'It is not documented; the driver uses its own heuristics',
+			'Exactly one 4 KiB page, the system page size on x86-64',
+			'Exactly one 2 MiB page, the managed page size on the GPU',
+			'Always 896 KB, the chunk size measured in 2017',
 		],
 		answer: 0,
-		why: 'The 896 KB figure came from one test system in 2017, with a warning that the heuristics might change. The simulation assumes one 2 MiB page per fault and says so.',
+		why: 'The driver groups faults and prefetches by heuristics NVIDIA does not document. The 896 KB figure came from one test system in 2017, with a warning that the heuristics might change. The simulation assumes one 2 MiB page per fault and says so.',
 	},
 	{
 		q: 'In the simulation, managed on-demand mode runs with 12 pages. How many faults does the run take?',
@@ -146,19 +146,19 @@ export default [
 		options: [
 			'It assumes the staging buffer is as large as the array',
 			'It counts each page fault twice',
-			'It charges the staging copy at the PCIe rate with no overlap, and real drivers overlap part of it',
+			'It assumes the driver hides none of the staging copy',
 			'It ignores the kernel time',
 		],
 		answer: 2,
-		why: 'The data crosses CPU memory once more before PCIe. NVIDIA does not document how much of that the driver hides, so the model assumes none of it.',
+		why: 'The data crosses CPU memory once more before PCIe. NVIDIA does not document how much of that the driver hides, so the model charges the staging copy at the PCIe rate with no overlap, while real drivers overlap part of it.',
 	},
 	{
 		q: 'CUDA 12 code calls `cudaMemPrefetchAsync(x, bytes, device, stream)`. What happens when it is built against CUDA 13?',
 		options: [
-			'It compiles and prefetches to device 0',
-			'It does not compile, because the location is now a `cudaMemLocation` struct',
+			'It compiles and prefetches to device 0, the default location',
+			'It does not compile; the location is now a `cudaMemLocation` struct',
 			'It compiles but the prefetch is ignored',
-			'It compiles and treats `device` as a flags value',
+			'It compiles and silently treats `device` as the new flags value',
 		],
 		answer: 1,
 		why: 'In CUDA 13 the location is a struct with `type` and `id`, and `flags` comes after it and must be 0. Code that passes an `int` device does not compile.',
@@ -168,7 +168,7 @@ export default [
 		options: [
 			'The kernel reads stale data',
 			'The kernel fails with an illegal address error',
-			'The prefetch is cancelled and the data stays on the host',
+			'The prefetch is cancelled, and the kernel reads the data from the host',
 			'The accesses stay correct; prefetching is only a performance hint',
 		],
 		answer: 3,
@@ -211,7 +211,7 @@ export default [
 		q: 'You run the program under `nsys` with `--cuda-um-gpu-page-faults=true`. Which numbers from that run can you trust?',
 		options: [
 			'The fault counts and migration sizes, but not the times',
-			'The times, but not the fault counts',
+			'The times, but not the fault counts or migration sizes',
 			'Both the times and the fault counts',
 			'Neither, the trace only shows kernel launches',
 		],

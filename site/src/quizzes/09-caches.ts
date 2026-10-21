@@ -15,9 +15,9 @@ export default [
 	{
 		q: 'What makes constant memory fast when it is fast?',
 		options: [
-			'It is stored on chip next to the registers',
+			'It is stored on chip in each SM, next to the register file',
 			'It bypasses L2 and reads DRAM directly',
-			'It lives in device memory, with a small cache in front of it on each SM',
+			'It lives in device memory, behind a small cache on each SM',
 			'It is copied into shared memory at kernel launch',
 		],
 		answer: 2,
@@ -32,10 +32,10 @@ export default [
 	{
 		q: 'A kernel uses only 28 registers, yet its 16-entry array `bins` ends up in local memory because of `bins[key % 16]++`. Why?',
 		options: [
-			'The array is larger than the register limit of 255',
+			'The array is larger than the per-thread register limit of 255',
 			'The kernel was compiled with a register cap',
-			'Arrays are always placed in local memory',
-			'Registers have no addresses, so an array indexed by data needs real memory',
+			'Arrays are always placed in local memory, whatever their size',
+			'Registers have no addresses, and the index depends on data',
 		],
 		answer: 3,
 		why: 'The compiler cannot prove the index is a constant, so it cannot map each entry to a fixed register. This is not a spill; there is no register shortage.',
@@ -77,8 +77,8 @@ export default [
 	{
 		q: 'The PTX of `mirror_capped` has no `ld.local` or `st.local`, yet `ptxas` reports spills. Why?',
 		options: [
-			'Spills appear only when `ptxas` assigns registers, after the PTX is written',
-			'The spills go to shared memory, which PTX does not show',
+			'Spills are added later, when `ptxas` assigns registers',
+			'The spills go to shared memory, which the PTX listing does not show',
 			'The PTX was generated without the `.maxnreg` line',
 			'`ptxas` reports spills that the hardware later removes',
 		],
@@ -88,8 +88,8 @@ export default [
 	{
 		q: 'All 32 threads of a warp spill the same variable. How well does that local memory access coalesce?',
 		options: [
-			'Not at all, each thread hits a different 128-byte line',
-			'Fully, because consecutive thread IDs access consecutive 32-bit words',
+			'Not at all, because each thread hits a different 128-byte line',
+			'Fully, since consecutive threads access consecutive words',
 			'Only if the spill happens inside a loop',
 			'Half, because spills are 64-bit',
 		],
@@ -112,8 +112,8 @@ export default [
 		q: 'The Numba `poly_constant` uses `cuda.const.array_like(COEF)`, but its PTX has no `ld.const`. Why?',
 		options: [
 			'Numba places constant arrays in shared memory',
-			'NVVM unrolled the loop and wrote the known coefficients into the instructions as immediates',
-			'Numba loads constant arrays with `ld.global.nc`',
+			'NVVM unrolled the loop and wrote the coefficients in as immediates',
+			'Numba loads constant arrays through the read-only path with `ld.global.nc`',
 			'The kernel reads the coefficients from local memory',
 		],
 		answer: 1,
@@ -122,7 +122,7 @@ export default [
 	{
 		q: 'Which two source changes ask for the read-only data path in CUDA C++?',
 		options: [
-			'`__constant__` and `cudaMemcpyToSymbol`',
+			'`__constant__` and `cudaMemcpyToSymbol(c_coef, ...)`',
 			'`__shared__` and `__syncthreads()`',
 			'`volatile` and `__threadfence()`',
 			'`__ldg(&p[i])` and `const float *__restrict__ p`',
@@ -145,8 +145,8 @@ export default [
 		q: 'Each thread reads `w[threadIdx.x]` from a small table that no thread writes. Which choice fits best?',
 		options: [
 			'Constant memory, because the table is small',
-			'Local memory, because each thread reads its own entry',
-			'The read-only path, because the threads read different addresses near each other',
+			'Local memory, because each thread reads only its own entry of the table',
+			'The read-only path, because nearby threads read nearby addresses',
 			'Mapped host memory, because the table never changes',
 		],
 		answer: 2,
@@ -187,7 +187,7 @@ export default [
 			'It keeps 4 of the 5 lines, so 4 in 5 lines hit',
 			'It hits every line after the first pass',
 			'It misses the first access to every line on every pass',
-			'It hits only the first line of each pass',
+			'It hits only the first line of each pass and misses the rest',
 		],
 		answer: 2,
 		why: 'LRU evicts each line just before the loop returns to it. A loop one line bigger than the cache gets no reuse from it at all; the lines are found in L2 instead.',
