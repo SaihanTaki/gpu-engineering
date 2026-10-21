@@ -3,8 +3,6 @@ title: 0.2 The GPU software stack
 description: What happens between the kernel you write and the instructions a GPU runs, from nvcc, PTX and SASS to the driver, and where Numba and Triton fit.
 sidebar:
   order: 2
-banner:
-  content: Draft chapter. If something is wrong or unclear, use the edit link at the bottom of the page.
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -15,7 +13,7 @@ import numba from '@kernels/ch0-2-software-stack/numba/saxpy.py?raw';
 import triton from '@kernels/ch0-2-software-stack/triton/saxpy.py?raw';
 
 A program built for an A100 years ago can run on an H100, a GPU that did not
-exist when it was compiled. A Python function decorated with `@triton.jit`
+exist when it was compiled, if the program carries PTX. A Python function decorated with `@triton.jit`
 runs on the GPU without you ever calling a compiler. Neither works by magic.
 Both depend on a layer between your source code and the hardware that most
 people never look at.
@@ -84,8 +82,10 @@ The two kinds of code age differently:
 - **A cubin runs on its own major version only.** A cubin for compute
   capability 8.6 runs on GPUs with compute capability 8.6 or 8.9, but not on
   8.0, whose minor version is lower, and not on 9.0, a different major version.
-- **PTX runs on anything newer.** PTX for `compute_80` can be compiled for
-  `sm_90`, `sm_120` or any later GPU.
+- **Plain PTX runs on anything newer.** PTX for `compute_80` can be compiled
+  for `sm_90`, `sm_120` or any later GPU. Arch-specific PTX such as
+  `compute_90a` and family-specific PTX such as `compute_100f` do not carry
+  forward this way.
 
 That second rule is what keeps the old A100 program working on an H100.
 
@@ -246,7 +246,7 @@ space do its `ld.f32` instructions use, and what do they become in SASS?
 <details>
 <summary>Answer</summary>
 
-None is written, so PTX uses generic addressing: a generic address goes to
+No state space is written, so PTX uses generic addressing: a generic address goes to
 global memory unless it falls in the window of shared, local or constant
 memory. In the SASS they are
 `LD.E`, the generic load. The Triton kernel's `ld.global.b32` become `LDG.E`,

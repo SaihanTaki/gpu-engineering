@@ -3,8 +3,6 @@ title: 1. GPU architecture
 description: What is physically inside an NVIDIA GPU, from the whole chip down to one SM partition, and why it is built for many slow threads instead of a few fast ones.
 sidebar:
   order: 1
-banner:
-  content: Draft chapter. If something is wrong or unclear, use the edit link at the bottom of the page.
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -97,7 +95,7 @@ last step to see it.
 
 ## How this connects to your code
 
-Chapter 2 introduced blocks of threads. Here is where they go:
+Chapter 2 introduces blocks of threads. Here is where they go:
 
 - A block runs on one SM and does not move while it runs. Its threads can use
   that SM's shared memory and wait for each other. By default, threads in
@@ -154,7 +152,8 @@ print("L2 cache:", p.L2_cache_size // 2**20, "MB")
 print("Memory:", p.total_memory // 2**30, "GB")
 ```
 
-Both work inside the course Docker image.
+Both work inside the course Docker image when the container is started with
+GPU access (`--gpus all`).
 
 ## Exercises
 
