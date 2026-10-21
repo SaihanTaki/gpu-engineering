@@ -1,0 +1,196 @@
+import type { Question } from './types';
+
+export default [
+	{
+		q: 'In the model, at most what share of the A100 FP32 peak of 19.5 TFLOPS can an FP32 vector add reach?',
+		options: ['About 50%, since an add is half an FMA', 'About 8.7%', 'About 0.87%', 'Close to 100% with enough threads in flight'],
+		answer: 2,
+		why: 'At 1/12 FLOP/byte and 2,039 GB/s it reaches about 170 GFLOPS, 0.87% of the peak. The half-an-FMA argument is a real limit for add-only code, but bandwidth caps this kernel far below it.',
+	},
+	{
+		q: 'A kernel does only FP32 adds and never an FMA. Even with no memory limit, what share of the FP32 peak can it reach?',
+		options: ['Half', 'All of it', 'A quarter', 'One thirty-second'],
+		answer: 0,
+		why: 'The peak assumes every lane issues an FMA every clock, and one FMA counts as 2 FLOPs. An add is 1 FLOP per issue, so half is the best case. One thirty-second is the T4 FP64 ratio, not an add rule.',
+	},
+	{
+		q: 'The T4 datasheet gives no FP64 figure. Where does the 0.25 TFLOPS in the table come from?',
+		options: [
+			'Half of the dense FP16 tensor figure',
+			'1/2 of the 8.1 TFLOPS FP32 rate, as on the A100',
+			'The INT8 figure divided by the bandwidth',
+			'1/32 of the 8.1 TFLOPS FP32 rate, from the Turing whitepaper',
+		],
+		answer: 3,
+		why: 'The Turing whitepaper says FP64 runs at 1/32 of FP32, and 8.1 / 32 is about 0.25. The CUDA Programming Guide agrees: 2 FP64 results per clock per SM against 64 FP32 on compute capability 7.5.',
+	},
+	{
+		q: 'Why does the table halve the tensor figures printed on the H100 product page?',
+		options: [
+			'The page quotes two GPUs together',
+			'The page prints only figures with sparsity, which assume two of every four values are zero',
+			'The page quotes FP16 accumulation, which runs at twice the FP32 accumulation rate',
+			'The page quotes base clock, which is half of boost',
+		],
+		answer: 1,
+		why: 'Sparse figures are double the dense ones. An ordinary matrix multiply can only reach the dense rate, so the table halves them. On these data center GPUs FP16 and FP32 accumulation run at the same rate.',
+	},
+	{
+		q: 'When counting bytes for arithmetic intensity, a kernel reads a value twice and the second read is served from L2. How often does it count?',
+		options: ['Twice, once per load instruction', 'Zero times, since L2 is on chip', 'Once', 'Once per warp that reads it'],
+		answer: 2,
+		why: 'Bytes are counted at DRAM, the traffic between the chip and its memory. The first read crosses that boundary, the second does not.',
+	},
+	{
+		q: 'Which of these counts toward the FLOPs in arithmetic intensity?',
+		options: [
+			'The multiply-adds of the algorithm',
+			'The integer math that computes array addresses',
+			'The loop counter increments',
+			'Every instruction in the compiled SASS',
+		],
+		answer: 0,
+		why: 'Count the useful floating-point operations of the algorithm, not the instructions the compiler emits. Address math and loop counters use issue slots but are not FLOPs.',
+	},
+	{
+		q: 'An N x N FP32 GEMM that moves each matrix once has intensity N / 6. What is it for N = 1,536?',
+		options: ['128 FLOP/byte', '512 FLOP/byte', '1,536 FLOP/byte', '256 FLOP/byte'],
+		answer: 3,
+		why: '2N^3 FLOPs over 12N^2 bytes is N / 6, and 1,536 / 6 = 256. The intensity grows with N, unlike a vector add.',
+	},
+	{
+		q: 'What is the FP32 ridge point of the A100 SXM4 80 GB, 19.5 TFLOPS over 2,039 GB/s?',
+		options: ['About 0.105 FLOP/byte', 'About 9.56 FLOP/byte', 'About 19.5 FLOP/byte', 'About 153 FLOP/byte'],
+		answer: 1,
+		why: 'Ridge = peak / bandwidth = 19.5e12 / 2.039e12, about 9.56. 0.105 is the inverse, and 153 is the ridge for the FP16 tensor roof.',
+	},
+	{
+		q: 'The T4 has the lowest FP32 peak of the three GPUs. How does its FP32 ridge compare with the A100 one?',
+		options: [
+			'Lower, because its peak is lower',
+			'The same, because both are FP32',
+			'Higher, about 27 against 9.56, because its bandwidth is much lower',
+			'Undefined, because the T4 has no TF32 roof',
+		],
+		answer: 2,
+		why: 'The ridge is peak over bandwidth: 8.1 TFLOPS over 300 GB/s is 27. The low bandwidth matters more than the low peak, so the T4 needs the most reuse per byte.',
+	},
+	{
+		q: 'Switching the A100 roof from FP32 to FP16 tensor moves the ridge from about 9.56 to about 153 FLOP/byte. Why?',
+		options: [
+			'FP16 data halves the bytes of every kernel',
+			'Tensor cores raise the peak and leave the bandwidth where it was',
+			'Tensor cores read data through a faster memory path',
+			'The tensor roof counts an FMA as 32 FLOPs',
+		],
+		answer: 1,
+		why: 'The ridge is peak over bandwidth. The peak goes from 19.5 to 312 TFLOPS with the same 2,039 GB/s, so a kernel needs far more reuse per byte to be compute-bound.',
+	},
+	{
+		q: 'A kernel sits well left of the ridge. Which change can make it faster in the model?',
+		options: [
+			'Replacing divisions with cheaper multiplies',
+			'Moving its work to the tensor cores',
+			'Raising the clock of the arithmetic units',
+			'Moving fewer bytes per FLOP',
+		],
+		answer: 3,
+		why: 'Left of the ridge the kernel is memory-bound: its time is bytes over bandwidth. Cheaper or faster arithmetic does nothing. Fewer bytes per FLOP moves it right and up the slope.',
+	},
+	{
+		q: 'In the simulation, the default kernel is 2^30 FLOPs over 2^32 bytes. You double the FLOPs. What happens?',
+		options: [
+			'The point moves right along the slope and the modeled time stays the same',
+			'The point moves up to the flat roof',
+			'The modeled time doubles',
+			'The point moves left, because intensity falls',
+		],
+		answer: 0,
+		why: 'Intensity goes from 0.25 to 0.5 FLOP/byte, still on the slope. The time is set by the bytes, which did not change. 0.5 is still far from the ridge.',
+	},
+	{
+		q: 'A memory-bound kernel moves from the A100 (2,039 GB/s, 19.5 TFLOPS FP32) to the H100 (3,350 GB/s, 67 TFLOPS FP32). How much faster is it in the model?',
+		options: ['About 3.4 times, the FP32 peak ratio', 'Not faster at all', 'About 1.6 times, the bandwidth ratio', 'About 2.5 times, the average of both ratios'],
+		answer: 2,
+		why: 'On the slope, attainable = AI x bandwidth. The speedup is 3,350 / 2,039, about 1.64. The FLOPs ratio only matters right of the ridge.',
+	},
+	{
+		q: 'Chapter 12 fused relu(a*x + y) into one kernel. The unfused version does the same 3 operations with 28 bytes, the fused one with 12. What is the unfused intensity?',
+		options: ['About 0.107 FLOP/byte', '0.25 FLOP/byte', 'About 0.333 FLOP/byte', 'About 2.33 FLOP/byte'],
+		answer: 0,
+		why: '3 / 28 is about 0.107. The fused kernel has 3 / 12 = 0.25. 2.33 is the ratio between the two, 28 / 12, not an intensity.',
+	},
+	{
+		q: 'Where does the chapter 11 transpose belong on the roofline chart?',
+		options: [
+			'On the flat roof, since it moves no data twice',
+			'Nowhere on a FLOP roofline: it does no arithmetic, so it is judged in GB/s against the bandwidth',
+			'At 0.25 FLOP/byte, like the sum reduction',
+			'Right of the ridge, since it uses shared memory',
+		],
+		answer: 1,
+		why: 'Zero FLOPs gives zero intensity, which a log axis cannot show. Chapter 11 measured it in GB/s, which is the slope of this chart read in bytes.',
+	},
+	{
+		q: 'A tiled FP32 GEMM has intensity T / 4 for T x T tiles. What is it for 16 x 16 tiles?',
+		options: ['2 FLOP/byte', '8 FLOP/byte', '16 FLOP/byte', '4 FLOP/byte'],
+		answer: 3,
+		why: '16 / 4 = 4. Each tile of A and B is loaded once and used T times. 8 is the 32 x 32 case, which is still just left of the A100 FP32 ridge.',
+	},
+	{
+		q: 'The same GEMM runs with FP16 data on the A100 tensor cores instead of FP32 on the CUDA cores. What happens to its intensity and its roof?',
+		options: [
+			'Intensity halves and the roof is 16 times higher',
+			'Intensity doubles and the roof is 16 times higher',
+			'Intensity stays the same and the roof doubles',
+			'Intensity doubles and the roof stays at 19.5 TFLOPS',
+		],
+		answer: 1,
+		why: 'Half the bytes per value doubles the FLOPs per byte, and 312 / 19.5 = 16 for the roof. Precision moves both axes.',
+	},
+	{
+		q: 'Why does the chapter roofline chart have only a DRAM slope and no L1 or L2 slopes?',
+		options: [
+			'NVIDIA datasheets do not list L1 or L2 bandwidth',
+			'L1 and L2 are never the limit for a GPU kernel',
+			'L1 and L2 have the same bandwidth as DRAM',
+			'A hierarchical roofline only exists for CPUs',
+		],
+		answer: 0,
+		why: 'The chart uses datasheet figures, and those give no cache bandwidth. Nsight Compute hierarchical roofline sections draw L1, L2 and DRAM ceilings for the GPU you profile on.',
+	},
+	{
+		q: 'In a hierarchical roofline, how do the L1 and DRAM intensities of a tiled GEMM compare?',
+		options: [
+			'They are equal, since FLOPs do not change',
+			'L1 intensity is high and DRAM intensity is low',
+			'L1 intensity is low and DRAM intensity is high',
+			'Both are below the vector add',
+		],
+		answer: 2,
+		why: 'It moves many bytes between shared memory and registers and few between DRAM and L2. Same FLOPs, more bytes at L1, so lower intensity there.',
+	},
+	{
+		q: 'The roofline helper in the chapter runs `roofline(3 * n, 3 * 4 * n, 19.5, 2039)` for the fused kernel. What does it return?',
+		options: ["(0.25, 19.5, 'compute')", "(0.25, 0.50975, 'memory')", "(4.0, 8.156, 'memory')", "(0.25, 509.75, 'memory')"],
+		answer: 1,
+		why: 'AI = 3n / 12n = 0.25. Attainable = min(19.5, 0.25 x 2039 / 1000) = 0.50975 TFLOPS. 509.75 forgets the divide by 1000 that turns GFLOPS into TFLOPS.',
+	},
+	{
+		q: 'Nsight Compute measures a DRAM intensity higher than your paper count. What does that suggest?',
+		options: [
+			'Uncoalesced accesses added extra traffic',
+			'The kernel did more FLOPs than the algorithm needs',
+			'The profiler counted FMAs as 1 FLOP',
+			'The caches served some of the bytes you counted',
+		],
+		answer: 3,
+		why: 'Fewer DRAM bytes than counted means higher intensity, so caches caught some reads. Extra traffic such as uncoalesced accesses would push the measured intensity lower.',
+	},
+	{
+		q: 'Which `ncu` section draws the overview roofline chart?',
+		options: ['`SpeedOfLight_RooflineChart`', '`MemoryWorkloadAnalysis`', '`Occupancy`', '`LaunchStats`'],
+		answer: 0,
+		why: 'The chapter collects `SpeedOfLight_RooflineChart` plus `SpeedOfLight_HierarchicalSingleRooflineChart` for the single-precision hierarchical chart. The others answer different questions.',
+	},
+] satisfies Question[];

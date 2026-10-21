@@ -8,6 +8,8 @@ sidebar:
 import Roofline from '@sims/roofline/Roofline.astro';
 import { gpuById } from '@sim-core/gpu-specs';
 import { attainable, evaluate, fmtNum, PRESETS, presetAi, ridge } from '@sims/roofline/model';
+import Quiz from '@components/Quiz.astro';
+import quiz from '@quizzes/19-roofline';
 
 export const t4 = gpuById('t4');
 export const a100 = gpuById('a100');
@@ -349,6 +351,10 @@ arithmetic to spare; in practice extra instructions can still cost a little
 if they lengthen the loop between loads.
 
 </details>
+
+## Quiz
+
+<Quiz questions={quiz} />
 
 ## Further reading
 

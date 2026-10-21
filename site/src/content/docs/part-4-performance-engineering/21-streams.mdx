@@ -12,6 +12,8 @@ import { gpuById } from '@sim-core/gpu-specs';
 import { DEFAULTS, fmtTime, fmtX, summary } from '@sims/stream-timeline/model';
 import cuda from '@kernels/ch21-streams/cuda/streams.cu?raw';
 import numba from '@kernels/ch21-streams/numba/streams.py?raw';
+import Quiz from '@components/Quiz.astro';
+import quiz from '@quizzes/21-streams';
 
 export const a100 = gpuById('a100');
 export const t4 = gpuById('t4');
@@ -509,6 +511,10 @@ making `s[0]` wait for them with `cudaStreamWaitEvent` before recording
 `stop`, as the Numba program does.
 
 </details>
+
+## Quiz
+
+<Quiz questions={quiz} />
 
 ## Further reading
 

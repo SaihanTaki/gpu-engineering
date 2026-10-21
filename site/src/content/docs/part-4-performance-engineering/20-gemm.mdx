@@ -14,6 +14,8 @@ import cuda from '@kernels/ch20-gemm/cuda/gemm_kernels.cuh?raw';
 import numba from '@kernels/ch20-gemm/numba/gemm.py?raw';
 import triton from '@kernels/ch20-gemm/triton/gemm.py?raw';
 import summary from '@kernels/ch20-gemm/generated/summary.txt?raw';
+import Quiz from '@components/Quiz.astro';
+import quiz from '@quizzes/20-gemm';
 
 export const a100 = gpuById('a100');
 export const t4 = gpuById('t4');
@@ -425,6 +427,10 @@ how the tiles share the L2 cache. Only timing them tells you, which is what an a
 does.
 
 </details>
+
+## Quiz
+
+<Quiz questions={quiz} />
 
 ## Further reading
 

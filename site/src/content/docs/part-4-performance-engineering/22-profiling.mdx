@@ -13,6 +13,8 @@ import cuda from '@kernels/ch22-profiling/cuda/bugs_kernels.cuh?raw';
 import numba from '@kernels/ch22-profiling/numba/bugs.py?raw';
 import triton from '@kernels/ch22-profiling/triton/bugs.py?raw';
 import racyPtx from '@kernels/ch22-profiling/generated/count_racy.ptx?raw';
+import Quiz from '@components/Quiz.astro';
+import quiz from '@quizzes/22-profiling';
 
 export const final = (threads, mode, preset) => {
 	const c = { threads, mode, preset, custom: [] };
@@ -508,6 +510,10 @@ Statistics for the stall reason that dominates; long scoreboard stalls with
 low memory throughput mean too few loads in flight to hide the latency.
 
 </details>
+
+## Quiz
+
+<Quiz questions={quiz} />
 
 ## Further reading
 
